@@ -1,10 +1,11 @@
 import argparse
 from datetime import datetime
+import hvac  # Import Hashicorp Vault library
 import json
-import threading
 import os
 import queue
-import hvac  # Import Hashicorp Vault library
+import threading
+import time
 
 DEBUG = False
 
@@ -18,6 +19,9 @@ HVAC_TIMEOUT = 3
 # Define number of worker threads
 WORKER_THREADS = 4
 
+RATE_LIMIT_BATCH_SIZE = 10
+RATE_LIMIT_SLEEP_SECONDS = 3
+RATE_LIMIT_DISABLED = False
 
 def traverse_namespace(namespace_path, path_queue):
     """
@@ -26,15 +30,18 @@ def traverse_namespace(namespace_path, path_queue):
     namespace_path: Path of the namespace to traverse.
     path_queue: Queue object to store child paths.
     """
-    try:
-        print("Processing namespace: ", namespace_path)
-        vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN, namespace=namespace_path, timeout=HVAC_TIMEOUT)
-        namespaces = vault_client.sys.list_namespaces()
 
+    global global_error_counter
+
+    try:
         if namespace_path == "":
             key_path = "/"
         else:
             key_path = namespace_path
+
+        print("Processing namespace: ", key_path)
+        vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN, namespace=namespace_path, timeout=HVAC_TIMEOUT)
+        namespaces = vault_client.sys.list_namespaces()
 
         # Add namespaces, auth methods and secrets engines data to global dictionary
         global_namespaces[key_path] = namespaces
@@ -49,11 +56,12 @@ def traverse_namespace(namespace_path, path_queue):
             for child_namespace in namespaces["data"]["key_info"]:
                 child_namespace_path = f"{namespace_path}{child_namespace}"
                 path_queue.put(child_namespace_path)
-    except hvac.exceptions.InvalidPath as e:  # Ignore if no child namespaces
+    except hvac.exceptions.InvalidPath as e:  # Ignore path error if no child namespaces
         pass
     except hvac.exceptions.VaultError as e:
         print(f"Error traversing path {namespace_path}: {e}")
-
+        with global_thread_lock:
+            global_error_counter += 1
 
 def write_to_file():
     namespace_json_filename = 'namespaces-{}.json'.format(datetime.now().strftime("%Y%m%d"))
@@ -74,12 +82,24 @@ def worker(path_queue):
     """
     Worker thread that retrieves paths from the queue and traverses them.
     """
+    global global_counter
+
     while True:
         namespace_path = path_queue.get()
         if namespace_path is None:
             break
         traverse_namespace(namespace_path, path_queue)
         path_queue.task_done()
+
+        # Rate limit requests
+        with global_thread_lock:
+            global_counter += 1
+            if DEBUG:
+                print("global_counter: ", global_counter, "namespace_path: ", namespace_path)
+
+            if not RATE_LIMIT_DISABLED and global_counter % RATE_LIMIT_BATCH_SIZE == 0:
+                print(f"Rate limiting - sleep: {RATE_LIMIT_SLEEP_SECONDS} seconds, batch size: {RATE_LIMIT_BATCH_SIZE}")
+                time.sleep(RATE_LIMIT_SLEEP_SECONDS)
 
 
 def main():
@@ -122,19 +142,24 @@ def main():
 
     write_to_file()
 
-    print("\nNamespace traversal complete!")
+    print(f"\nNamespace traversal complete: {global_counter} paths processed, {global_error_counter} errors")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Audit vault cluster namespaces')
     parser.add_argument('-d', '--debug', default=False, action=argparse.BooleanOptionalAction,
                         help='Print the debug output')
+    parser.add_argument('-f', '--fast', default=False, action=argparse.BooleanOptionalAction,
+                        help='Disable rate limiting')
     parser.add_argument('-n', '--namespace', type=str, help='namespace path to audit (default: root)')
 
     args = parser.parse_args()
 
     if args.debug:
         DEBUG = True
+
+    if args.fast:
+        RATE_LIMIT_DISABLED = True
 
     if args.namespace:
         NAMESPACE_PATH = args.namespace
@@ -152,5 +177,13 @@ if __name__ == "__main__":
 
     # auth dictionary to store output
     global_secret_engines = {}
+
+    # counter to rate limit requests
+    global_counter = 0
+
+    # counter to log errors
+    global_error_counter = 0
+
+    global_thread_lock = threading.Lock()
 
     main()
