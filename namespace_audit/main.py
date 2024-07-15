@@ -1,13 +1,12 @@
 import argparse
 from datetime import datetime
 import hvac  # Import Hashicorp Vault library
+import logging
 import json
 import os
 import queue
 import threading
 import time
-
-DEBUG = False
 
 # Define Vault connection parameters from environment variables
 VAULT_ADDR = os.environ.get('VAULT_ADDR')
@@ -19,9 +18,12 @@ HVAC_TIMEOUT = 3
 # Define number of worker threads
 WORKER_THREADS = 4
 
-RATE_LIMIT_BATCH_SIZE = 10
+RATE_LIMIT_BATCH_SIZE = 100
 RATE_LIMIT_SLEEP_SECONDS = 3
-RATE_LIMIT_DISABLED = False
+RATE_LIMIT_DISABLE = False
+
+logger = logging.getLogger(__name__)
+
 
 def traverse_namespace(namespace_path, path_queue):
     """
@@ -31,6 +33,7 @@ def traverse_namespace(namespace_path, path_queue):
     path_queue: Queue object to store child paths.
     """
 
+    global global_counter
     global global_error_counter
 
     try:
@@ -39,17 +42,15 @@ def traverse_namespace(namespace_path, path_queue):
         else:
             key_path = namespace_path
 
-        print("Processing namespace: ", key_path)
+        logging.info(f"Processing namespace ({global_counter}): {key_path}")
         vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN, namespace=namespace_path, timeout=HVAC_TIMEOUT)
         namespaces = vault_client.sys.list_namespaces()
+        logging.debug(json.dumps(namespaces, indent=2))
 
         # Add namespaces, auth methods and secrets engines data to global dictionary
         global_namespaces[key_path] = namespaces
         global_auth_methods[key_path] = vault_client.sys.list_auth_methods()
         global_secret_engines[key_path] = vault_client.sys.list_mounted_secrets_engines()
-
-        if DEBUG:
-            print(json.dumps(namespaces, indent=2))
 
         # Add child namespace paths to the queue
         if namespaces and "data" in namespaces and "key_info" in namespaces["data"]:
@@ -59,15 +60,16 @@ def traverse_namespace(namespace_path, path_queue):
     except hvac.exceptions.InvalidPath as e:  # Ignore path error if no child namespaces
         pass
     except hvac.exceptions.VaultError as e:
-        print(f"Error traversing path {namespace_path}: {e}")
+        logging.error(f"Error traversing path {namespace_path}: {e}")
         with global_thread_lock:
             global_error_counter += 1
 
-def write_to_file():
-    namespace_json_filename = 'namespaces-{}.json'.format(datetime.now().strftime("%Y%m%d"))
-    auth_json_filename = 'auth-methods-{}.json'.format(datetime.now().strftime("%Y%m%d"))
-    secrets_json_filename = 'secrets-engines-{}.json'.format(datetime.now().strftime("%Y%m%d"))
 
+def write_to_file(cluster_name):
+    namespace_json_filename = f'{cluster_name}-namespaces-{datetime.now().strftime("%Y%m%d")}.json'
+    auth_json_filename = f'{cluster_name}-auth-methods-{datetime.now().strftime("%Y%m%d")}.json'
+    secrets_json_filename = f'{cluster_name}-secrets-engines-{datetime.now().strftime("%Y%m%d")}.json'
+    logging.info(f"Writing output to files: {namespace_json_filename}, {auth_json_filename}, {secrets_json_filename}")
     with open(namespace_json_filename, 'w') as jsonfile:
         json.dump(global_namespaces, jsonfile, indent=2)
 
@@ -88,18 +90,18 @@ def worker(path_queue):
         namespace_path = path_queue.get()
         if namespace_path is None:
             break
-        traverse_namespace(namespace_path, path_queue)
-        path_queue.task_done()
 
         # Rate limit requests
         with global_thread_lock:
             global_counter += 1
-            if DEBUG:
-                print("global_counter: ", global_counter, "namespace_path: ", namespace_path)
+            logging.debug(f"global_counter: {global_counter}, namespace_path: {namespace_path}")
 
-            if not RATE_LIMIT_DISABLED and global_counter % RATE_LIMIT_BATCH_SIZE == 0:
-                print(f"Rate limiting - sleep: {RATE_LIMIT_SLEEP_SECONDS} seconds, batch size: {RATE_LIMIT_BATCH_SIZE}")
+            if not RATE_LIMIT_DISABLE and global_counter % RATE_LIMIT_BATCH_SIZE == 0:
+                logging.info(f"Rate limiting - sleep: {RATE_LIMIT_SLEEP_SECONDS} seconds, batch size: {RATE_LIMIT_BATCH_SIZE}")
                 time.sleep(RATE_LIMIT_SLEEP_SECONDS)
+
+        traverse_namespace(namespace_path, path_queue)
+        path_queue.task_done()
 
 
 def main():
@@ -109,8 +111,15 @@ def main():
 
     # Check vault connection and exit if not authenticated
     vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN)
+    cluster_info = vault_client.sys.read_health_status(method='GET', sealed_code=200)
+    logging.info(f"Vault cluster info: {cluster_info}")
+
+    if vault_client.sys.is_sealed():
+        logging.error("Vault cluster is sealed. Exiting.")
+        exit(1)
+
     if not vault_client.is_authenticated():
-        print("Vault client is not authenticated. Exiting.")
+        logging.error("Vault client is not authenticated. Exiting.")
         exit(1)
 
     # Create a queue to store paths
@@ -135,31 +144,32 @@ def main():
     for worker_thread in workers:
         worker_thread.join()
 
-    if DEBUG:
-        print(json.dumps(global_namespaces, indent=2))
-        print(json.dumps(global_auth_methods, indent=2))
-        print(json.dumps(global_secret_engines, indent=2))
+    logging.debug(json.dumps(global_namespaces, indent=2))
+    logging.debug(json.dumps(global_auth_methods, indent=2))
+    logging.debug(json.dumps(global_secret_engines, indent=2))
 
-    write_to_file()
+    write_to_file(cluster_info['cluster_name'])
 
-    print(f"\nNamespace traversal complete: {global_counter} paths processed, {global_error_counter} errors")
+    logging.info(f"Namespace traversal complete: {global_counter} paths processed, {global_error_counter} errors")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Audit vault cluster namespaces')
-    parser.add_argument('-d', '--debug', default=False, action=argparse.BooleanOptionalAction,
+    parser.add_argument('-d', '--debug', action='store_true',
                         help='Print the debug output')
-    parser.add_argument('-f', '--fast', default=False, action=argparse.BooleanOptionalAction,
+    parser.add_argument('--fast', action='store_true',
                         help='Disable rate limiting')
     parser.add_argument('-n', '--namespace', type=str, help='namespace path to audit (default: root)')
 
     args = parser.parse_args()
 
     if args.debug:
-        DEBUG = True
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
 
     if args.fast:
-        RATE_LIMIT_DISABLED = True
+        RATE_LIMIT_DISABLE = True
 
     if args.namespace:
         NAMESPACE_PATH = args.namespace
@@ -169,13 +179,9 @@ if __name__ == "__main__":
     else:
         NAMESPACE_PATH = ""
 
-    # namespace dictionary to store output
+    # dictionaries to store outputs
     global_namespaces = {}
-
-    # auth dictionary to store output
     global_auth_methods = {}
-
-    # auth dictionary to store output
     global_secret_engines = {}
 
     # counter to rate limit requests
@@ -184,6 +190,7 @@ if __name__ == "__main__":
     # counter to log errors
     global_error_counter = 0
 
+    # lock to synchronize threads and update counters
     global_thread_lock = threading.Lock()
 
     main()
