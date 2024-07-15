@@ -42,7 +42,10 @@ def traverse_namespace(namespace_path, path_queue):
         else:
             key_path = namespace_path
 
-        logging.info(f"Processing namespace ({global_counter}): {key_path}")
+        current_thread = threading.current_thread()
+        logging.info(f"{current_thread.name} processing namespace ({global_counter}): {key_path}")
+
+        # Connect to vault and retrieve namespaces
         vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN, namespace=namespace_path, timeout=HVAC_TIMEOUT)
         namespaces = vault_client.sys.list_namespaces()
         logging.debug(json.dumps(namespaces, indent=2))
@@ -100,8 +103,10 @@ def worker(path_queue):
                 logging.info(f"Rate limiting - sleep: {RATE_LIMIT_SLEEP_SECONDS} seconds, batch size: {RATE_LIMIT_BATCH_SIZE}")
                 time.sleep(RATE_LIMIT_SLEEP_SECONDS)
 
-        traverse_namespace(namespace_path, path_queue)
-        path_queue.task_done()
+        try:
+            traverse_namespace(namespace_path, path_queue)
+        finally:
+            path_queue.task_done()
 
 
 def main():
@@ -137,7 +142,7 @@ def main():
     # Wait for all tasks to complete
     path_queue.join()
 
-    # Shutdown worker threads
+    # Shutdown worker threads gracefully
     for _ in range(WORKER_THREADS):
         path_queue.put(None)
 
@@ -190,7 +195,7 @@ if __name__ == "__main__":
     # counter to log errors
     global_error_counter = 0
 
-    # lock to synchronize threads and update counters
+    # thread lock for updating counters
     global_thread_lock = threading.Lock()
 
     main()
