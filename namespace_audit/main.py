@@ -35,6 +35,9 @@ def traverse_namespace(namespace_path, path_queue):
 
     global global_counter
     global global_error_counter
+    global global_namespaces
+    global global_auth_methods
+    global global_secret_engines
 
     try:
         if namespace_path == "":
@@ -47,23 +50,27 @@ def traverse_namespace(namespace_path, path_queue):
 
         # Connect to vault and retrieve namespaces
         vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN, namespace=namespace_path, timeout=HVAC_TIMEOUT)
-        namespaces = vault_client.sys.list_namespaces()
-        logging.debug(json.dumps(namespaces, indent=2))
 
-        # Add namespaces, auth methods and secrets engines data to global dictionary
-        global_namespaces[key_path] = namespaces
+        # Fetch auth methods and secrets engines
         global_auth_methods[key_path] = vault_client.sys.list_auth_methods()
         global_secret_engines[key_path] = vault_client.sys.list_mounted_secrets_engines()
+
+        # Fetch child namespaces, 404 error returned if no child namespaces, so needs to be the last item to process
+        namespaces = vault_client.sys.list_namespaces()
+        logging.debug(json.dumps(namespaces, indent=2))
+        global_namespaces[key_path] = namespaces
 
         # Add child namespace paths to the queue
         if namespaces and "data" in namespaces and "key_info" in namespaces["data"]:
             for child_namespace in namespaces["data"]["key_info"]:
                 child_namespace_path = f"{namespace_path}{child_namespace}"
                 path_queue.put(child_namespace_path)
-    except hvac.exceptions.InvalidPath as e:  # Ignore path error if no child namespaces
+    # Ignore path error if no child namespaces
+    except hvac.exceptions.InvalidPath:
         pass
-    except hvac.exceptions.VaultError as e:
-        logging.error(f"Error traversing path {namespace_path}: {e}")
+    # except hvac.exceptions.VaultError as e:
+    except Exception as e:
+        logging.exception(f"Error traversing path {namespace_path}: {e}")
         with global_thread_lock:
             global_error_counter += 1
 
@@ -164,7 +171,8 @@ if __name__ == "__main__":
                         help='Print the debug output')
     parser.add_argument('--fast', action='store_true',
                         help='Disable rate limiting')
-    parser.add_argument('-n', '--namespace', type=str, help='namespace path to audit (default: root)')
+    parser.add_argument('-n', '--namespace', type=str, help='namespace path to audit (default: "")')
+    parser.add_argument('-w', '--workers', type=int, default=4, help='workers threads (default: 4)')
 
     args = parser.parse_args()
 
@@ -183,6 +191,9 @@ if __name__ == "__main__":
             NAMESPACE_PATH += "/"
     else:
         NAMESPACE_PATH = ""
+
+    if args.workers:
+        WORKER_THREADS = args.workers
 
     # dictionaries to store outputs
     global_namespaces = {}

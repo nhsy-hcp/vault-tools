@@ -6,10 +6,11 @@ The [main.py](main.py) python script uses multithreaded queues to traverse all n
 - auth methods
 - secrets engines
 
-Performance is greatly improved with concurrency, an example large vault cluster with 6K namespaces and 85ms round trip ping latency, took the following time to audit with rate limiting disabled:
-- 1 worker thread: 30m:52s
-- 4 worker threads: 7m:48s
-- 16 worker threads: 3m:55s
+Performance is greatly improved with concurrency, an example large vault cluster with 7K namespaces and 85ms round trip ping latency, took the following time to audit with rate limiting disabled:
+- 1 worker thread: 1h:13m
+- 4 worker threads: 15m
+- 8 worker threads: 6m
+- 16 worker threads: 3m
 
 ## Pre-requisites
 - jq (optional)
@@ -41,7 +42,9 @@ options:
   -d, --debug           Print the debug output
   --fast                Disable rate limiting
   -n NAMESPACE, --namespace NAMESPACE
-                        namespace path to audit (default: root)
+                        namespace path to audit (default: "")
+  -w WORKERS, --workers WORKERS
+                        workers threads (default: 4)
 ```
 
 ## Outputs
@@ -71,14 +74,13 @@ The following variables can be amended to adjust the script behaviour:
 - RATE_LIMIT_SLEEP_SECONDS variable in [main.py](main.py) to increase or decrease the sleep time between batches.
 
 ## Known Issues
-- If the TTL of the vault FQDN is too low, e.g. 30 seconds, the script may fail occasionally with the following error:
+- If the DNS host record TTL of the vault FQDN is too low, e.g. 30 seconds, the script may fail occasionally with the following error:
 ```
 requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='vault.example.com', port=8200): Read timed out. (read timeout=3)
 ```
   This can be resolved by increasing the TTL of the vault FQDN.
   
 ## To Do
-- [ ] Improve thread exception handling
 - [ ] Add support for ACL policies
 - [ ] Add support for auth roles
 - [ ] Add support for EGP / RGP sentinel policies
