@@ -2,25 +2,19 @@ import json
 import logging
 import pandas as pd
 
-logger = logging.getLogger(__name__)
-# logging.basicConfig(level=logging.INFO)
-
-
-def load_files(auth_methods_filename: str, namespaces_filename: str, secret_engines_filename: str) -> (
-dict, dict, dict):
-    with open(auth_methods_filename, 'r') as jsonfile:
-        auth_methods = json.load(jsonfile)
-
-    with open(namespaces_filename, 'r') as jsonfile:
-        namespaces = json.load(jsonfile)
-
-    with open(secret_engines_filename, 'r') as jsonfile:
-        secret_engines = json.load(jsonfile)
-
-    return auth_methods, namespaces, secret_engines
-
 
 def parse_namespaces(data: dict, csv_filename: str):
+    """
+    Parses namespaces from the provided data and writes the results to a CSV file.
+
+    Args:
+        data (dict): A dictionary containing the namespace data.
+        csv_filename (str): The name of the CSV file to write the results to.
+
+    The function processes the input data to create a DataFrame with the namespace path, id,
+    and custom metadata. The results are then written to a CSV file.
+    """
+
     logging.info("Parsing namespaces")
     df = pd.DataFrame.from_dict(data, orient='index', columns=['path', 'id', 'custom_metadata'])
     df.to_csv(csv_filename, index=False)
@@ -28,6 +22,18 @@ def parse_namespaces(data: dict, csv_filename: str):
 
 
 def parse_auth_methods(data: dict, csv_filename: str):
+    """
+    Parses authentication methods from the provided data and writes the results to a CSV file.
+
+    Args:
+        data (dict): A dictionary containing the authentication method data.
+        csv_filename (str): The name of the CSV file to write the results to.
+
+    The function processes the input data to count the occurrences of each authentication method type
+    within each namespace. The results are then written to a CSV file with the namespace path,
+    level 1 namespace, and counts of each authentication method type.
+    """
+
     logging.info("Parsing auth methods")
     result = {}
     for key in (data.keys()):
@@ -59,6 +65,18 @@ def parse_auth_methods(data: dict, csv_filename: str):
 
 
 def parse_secret_engines(data: dict, csv_filename: str):
+    """
+    Parses secret engines from the provided data and writes the results to a CSV file.
+
+    Args:
+        data (dict): A dictionary containing the secret engine data.
+        csv_filename (str): The name of the CSV file to write the results to.
+
+    The function processes the input data to count the occurrences of each secret engine type
+    within each namespace. The results are then written to a CSV file with the namespace path,
+    level 1 namespace, and counts of each secret engine type.
+    """
+
     logging.info("Parsing secret engines")
     result = {}
     for key in (data.keys()):
@@ -95,10 +113,19 @@ def parse_secret_engines(data: dict, csv_filename: str):
 
 
 def main():
-    auth_methods, namespaces, secret_engines = load_files(
-        "vault-cluster-edcac415-auth-methods-20240726.json",
-        "vault-cluster-edcac415-namespaces-20240726.json",
-        "vault-cluster-edcac415-secrets-engines-20240726.json")
+    # Unit test with sample data
+    auth_methods_filename = "vault-cluster-edcac415-auth-methods-20240726.json"
+    namespaces_filename = "vault-cluster-edcac415-namespaces-20240726.json"
+    secret_engines_filename = "vault-cluster-edcac415-secrets-engines-20240726.json"
+
+    with open(auth_methods_filename, 'r') as jsonfile:
+        auth_methods = json.load(jsonfile)
+
+    with open(namespaces_filename, 'r') as jsonfile:
+        namespaces = json.load(jsonfile)
+
+    with open(secret_engines_filename, 'r') as jsonfile:
+        secret_engines = json.load(jsonfile)
 
     parse_namespaces(namespaces, "summary-namespaces.csv")
     parse_auth_methods(auth_methods, "summary-auth-methods.csv")
@@ -106,4 +133,7 @@ def main():
 
 
 if __name__ == "__main__":
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.INFO)
+
     main()
