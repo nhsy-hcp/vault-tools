@@ -25,7 +25,7 @@ pip install -r requirements.txt
 Create a policy and token for the script to use with the following commands:
 ```shell
 vault policy write vault-namespace-audit ./vault-namespace-audit-policy.hcl
-vault token create -policy=vault-namespace-audit -period=1h -orphan -field=token
+vault token create -policy=vault-namespace-audit -period=2h -orphan -field=token
 ```
 Please note the ACL policy [vault-namespace-audit-policy.hcl](vault-namespace-audit-policy.hcl) supports upto 5 levels of nested namespaces and will need editing if more levels are required.
 
@@ -48,21 +48,26 @@ options:
 ```
 
 ## Outputs
+Summary CSV out files will be created with the following filename formats:
+- vault-cluster-CLUSTER_ID-summary-namespaces-YYYYMMDD.csv
+- vault-cluster-CLUSTER_ID-summary--auth-methods-YYYYMMDD.csv
+- vault-cluster-CLUSTER_ID-summary--secrets-engines-YYYYMMDD.csv
+
 JSON output files will be created with the following filename formats:
-- namespaces-CLUSTER_ID-YYYYMMDD.json
-- auth-methods-CLUSTER_ID-YYYYMMDD.json
-- secrets-engines-CLUSTER_ID-YYYYMMDD.json
+- vault-cluster-CLUSTER_ID-namespaces-YYYYMMDD.json
+- vault-cluster-CLUSTER_ID-auth-methods-YYYYMMDD.json
+- vault-cluster-CLUSTER_ID-secrets-engines-YYYYMMDD.json
 
 The JSON output files can be queried with `jq`, examples below.
 
 List namespaces
 ```shell
-jq '.[].data.keys' namespaces-vault-cluster-20240710.json
+jq '.' vault-cluster-12345-namespaces-20240726.json
 ```
 
 Count namespaces
 ```shell
-jq '.[].data.keys | length' namespaces-vault-cluster-20240710.json
+jq '. | length' vault-cluster-12345-namespaces-20240726.json
 ```
 
 ## Customizations

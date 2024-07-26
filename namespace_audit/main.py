@@ -7,6 +7,7 @@ import os
 import queue
 import threading
 import time
+import summary
 
 # Define Vault connection parameters from environment variables
 VAULT_ADDR = os.environ.get('VAULT_ADDR')
@@ -25,7 +26,7 @@ RATE_LIMIT_DISABLE = False
 logger = logging.getLogger(__name__)
 
 
-def traverse_namespace(namespace_path, path_queue):
+def traverse_namespace(namespace_path: str, path_queue: str):
     """
     Traverses a given Vault namespace and adds child paths to the queue.
     Args:
@@ -54,17 +55,15 @@ def traverse_namespace(namespace_path, path_queue):
         # Fetch auth methods and secrets engines
         global_auth_methods[key_path] = vault_client.sys.list_auth_methods()
         global_secret_engines[key_path] = vault_client.sys.list_mounted_secrets_engines()
-
         # Fetch child namespaces, 404 error returned if no child namespaces, so needs to be the last item to process
         namespaces = vault_client.sys.list_namespaces()
-        logging.debug(json.dumps(namespaces, indent=2))
-        global_namespaces[key_path] = namespaces
 
         # Add child namespace paths to the queue
         if namespaces and "data" in namespaces and "key_info" in namespaces["data"]:
             for child_namespace in namespaces["data"]["key_info"]:
                 child_namespace_path = f"{namespace_path}{child_namespace}"
                 path_queue.put(child_namespace_path)
+                global_namespaces[child_namespace_path] = namespaces["data"]["key_info"][child_namespace]
     # Ignore path error if no child namespaces
     except hvac.exceptions.InvalidPath:
         pass
@@ -75,22 +74,34 @@ def traverse_namespace(namespace_path, path_queue):
             global_error_counter += 1
 
 
-def write_to_file(cluster_name):
-    namespace_json_filename = f'{cluster_name}-namespaces-{datetime.now().strftime("%Y%m%d")}.json'
+def write_to_file(cluster_name: str):
     auth_json_filename = f'{cluster_name}-auth-methods-{datetime.now().strftime("%Y%m%d")}.json'
-    secrets_json_filename = f'{cluster_name}-secrets-engines-{datetime.now().strftime("%Y%m%d")}.json'
-    logging.info(f"Writing output to files: {namespace_json_filename}, {auth_json_filename}, {secrets_json_filename}")
+    namespace_json_filename = f'{cluster_name}-namespaces-{datetime.now().strftime("%Y%m%d")}.json'
+    secret_json_filename = f'{cluster_name}-secrets-engines-{datetime.now().strftime("%Y%m%d")}.json'
+    logging.info(f"Writing output to files: {namespace_json_filename}, {auth_json_filename}, {secret_json_filename}")
+
     with open(namespace_json_filename, 'w') as jsonfile:
         json.dump(global_namespaces, jsonfile, indent=2)
 
     with open(auth_json_filename, 'w') as jsonfile:
         json.dump(global_auth_methods, jsonfile, indent=2)
 
-    with open(secrets_json_filename, 'w') as jsonfile:
+    with open(secret_json_filename, 'w') as jsonfile:
         json.dump(global_secret_engines, jsonfile, indent=2)
 
 
-def worker(path_queue):
+def summary_report(cluster_name: str):
+    auth_csv_filename = f"{cluster_name}-summary-auth-methods-{datetime.now().strftime('%Y%m%d')}.csv"
+    namespace_csv_filename = f"{cluster_name}-summary-namespaces-{datetime.now().strftime('%Y%m%d')}.csv"
+    secret_csv_filename = f"{cluster_name}-summary-secrets-engines-{datetime.now().strftime('%Y%m%d')}.csv"
+
+    logging.info(f"Writing summary to files: {namespace_csv_filename}, {auth_csv_filename}, {secret_csv_filename}")
+    summary.parse_namespaces(global_namespaces, namespace_csv_filename)
+    summary.parse_auth_methods(global_auth_methods, auth_csv_filename)
+    summary.parse_secret_engines(global_secret_engines, secret_csv_filename)
+
+
+def worker(path_queue: str):
     """
     Worker thread that retrieves paths from the queue and traverses them.
     """
@@ -161,6 +172,7 @@ def main():
     logging.debug(json.dumps(global_secret_engines, indent=2))
 
     write_to_file(cluster_info['cluster_name'])
+    summary_report(cluster_info['cluster_name'])
 
     logging.info(f"Namespace traversal complete: {global_counter} paths processed, {global_error_counter} errors")
 
