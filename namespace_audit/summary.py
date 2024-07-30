@@ -17,6 +17,7 @@ def parse_namespaces(data: dict, csv_filename: str):
 
     logging.info("Parsing namespaces")
     df = pd.DataFrame.from_dict(data, orient='index', columns=['path', 'id', 'custom_metadata'])
+    df.insert(1, 'level_1_namespace', df['path'].apply(lambda x: x.split('/')[0] + '/'))
     df.to_csv(csv_filename, index=False)
     logging.debug(df.head(3))
 
