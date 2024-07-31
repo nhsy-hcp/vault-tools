@@ -42,19 +42,17 @@ def parse_auth_methods(data: dict, csv_filename: str):
             'namespace_path': key,
             'level_1_namespace': key.split('/')[0] + '/'
         }
-        # for item in data[key]:
-        #     if data[key][item] and 'type' in data[key][item]:
-        #         auth_method_type = data[key][item]['type']
-        #         if auth_method_type in auth_methods:
-        #             items[auth_method_type] += 1
-        #         else:
-        #             items[auth_method_type] = 1
-        #     result[key] = items
 
         # Find all auth methods and increment the count
+        for item in [v for v in data[key].values() if isinstance(v, dict)]:
+            for mount in [v for v in item.values() if isinstance(v, dict) and 'type' in v]:
+                auth_method_type = mount['type']
+                items[auth_method_type] = items.get(auth_method_type, 0) + 1
+
         for item in [v for v in data[key].values() if isinstance(v, dict) and 'type' in v]:
             auth_method_type = item['type']
             items[auth_method_type] = items.get(auth_method_type, 0) + 1
+
         result[key] = items
 
     df = pd.DataFrame.from_dict(result, orient='index')
@@ -85,16 +83,6 @@ def parse_secret_engines(data: dict, csv_filename: str):
             'namespace_path': key,
             'level_1_namespace': key.split('/')[0] + '/'
         }
-        # for item in data[key]:
-        #     if isinstance(data[key][item], dict):
-        #         for mount_path in data[key][item]:
-        #             secret_engine = data[key][item][mount_path]
-        #             if isinstance(secret_engine, dict) and "type" in secret_engine:
-        #                 secret_engine_type = secret_engine["type"]
-        #                 if secret_engine_type in items:
-        #                     items[secret_engine_type] += 1
-        #                 else:
-        #                     items[secret_engine_type] = 1
 
         # Find all secret engines and increment the count
         for item in [v for v in data[key].values() if isinstance(v, dict)]:
@@ -135,6 +123,6 @@ def main():
 
 if __name__ == "__main__":
     logger = logging.getLogger(__name__)
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.DEBUG)
 
     main()

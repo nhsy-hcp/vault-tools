@@ -118,7 +118,8 @@ def worker(path_queue: str):
             logging.debug(f"global_counter: {global_counter}, namespace_path: {namespace_path}")
 
             if not RATE_LIMIT_DISABLE and global_counter % RATE_LIMIT_BATCH_SIZE == 0:
-                logging.info(f"Rate limiting - sleep: {RATE_LIMIT_SLEEP_SECONDS} seconds, batch size: {RATE_LIMIT_BATCH_SIZE}")
+                logging.info(
+                    f"Rate limiting - sleep: {RATE_LIMIT_SLEEP_SECONDS} seconds, batch size: {RATE_LIMIT_BATCH_SIZE}")
                 time.sleep(RATE_LIMIT_SLEEP_SECONDS)
 
         try:
@@ -134,16 +135,29 @@ def main():
 
     # Check vault connection and exit if not authenticated
     vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN)
-    cluster_info = vault_client.sys.read_health_status(method='GET', sealed_code=200)
-    logging.info(f"Vault cluster info: {cluster_info}")
+    cluster_info = vault_client.sys.read_health_status(method='GET',
+                                                       sealed_code=200, performance_standby_code=200, uninit_code=200)
 
+    # Check HTTP response code 200
+    if not isinstance(cluster_info, dict):
+        logging.error("Unknown Vault cluster health status. Exiting.")
+        logging.error(f"status code: {cluster_info.status_code}")
+        logging.error(f"response: {cluster_info.text}")
+        exit(1)
+
+    # Check vault cluster initialized, unsealed and authenticated
     if vault_client.sys.is_sealed():
         logging.error("Vault cluster is sealed. Exiting.")
         exit(1)
-
-    if not vault_client.is_authenticated():
+    elif not vault_client.is_authenticated():
         logging.error("Vault client is not authenticated. Exiting.")
         exit(1)
+    elif not vault_client.sys.is_initialized():
+        logging.error("Vault cluster is not initialized. Exiting.")
+        exit(1)
+
+    logging.info(f"Vault cluster info: {cluster_info}")
+    cluster_name = cluster_info['cluster_name']
 
     # Create a queue to store paths
     path_queue = queue.Queue()
@@ -167,12 +181,12 @@ def main():
     for worker_thread in workers:
         worker_thread.join()
 
-    logging.debug(json.dumps(global_namespaces, indent=2))
-    logging.debug(json.dumps(global_auth_methods, indent=2))
-    logging.debug(json.dumps(global_secret_engines, indent=2))
+    # logging.debug(json.dumps(global_namespaces, indent=2))
+    # logging.debug(json.dumps(global_auth_methods, indent=2))
+    # logging.debug(json.dumps(global_secret_engines, indent=2))
 
-    write_to_file(cluster_info['cluster_name'])
-    summary_report(cluster_info['cluster_name'])
+    write_to_file(cluster_name)
+    summary_report(cluster_name)
 
     logging.info(f"Namespace traversal complete: {global_counter} paths processed, {global_error_counter} errors")
 
