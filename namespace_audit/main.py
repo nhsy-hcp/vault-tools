@@ -50,7 +50,8 @@ def traverse_namespace(namespace_path: str, path_queue: str):
         logging.info(f"{current_thread.name} processing namespace ({global_counter}): {key_path}")
 
         # Connect to vault and retrieve namespaces
-        vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN, namespace=namespace_path, timeout=HVAC_TIMEOUT)
+        vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN, namespace=namespace_path, verify=False,
+                                   timeout=HVAC_TIMEOUT)
 
         # Fetch auth methods and secrets engines
         global_auth_methods[key_path] = vault_client.sys.list_auth_methods()
@@ -134,7 +135,7 @@ def main():
     """
 
     # Check vault connection and exit if not authenticated
-    vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN)
+    vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN, verify=False, timeout=HVAC_TIMEOUT)
     cluster_info = vault_client.sys.read_health_status(method='GET',
                                                        sealed_code=200, performance_standby_code=200, uninit_code=200)
 
