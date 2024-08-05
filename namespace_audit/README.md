@@ -30,8 +30,15 @@ vault token create -policy=vault-namespace-audit -period=2h -orphan -field=token
 Please note the ACL policy [vault-namespace-audit-policy.hcl](vault-namespace-audit-policy.hcl) supports upto 5 levels of nested namespaces and will need editing if more levels are required.
 
 ## Usage
-Export environment variables for `VAULT_ADDR` and `VAULT_TOKEN`. Then run the script with the following command:
+Export environment variables for `VAULT_ADDR` and `VAULT_TOKEN`.
 
+Check Vault cluster status and connectivity using the following commands:
+```shell
+vault status
+vault token lookup
+````
+
+Then run the script with the following command:
 ```shell
 usage: main.py [-h] [-d] [--fast] [-n NAMESPACE]
 
@@ -47,6 +54,10 @@ options:
                         workers threads (default: 4)
 ```
 
+If TLS is enabled with a self-signed certificate, the following environment variable can be set to disable certificate verification:
+```shell
+export VAULT_SKIP_VERIFY=true
+```
 ## Outputs
 Summary CSV out files will be created with the following filename formats:
 - vault-cluster-CLUSTER_ID-summary-namespaces-YYYYMMDD.csv

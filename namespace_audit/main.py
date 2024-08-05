@@ -8,10 +8,20 @@ import queue
 import threading
 import time
 import summary
+import urllib3
+
 
 # Define Vault connection parameters from environment variables
 VAULT_ADDR = os.environ.get('VAULT_ADDR')
 VAULT_TOKEN = os.environ.get('VAULT_TOKEN')
+VAULT_SKIP_VERIFY = os.environ.get('VAULT_SKIP_VERIFY', 'False').lower() == 'true'
+
+# Disable insecure request warnings if VAULT_SKIP_VERIFY is set
+if VAULT_SKIP_VERIFY:
+    VAULT_TLS_VERIFY = False
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+else:
+    VAULT_TLS_VERIFY = True
 
 # Define HVAC client parameters
 HVAC_TIMEOUT = 3
@@ -50,8 +60,8 @@ def traverse_namespace(namespace_path: str, path_queue: str):
         logging.info(f"{current_thread.name} processing namespace ({global_counter}): {key_path}")
 
         # Connect to vault and retrieve namespaces
-        vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN, namespace=namespace_path, verify=False,
-                                   timeout=HVAC_TIMEOUT)
+        vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN, namespace=namespace_path, verify=VAULT_TLS_VERIFY,
+                                   timeout=HVAC_TIMEOUT, )
 
         # Fetch auth methods and secrets engines
         global_auth_methods[key_path] = vault_client.sys.list_auth_methods()
@@ -134,10 +144,14 @@ def main():
     Main function that initializes Vault client, creates threads, and starts traversal.
     """
 
-    # Check vault connection and exit if not authenticated
-    vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN, verify=False, timeout=HVAC_TIMEOUT)
-    cluster_info = vault_client.sys.read_health_status(method='GET',
-                                                       sealed_code=200, performance_standby_code=200, uninit_code=200)
+    try:
+        # Check vault connection and exit if not authenticated
+        vault_client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN, verify=VAULT_TLS_VERIFY, timeout=HVAC_TIMEOUT)
+        cluster_info = vault_client.sys.read_health_status(method='GET',
+                                                           sealed_code=200, performance_standby_code=200, uninit_code=200)
+    except Exception as e:
+        logging.error(f"Error connecting to Vault: {e}")
+        exit(1)
 
     # Check HTTP response code 200
     if not isinstance(cluster_info, dict):
