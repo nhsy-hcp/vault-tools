@@ -1,128 +1,343 @@
+#!/usr/bin/env python3
+"""
+Namespace audit summary module for processing Vault cluster data.
+
+This module provides functionality to parse and analyze Vault namespace data,
+authentication methods, and secret engines, outputting the results to CSV files.
+"""
+import argparse
 import json
 import logging
+from collections import Counter
+from pathlib import Path
+from typing import Dict, Any, Optional
+
 import pandas as pd
 
 
-def parse_namespaces(data: dict, csv_filename: str):
+def extract_level_1_namespace(namespace_path: str) -> str:
     """
-    Parses namespaces from the provided data and writes the results to a CSV file.
+    Extract the level 1 namespace from a namespace path.
+    
+    Args:
+        namespace_path: The full namespace path
+        
+    Returns:
+        The level 1 namespace with trailing slash
+    """
+    return namespace_path.split('/')[0] + '/'
+
+
+def setup_logger(log_level: str = "INFO") -> logging.Logger:
+    """
+    Configure and return a logger with the specified log level.
 
     Args:
-        data (dict): A dictionary containing the namespace data.
-        csv_filename (str): The name of the CSV file to write the results to.
+        log_level: The logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
 
-    The function processes the input data to create a DataFrame with the namespace path, id,
-    and custom metadata. The results are then written to a CSV file.
+    Returns:
+        A configured logger instance
     """
+    level = getattr(logging, log_level.upper())
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    return logging.getLogger(__name__)
 
-    logging.info("Parsing namespaces")
-    df = pd.DataFrame.from_dict(data, orient='index', columns=['path', 'id', 'custom_metadata'])
-    df.insert(1, 'level_1_namespace', df['path'].apply(lambda x: x.split('/')[0] + '/'))
-    df.to_csv(csv_filename, index=False)
-    logging.debug(df.head(3))
 
-
-def parse_auth_methods(data: dict, csv_filename: str):
+def load_json_data(filename: str) -> Dict[str, Any]:
     """
-    Parses authentication methods from the provided data and writes the results to a CSV file.
+    Load JSON data from a file.
 
     Args:
-        data (dict): A dictionary containing the authentication method data.
-        csv_filename (str): The name of the CSV file to write the results to.
+        filename: The path to the JSON file
 
-    The function processes the input data to count the occurrences of each authentication method type
-    within each namespace. The results are then written to a CSV file with the namespace path,
-    level 1 namespace, and counts of each authentication method type.
+    Returns:
+        Dictionary containing the JSON data
+
+    Raises:
+        ValueError: If filename is invalid
+        FileNotFoundError: If the file doesn't exist
+        json.JSONDecodeError: If the file contains invalid JSON
     """
+    if not filename or not isinstance(filename, str):
+        raise ValueError("Filename must be a non-empty string")
+    
+    file_path = Path(filename)
+    if not file_path.suffix.lower() == '.json':
+        logging.warning(f"File {filename} does not have .json extension")
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8') as jsonfile:
+            data = json.load(jsonfile)
+            if not isinstance(data, dict):
+                raise ValueError(f"JSON data in {filename} must be a dictionary")
+            return data
+    except FileNotFoundError:
+        logging.error(f"File not found: {filename}")
+        raise
+    except json.JSONDecodeError as e:
+        logging.error(f"Invalid JSON in {filename}: {e}")
+        raise
+    except PermissionError as e:
+        logging.error(f"Permission denied accessing {filename}: {e}")
+        raise
 
-    logging.info("Parsing auth methods")
+
+def parse_namespaces(data: Dict[str, Any], csv_filename: str) -> pd.DataFrame:
+    """
+    Parse namespaces from the provided data and write the results to a CSV file.
+
+    Args:
+        data: A dictionary containing the namespace data
+        csv_filename: The name of the CSV file to write the results to
+
+    Returns:
+        DataFrame containing the processed namespace data
+    
+    Raises:
+        ValueError: If data is invalid
+    """
+    if not isinstance(data, dict):
+        raise ValueError("Data must be a dictionary")
+    if not csv_filename or not isinstance(csv_filename, str):
+        raise ValueError("CSV filename must be a non-empty string")
+    
+    logging.debug("Parsing namespaces")
+    
+    if not data:
+        logging.warning("No namespace data to process")
+        df = pd.DataFrame(columns=['path', 'level_1_namespace', 'id', 'custom_metadata'])
+    else:
+        df = pd.DataFrame.from_dict(data, orient='index', columns=['path', 'id', 'custom_metadata'])
+        df.insert(1, 'level_1_namespace', df['path'].apply(extract_level_1_namespace))
+    
+    try:
+        df.to_csv(csv_filename, index=False)
+    except (IOError, OSError) as e:
+        logging.error(f"Failed to write CSV file {csv_filename}: {e}")
+        raise
+    
+    logging.debug(f"Namespaces processed: {len(df)}")
+    if len(df) > 0:
+        logging.debug(f"Sample data:\n{df.head(3)}")
+    return df
+
+
+def parse_vault_items(data: Dict[str, Any], csv_filename: str, item_name: str) -> pd.DataFrame:
+    """
+    Generic parser for Vault items (auth methods or secret engines).
+    
+    Args:
+        data: A dictionary containing the item data
+        csv_filename: The name of the CSV file to write the results to
+        item_name: Name of the item type for logging (e.g., "auth methods", "secret engines")
+        
+    Returns:
+        DataFrame containing the processed item data
+        
+    Raises:
+        ValueError: If input parameters are invalid
+    """
+    if not isinstance(data, dict):
+        raise ValueError("Data must be a dictionary")
+    if not csv_filename or not isinstance(csv_filename, str):
+        raise ValueError("CSV filename must be a non-empty string")
+    if not item_name or not isinstance(item_name, str):
+        raise ValueError("Item name must be a non-empty string")
+        
+    logging.debug(f"Parsing {item_name}")
     result = {}
-    for key in (data.keys()):
+
+    for namespace_path in data.keys():
+        if not isinstance(namespace_path, str):
+            logging.warning(f"Skipping non-string namespace path: {namespace_path}")
+            continue
+            
         items = {
-            'namespace_path': key,
-            'level_1_namespace': key.split('/')[0] + '/'
+            'namespace_path': namespace_path,
+            'level_1_namespace': extract_level_1_namespace(namespace_path)
         }
 
-        # Find all auth methods and increment the count
-        for item in [v for v in data[key].values() if isinstance(v, dict)]:
+        namespace_data = data[namespace_path]
+        if not isinstance(namespace_data, dict):
+            logging.warning(f"Skipping non-dict data for namespace {namespace_path}")
+            continue
+
+        # Find all items and count them by type
+        for item in [v for v in namespace_data.values() if isinstance(v, dict)]:
+            # Handle nested items
             for mount in [v for v in item.values() if isinstance(v, dict) and 'type' in v]:
-                auth_method_type = mount['type']
-                items[auth_method_type] = items.get(auth_method_type, 0) + 1
+                item_type = mount.get('type')
+                if item_type:
+                    items[item_type] = items.get(item_type, 0) + 1
 
-        for item in [v for v in data[key].values() if isinstance(v, dict) and 'type' in v]:
-            auth_method_type = item['type']
-            items[auth_method_type] = items.get(auth_method_type, 0) + 1
+        # Handle direct items
+        for item in [v for v in namespace_data.values() if isinstance(v, dict) and 'type' in v]:
+            item_type = item.get('type')
+            if item_type:
+                items[item_type] = items.get(item_type, 0) + 1
 
-        result[key] = items
+        result[namespace_path] = items
 
-    df = pd.DataFrame.from_dict(result, orient='index')
-    for column in df.columns[2:]:
-        df[column] = df[column].fillna(0)
-        df[column] = df[column].astype(int)
-    df.to_csv(csv_filename, index=False)
-    logging.debug(df.head(3))
+    return _process_and_save_dataframe(result, csv_filename)
 
 
-def parse_secret_engines(data: dict, csv_filename: str):
+def count_items_by_type(data: Dict[str, Any], item_type_key: str) -> Dict[str, int]:
     """
-    Parses secret engines from the provided data and writes the results to a CSV file.
+    Count items by their type from nested dictionaries.
 
     Args:
-        data (dict): A dictionary containing the secret engine data.
-        csv_filename (str): The name of the CSV file to write the results to.
+        data: The data dictionary to process
+        item_type_key: The key that identifies the type of the item
 
-    The function processes the input data to count the occurrences of each secret engine type
-    within each namespace. The results are then written to a CSV file with the namespace path,
-    level 1 namespace, and counts of each secret engine type.
+    Returns:
+        Dictionary with item types as keys and their counts as values
     """
+    type_counter = Counter()
 
-    logging.info("Parsing secret engines")
-    result = {}
-    for key in (data.keys()):
-        items = {
-            'namespace_path': key,
-            'level_1_namespace': key.split('/')[0] + '/'
-        }
+    for value in data.values():
+        if not isinstance(value, dict):
+            continue
+            
+        # Check if this is a direct item with the type key
+        if item_type_key in value:
+            type_counter[value[item_type_key]] += 1
+        
+        # Check nested items
+        for subvalue in value.values():
+            if isinstance(subvalue, dict) and item_type_key in subvalue:
+                type_counter[subvalue[item_type_key]] += 1
 
-        # Find all secret engines and increment the count
-        for item in [v for v in data[key].values() if isinstance(v, dict)]:
-            for secret_engine in item.values():
-                if isinstance(secret_engine, dict) and "type" in secret_engine:
-                    secret_engine_type = secret_engine["type"]
-                    items[secret_engine_type] = items.get(secret_engine_type, 0) + 1
-        result[key] = items
+    return dict(type_counter)
 
-    df = pd.DataFrame.from_dict(result, orient='index')
 
+def parse_auth_methods(data: Dict[str, Any], csv_filename: str) -> pd.DataFrame:
+    """
+    Parse authentication methods and write the results to a CSV file.
+
+    Args:
+        data: A dictionary containing the authentication method data
+        csv_filename: The name of the CSV file to write the results to
+
+    Returns:
+        DataFrame containing the processed authentication methods data
+    """
+    return parse_vault_items(data, csv_filename, "auth methods")
+
+
+def parse_secret_engines(data: Dict[str, Any], csv_filename: str) -> pd.DataFrame:
+    """
+    Parse secret engines and write the results to a CSV file.
+
+    Args:
+        data: A dictionary containing the secret engine data
+        csv_filename: The name of the CSV file to write the results to
+
+    Returns:
+        DataFrame containing the processed secret engines data
+    """
+    return parse_vault_items(data, csv_filename, "secret engines")
+
+
+def _process_and_save_dataframe(data: Dict[str, Dict[str, Any]],
+                                csv_filename: str) -> pd.DataFrame:
+    """
+    Convert dictionary data to DataFrame, process numerical columns, and save to CSV.
+
+    Args:
+        data: Dictionary data to convert
+        csv_filename: CSV file path to save the DataFrame
+
+    Returns:
+        The processed DataFrame
+    """
+    df = pd.DataFrame.from_dict(data, orient='index')
+
+    # Convert count columns to integers
     for column in df.columns[2:]:
         df[column] = df[column].fillna(0)
         df[column] = df[column].astype(int)
+
     df.to_csv(csv_filename, index=False)
-    logging.debug(df.head(3))
+    logging.debug(f"Records processed: {len(df)}")
+    logging.debug(f"Sample data:\n{df.head(3)}")
+    return df
 
 
-def main():
-    # Unit test with sample data
-    auth_methods_filename = "vault-cluster-edcac415-auth-methods-20240726.json"
-    namespaces_filename = "vault-cluster-edcac415-namespaces-20240726.json"
-    secret_engines_filename = "vault-cluster-edcac415-secrets-engines-20240726.json"
+def parse_args() -> argparse.Namespace:
+    """
+    Parse command line arguments.
 
-    with open(auth_methods_filename, 'r') as jsonfile:
-        auth_methods = json.load(jsonfile)
+    Returns:
+        Object containing parsed command line arguments
+    """
+    parser = argparse.ArgumentParser(
+        description="Process Vault cluster data to generate summary CSV files"
+    )
+    parser.add_argument(
+        "--cluster-id",
+        default="vault-cluster",
+        help="Vault cluster ID"
+    )
+    parser.add_argument(
+        "--date",
+        default="20240726",
+        help="Date stamp for the input files (YYYYMMDD)"
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=".",
+        help="Directory for output files"
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level"
+    )
+    return parser.parse_args()
 
-    with open(namespaces_filename, 'r') as jsonfile:
-        namespaces = json.load(jsonfile)
 
-    with open(secret_engines_filename, 'r') as jsonfile:
-        secret_engines = json.load(jsonfile)
+def main() -> None:
+    """
+    Main function to process Vault cluster data.
+    """
+    args = parse_args()
+    logger = setup_logger(args.log_level)
 
-    parse_namespaces(namespaces, "summary-namespaces.csv")
-    parse_auth_methods(auth_methods, "summary-auth-methods.csv")
-    parse_secret_engines(secret_engines, "summary-secret-engines.csv")
+    # Setup file paths
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(exist_ok=True)
+
+    cluster_id = args.cluster_id
+    date_stamp = args.date
+
+    auth_methods_filename = f"{cluster_id}-auth-methods-{date_stamp}.json"
+    namespaces_filename = f"{cluster_id}-namespaces-{date_stamp}.json"
+    secret_engines_filename = f"{cluster_id}-secrets-engines-{date_stamp}.json"
+
+    output_namespaces = output_dir / f"summary-namespaces-{date_stamp}.csv"
+    output_auth_methods = output_dir / f"summary-auth-methods-{date_stamp}.csv"
+    output_secret_engines = output_dir / f"summary-secret-engines-{date_stamp}.csv"
+
+    try:
+        logger.info(f"Processing data for cluster {cluster_id} from {date_stamp}")
+
+        auth_methods = load_json_data(auth_methods_filename)
+        namespaces = load_json_data(namespaces_filename)
+        secret_engines = load_json_data(secret_engines_filename)
+
+        parse_namespaces(namespaces, str(output_namespaces))
+        parse_auth_methods(auth_methods, str(output_auth_methods))
+        parse_secret_engines(secret_engines, str(output_secret_engines))
+
+        logger.info("Data processing completed successfully")
+    except Exception as e:
+        logger.error(f"Error processing data: {e}", exc_info=True)
+        raise
 
 
 if __name__ == "__main__":
-    logger = logging.getLogger(__name__)
-    logging.basicConfig(level=logging.DEBUG)
-
     main()
