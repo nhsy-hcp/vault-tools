@@ -7,10 +7,15 @@ This project includes a Python script, `main.py`, that generates and reads activ
 ## Features
 
 - Generate activity reports for namespaces and mounts
+- Generate entity export reports with comprehensive metadata analysis
 - Fetch data from a Vault server using specified date ranges
-- Process existing JSON activity files
-- Save reports in JSON and CSV formats
+- Process existing JSON activity and entity export files
+- Multiple CSV output formats:
+  - Basic activity data (5 core columns)
+  - Comprehensive entity metadata (16 columns with policies, groups, custom metadata)
 - Print activity reports to the console
+- Debug logging support for troubleshooting
+- JSON serialization for complex fields (policies, metadata objects)
 - Comprehensive error handling and validation
 - Type hints for better code maintainability
 - Extensive test coverage with pytest
@@ -52,13 +57,28 @@ This project includes a Python script, `main.py`, that generates and reads activ
 
 ## Usage
 
-### Generate Report from Vault API
+### Generate Activity Report from Vault API
 ```bash
 # Generate report for specific date range
 python main.py -s 2024-01-01 -e 2024-01-31 -p
 
-# Use default date range (billing start to last month)
-python main.py -p
+# Generate report for last month (requires start_date)
+python main.py -s 2024-01-01 -p
+```
+
+### Generate Entity Export Report
+```bash
+# Generate entity export report for specific date range
+python main.py --entity-export -s 2024-01-01 -e 2024-01-31
+
+# Process existing entity export JSON file
+python main.py --entity-export --entity-filename entity-export-20240425.json
+```
+
+### Debug Logging
+```bash
+# Enable debug logging for troubleshooting
+python main.py --debug -s 2024-01-01 -e 2024-01-31 -p
 ```
 
 ### Process Existing JSON File
@@ -72,7 +92,10 @@ python main.py -f activity-20240425.json -p
 The script supports the following command-line arguments:
 
 ```
-usage: main.py [-h] [-s START_DATE] [-e END_DATE] [-f FILENAME] [-p | --print | --no-print]
+usage: main.py [-h] [-s START_DATE] [-e END_DATE] [-f FILENAME]
+               [-p | --print | --no-print]
+               [--entity-export | --no-entity-export]
+               [--entity-filename ENTITY_FILENAME] [--debug | --no-debug]
 
 options:
   -h, --help            show this help message and exit
@@ -84,7 +107,15 @@ options:
                         JSON file name for the activity report
   -p, --print, --no-print
                         Print the activity report to console
+  --entity-export, --no-entity-export
+                        Generate entity export report instead of regular
+                        activity report
+  --entity-filename ENTITY_FILENAME
+                        JSON file name for the entity export report
+  --debug, --no-debug   Enable debug logging
 ```
+
+**Important:** The `start_date` parameter is now required when fetching data from the Vault API (not using existing JSON files).
 
 ## Testing
 
@@ -96,6 +127,7 @@ This project includes comprehensive test coverage using pytest. Tests are organi
 - `tests/test_data_processing.py` - Data processing and validation tests
 - `tests/test_vault_api.py` - Vault API interaction tests
 - `tests/test_integration.py` - End-to-end integration tests
+- `tests/test_entity_export.py` - Entity export functionality tests (62 total tests)
 
 ### Running Tests
 
@@ -156,10 +188,14 @@ pytest -m "not slow"
 
 ## Output Files
 
-The script generates the following files:
+### Activity Reports
 - `activity-YYYYMMDD.json` - Raw activity data from Vault
 - `activity-namespaces-YYYYMMDD.csv` - Namespace-level summary
 - `activity-mounts-YYYYMMDD.csv` - Mount-level detailed breakdown
+
+### Entity Export Reports
+- `entity-export-YYYYMMDD.json` - Raw entity export data from Vault
+- `entity-export-YYYYMMDD.csv` - Comprehensive entity metadata export (16 columns)
 
 ## Architecture
 
