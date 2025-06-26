@@ -7,54 +7,28 @@ on:
     branches: [ main ]
 
 jobs:
-  test-activity-export:
+  test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./activity_export
-    
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
-    
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install -e ".[dev]"
-    
-    - name: Check Python syntax
-      run: python -m py_compile main.py
-    
-    - name: Run pytest
-      run: pytest tests/ -v
 
-  test-namespace-audit:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./namespace_audit
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        if [ -f pyproject.toml ]; then pip install -e ".[dev]"; fi
-    
     - name: Check Python syntax
-      run: python -m py_compile main.py
-    
+      run: |
+        python -m py_compile src/namespace_audit/main.py
+        python -m py_compile src/activity_export/main.py
+        python -m py_compile src/entity_export/main.py
+
     - name: Run pytest
       run: pytest tests/ -v

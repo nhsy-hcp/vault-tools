@@ -1,3 +1,6 @@
+inputs/
+outputs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.pyc
@@ -45,9 +48,6 @@ db.sqlite3
 # OS-specific
 .DS_Store
 Thumbs.db
-
-# Jupyter Notebook
-.ipynb_checkpoints
 
 # Environment variables
 .env
