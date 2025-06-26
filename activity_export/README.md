@@ -22,7 +22,7 @@ This project includes a Python script, `main.py`, that generates and reads activ
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.11+
 - `pip` for managing dependencies
 - Required Python packages (listed in `requirements.txt`):
   - `requests>=2.31.0,<3.0.0` (currently 2.32.4)

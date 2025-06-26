@@ -7,7 +7,7 @@ name = "vault-activity-export"
 version = "1.0.0"
 description = "Vault Client Activity Report Generator"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31.0,<3.0.0",
     "pandas>=2.2.2,<3.0.0"

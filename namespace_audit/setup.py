@@ -6,7 +6,7 @@ setup(
     version="1.0.0",
     description="A defensive security tool for auditing HashiCorp Vault clusters",
     packages=find_packages(),
-    python_requires=">=3.8",
+    python_requires=">=3.11",
     install_requires=[
         "hvac==2.2.0",
         "pandas==2.2.2",

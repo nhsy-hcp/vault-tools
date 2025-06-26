@@ -21,7 +21,7 @@ Multi-threading provides significant performance improvements. Example results f
 ## Prerequisites
 
 ### Required
-- Python 3.8 or later
+- Python 3.11 or later
 - HashiCorp Vault access
 
 ### Optional
