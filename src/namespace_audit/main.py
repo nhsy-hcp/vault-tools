@@ -75,14 +75,21 @@ class NamespaceAuditor:
 
     def audit_cluster(self, namespace_path: str = ""):
         logger.info("Starting Vault cluster audit")
+        logger.debug(f"Initial namespace parameter: '{namespace_path}'")
         self.stats.start()
 
         try:
             cluster_name = self.vault_client.validate_connection()
 
             path_queue: queue.Queue[str] = queue.Queue()
-            initial_namespace = namespace_path if namespace_path != "/" else ""
+            # Handle None, "/" or empty namespace paths - all should default to root namespace
+            if namespace_path is None or namespace_path == "/" or namespace_path == "":
+                initial_namespace = ""
+            else:
+                initial_namespace = namespace_path
+            logger.debug(f"Initial namespace after processing: '{initial_namespace}'")
             path_queue.put(initial_namespace)
+            logger.debug(f"Added initial namespace '{initial_namespace}' to queue")
 
             workers = []
             for i in range(self.worker_threads):
@@ -113,11 +120,18 @@ class NamespaceAuditor:
             logger.exception(f"An unexpected error occurred during the audit: {e}")
 
     def _worker(self, path_queue: queue.Queue[str]):
+        worker_name = threading.current_thread().name
+        logger.debug(f"Worker {worker_name} started")
+        
         while True:
             try:
+                logger.debug(f"Worker {worker_name} waiting for namespace from queue")
                 namespace_path = path_queue.get(timeout=300)
                 if namespace_path is None:
+                    logger.debug(f"Worker {worker_name} received shutdown signal")
                     break
+
+                logger.debug(f"Worker {worker_name} got namespace: '{namespace_path}'")
 
                 if not self.rate_limit_disable and self.stats.processed_count > 0 and self.stats.processed_count % self.rate_limit_batch_size == 0:
                     logger.info(f"Rate limiting - sleeping for {self.rate_limit_sleep_seconds} seconds")
@@ -136,37 +150,54 @@ class NamespaceAuditor:
     def _traverse_namespace(self, namespace_path: str, path_queue: queue.Queue[str]):
         display_path = "root" if namespace_path == "" else namespace_path
         logger.info(f"Processing namespace: {display_path}")
+        logger.debug(f"Getting Vault client for namespace: '{namespace_path}'")
         self.stats.increment_processed()
 
         try:
             with self.vault_client.get_client(namespace_path) as client:
+                logger.debug(f"Fetching auth methods for namespace: {display_path}")
                 auth_methods = client.sys.list_auth_methods()['data']
+                logger.debug(f"Found {len(auth_methods)} auth methods for namespace: {display_path}")
+                
+                logger.debug(f"Fetching secrets engines for namespace: {display_path}")
                 secret_engines = client.sys.list_mounted_secrets_engines()['data']
+                logger.debug(f"Found {len(secret_engines)} secret engines for namespace: {display_path}")
                 
                 with self.thread_lock:
                     # Store namespace_path without trailing slash if not root
                     stored_namespace_path = namespace_path.rstrip('/') if namespace_path != "" else ""
+                    logger.debug(f"Storing auth methods for namespace '{stored_namespace_path}': {len(auth_methods)} entries")
                     self.data.auth_methods[stored_namespace_path] = auth_methods
+                    logger.debug(f"Storing secrets engines for namespace '{stored_namespace_path}': {len(secret_engines)} entries")
                     self.data.secret_engines[stored_namespace_path] = secret_engines
 
-                try:
-                    raw_namespaces_response = client.sys.list_namespaces()
-                    logger.debug(f"Raw namespaces response for {display_path}: {raw_namespaces_response}")
-                    child_namespaces = raw_namespaces_response['data']['key_info']
-                    if child_namespaces:
-                        logger.debug(f"Found child namespaces in {display_path}: {list(child_namespaces.keys())}")
-                    for name, info in child_namespaces.items():
-                        # Construct child_path: if parent is root (""), child is like "bu01/", else "parent/bu01/"
-                        child_path_full = f"{namespace_path}{name}"
+                # Only traverse child namespaces from root namespace to avoid recursion
+                if namespace_path == "":
+                    try:
+                        logger.debug(f"Attempting to list child namespaces for: {display_path}")
+                        raw_namespaces_response = client.sys.list_namespaces()
+                        # logger.debug(f"Raw namespaces response for {display_path}: {raw_namespaces_response}")
+                        child_namespaces = raw_namespaces_response['data']['key_info']
                         
-                        logger.debug(f"Constructed child_path_full: {child_path_full}")
-                        path_queue.put(child_path_full) # Put full path with trailing slash for API calls
-                        with self.thread_lock:
-                            self.data.namespaces[child_path_full.rstrip('/')] = info
-                except hvac.exceptions.InvalidPath:
-                    pass # No child namespaces
-                except hvac.exceptions.InvalidPath:
-                    pass # No child namespaces
+                        if child_namespaces:
+                            logger.debug(f"Found {len(child_namespaces)} child namespaces in {display_path}: {list(child_namespaces.keys())}")
+                            for name, info in child_namespaces.items():
+                                # Construct child_path: if parent is root (""), child is like "bu01/", else "parent/bu01/"
+                                child_path_full = f"{namespace_path}{name}"
+                                
+                                logger.debug(f"Processing child namespace '{name}' -> constructed path: '{child_path_full}'")
+                                logger.debug(f"Adding namespace '{child_path_full}' to processing queue")
+                                path_queue.put(child_path_full) # Put full path with trailing slash for API calls
+                                with self.thread_lock:
+                                    stored_path = child_path_full.rstrip('/')
+                                    self.data.namespaces[stored_path] = info
+                                    logger.debug(f"Stored namespace data for '{stored_path}' in data collection")
+                        else:
+                            logger.debug(f"No child namespaces found for {display_path}")
+                    except hvac.exceptions.InvalidPath:
+                        logger.debug(f"InvalidPath exception for {display_path} - no child namespaces available")
+                else:
+                    logger.debug(f"Skipping child namespace discovery for non-root namespace: {display_path}")
 
         except hvac.exceptions.Forbidden:
             logger.warning(f"Permission denied for namespace: {display_path}")
@@ -181,8 +212,13 @@ class NamespaceAuditor:
         os.makedirs(self.output_dir, exist_ok=True)
 
         # Write JSON files
+        logger.debug(f"Writing namespaces JSON with {len(self.data.namespaces)} namespaces")
         write_json(f"{self.output_dir}/{cluster_name}-namespaces-{date_str}.json", self.data.namespaces)
+        
+        logger.debug(f"Writing auth methods JSON with {len(self.data.auth_methods)} namespace entries")
         write_json(f"{self.output_dir}/{cluster_name}-auth-methods-{date_str}.json", self.data.auth_methods)
+        
+        logger.debug(f"Writing secrets engines JSON with {len(self.data.secret_engines)} namespace entries")
         write_json(f"{self.output_dir}/{cluster_name}-secrets-engines-{date_str}.json", self.data.secret_engines)
 
         # Write CSV summaries

@@ -90,36 +90,49 @@ def main() -> None:
     parser_all = subparsers.add_parser("all", help="Run all available commands.")
     parser_all.add_argument("-s", "--start-date", required=True, type=str, help="Start date (YYYY-MM-DD) for activity and entity exports.")
     parser_all.add_argument("-e", "--end-date", required=True, type=str, help="End date (YYYY-MM-DD) for activity and entity exports.")
-    parser_all.add_argument("-n", "--namespace", type=str, help="Namespace path to audit (default: root) for namespace audit.")
+    parser_all.add_argument("-n", "--namespace", type=str, default="", help="Namespace path to audit (default: "") for namespace audit.")
     parser_all.add_argument("-w", "--workers", type=int, default=4, help="Number of worker threads for namespace audit.")
 
     args = parser.parse_args()
     setup_logging(args.debug)
+    
+    # Create logger after setup_logging
+    logger = logging.getLogger(__name__)
+    if args.debug:
+        logger.debug("Debug logging enabled")
+        logger.debug(f"Command line arguments: {vars(args)}")
     
     # Load global configuration and create vault client
     global_config = GlobalConfig.from_environment()
     vault_client = create_vault_client()
 
     if args.command == "namespace-audit":
-        auditor = NamespaceAuditor(vault_client, args.workers, output_dir=global_config.output_dir)
+        logger.debug(f"Running namespace-audit with namespace='{args.namespace}', workers={args.workers}")
+        auditor = NamespaceAuditor(vault_client, worker_threads=args.workers, output_dir=global_config.output_dir)
         auditor.audit_cluster(args.namespace)
     elif args.command == "activity-export":
+        logger.debug(f"Running activity-export with start_date='{args.start_date}', end_date='{args.end_date}'")
         cluster_name = vault_client.validate_connection()
         run_activity_export(vault_client, args.start_date, args.end_date, cluster_name, output_dir=global_config.output_dir)
     elif args.command == "entity-export":
+        logger.debug(f"Running entity-export with start_date='{args.start_date}', end_date='{args.end_date}'")
         cluster_name = vault_client.validate_connection()
         run_entity_export(vault_client, args.start_date, args.end_date, cluster_name, output_dir=global_config.output_dir)
     elif args.command == "all":
+        logger.debug(f"Running all commands with start_date='{args.start_date}', end_date='{args.end_date}', namespace='{args.namespace}', workers={args.workers}")
         cluster_name = vault_client.validate_connection()
         
         # Run namespace-audit
-        auditor = NamespaceAuditor(vault_client, args.workers, output_dir=global_config.output_dir)
+        logger.debug(f"Starting namespace-audit portion with namespace='{args.namespace}', workers={args.workers}")
+        auditor = NamespaceAuditor(vault_client, worker_threads=args.workers, output_dir=global_config.output_dir)
         auditor.audit_cluster(args.namespace)
 
         # Run activity-export
+        logger.debug(f"Starting activity-export portion with start_date='{args.start_date}', end_date='{args.end_date}'")
         run_activity_export(vault_client, args.start_date, args.end_date, cluster_name, output_dir=global_config.output_dir)
 
         # Run entity-export
+        logger.debug(f"Starting entity-export portion with start_date='{args.start_date}', end_date='{args.end_date}'")
         run_entity_export(vault_client, args.start_date, args.end_date, cluster_name, output_dir=global_config.output_dir)
 
 if __name__ == "__main__":

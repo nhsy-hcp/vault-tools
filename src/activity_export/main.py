@@ -56,8 +56,13 @@ def process_activity_data(data: Dict[str, Any], cluster_name: str, output_dir: s
 
     # Write reports
     try:
+        logger.debug(f"Writing activity JSON with data for {len(data.get('by_namespace', []))} namespaces")
         write_json(f"{output_dir}/{cluster_name}-activity-{date_str}.json", data)
+        
+        logger.debug(f"Writing activity namespaces CSV with {len(namespaces_data)} namespace entries")
         write_csv(f"{output_dir}/{cluster_name}-activity-namespaces-{date_str}.csv", namespaces_data)
+        
+        logger.debug(f"Writing activity mounts CSV with {len(mounts_data)} mount entries")
         write_csv(f"{output_dir}/{cluster_name}-activity-mounts-{date_str}.csv", mounts_data)
     except FileProcessingError as e:
         logger.error(f"Error writing activity reports: {e}")

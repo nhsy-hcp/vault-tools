@@ -40,10 +40,14 @@ def process_entity_export_data(data: List[Dict[str, Any]], cluster_name: str, ou
     date_str = datetime.now().strftime("%Y%m%d")
     
     try:
+        logger.debug(f"Writing entity export JSON with {len(data)} entity records")
         write_json(f"{output_dir}/{cluster_name}-entity-export-{date_str}.json", data)
+        
         # Convert numeric columns to int to avoid float output in CSV
         numeric_columns = df.select_dtypes(include=['float64']).columns
         df[numeric_columns] = df[numeric_columns].astype('int64')
+        
+        logger.debug(f"Writing entity export CSV with {len(df)} entity records")
         write_csv(f"{output_dir}/{cluster_name}-entity-export-{date_str}.csv", df.to_dict('records'), df.columns.tolist())
     except FileProcessingError as e:
         logger.error(f"Failed to write entity export reports: {e}")
