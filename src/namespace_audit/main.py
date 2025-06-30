@@ -219,6 +219,9 @@ class NamespaceAuditor:
 
         df = pd.DataFrame(rows)
         df = df.fillna(0)
+        # Convert numeric columns to int to avoid float output in CSV
+        numeric_columns = df.select_dtypes(include=['float64']).columns
+        df[numeric_columns] = df[numeric_columns].astype('int64')
         write_csv(file_path, df.to_dict('records'), df.columns.tolist())
 
     def _log_summary(self):

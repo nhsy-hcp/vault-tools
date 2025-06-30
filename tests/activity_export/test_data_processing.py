@@ -106,8 +106,8 @@ class TestProcessActivityData:
         assert len(namespaces) == 1  # 1 namespace
         assert len(mounts) == 1      # 1 mount
         
-        assert namespaces[0] == {'namespace_id': 'root', 'namespace_path': '', 'mounts': 1, 'clients': 5, 'entity_clients': 4, 'non_entity_clients': 1}
-        assert mounts[0] == {'namespace_id': 'root', 'namespace_path': '', 'mount_path': 'auth/token/', 'clients': 3, 'entity_clients': 2, 'non_entity_clients': 1}
+        assert namespaces[0] == {'namespace_id': 'root', 'namespace_path': 'root/', 'mounts': 1, 'clients': 5, 'entity_clients': 4, 'non_entity_clients': 1}
+        assert mounts[0] == {'namespace_id': 'root', 'namespace_path': 'root/', 'mount_path': 'auth/token/', 'clients': 3, 'entity_clients': 2, 'non_entity_clients': 1}
     
     def test_process_multiple_namespaces_and_mounts(self):
         """Test processing data with multiple namespaces and mounts."""
@@ -148,12 +148,12 @@ class TestProcessActivityData:
         assert len(mounts) == 3      # 3 mounts
         
         # Check namespace data
-        assert namespaces[0] == {'namespace_id': 'root', 'namespace_path': '', 'mounts': 2, 'clients': 5, 'entity_clients': 4, 'non_entity_clients': 1}
+        assert namespaces[0] == {'namespace_id': 'root', 'namespace_path': 'root/', 'mounts': 2, 'clients': 5, 'entity_clients': 4, 'non_entity_clients': 1}
         assert namespaces[1] == {'namespace_id': 'ns1', 'namespace_path': 'ns1/', 'mounts': 1, 'clients': 3, 'entity_clients': 3, 'non_entity_clients': 0}
         
         # Check mount data
-        assert mounts[0] == {'namespace_id': 'root', 'namespace_path': '', 'mount_path': 'auth/token/', 'clients': 3, 'entity_clients': 2, 'non_entity_clients': 1}
-        assert mounts[1] == {'namespace_id': 'root', 'namespace_path': '', 'mount_path': 'secret/', 'clients': 2, 'entity_clients': 2, 'non_entity_clients': 0}
+        assert mounts[0] == {'namespace_id': 'root', 'namespace_path': 'root/', 'mount_path': 'auth/token/', 'clients': 3, 'entity_clients': 2, 'non_entity_clients': 1}
+        assert mounts[1] == {'namespace_id': 'root', 'namespace_path': 'root/', 'mount_path': 'secret/', 'clients': 2, 'entity_clients': 2, 'non_entity_clients': 0}
         assert mounts[2] == {'namespace_id': 'ns1', 'namespace_path': 'ns1/', 'mount_path': 'auth/userpass/', 'clients': 3, 'entity_clients': 3, 'non_entity_clients': 0}
     
     def test_process_data_missing_fields(self):
@@ -180,5 +180,5 @@ class TestProcessActivityData:
         assert len(mounts) == 1
         
         # Should use default values for missing fields
-        assert namespaces[0] == {'namespace_id': 'root', 'namespace_path': '', 'mounts': 1, 'clients': 0, 'entity_clients': 0, 'non_entity_clients': 0}
-        assert mounts[0] == {'namespace_id': 'root', 'namespace_path': '', 'mount_path': '', 'clients': 0, 'entity_clients': 0, 'non_entity_clients': 0}
+        assert namespaces[0] == {'namespace_id': 'root', 'namespace_path': 'root/', 'mounts': 1, 'clients': 0, 'entity_clients': 0, 'non_entity_clients': 0}
+        assert mounts[0] == {'namespace_id': 'root', 'namespace_path': 'root/', 'mount_path': '', 'clients': 0, 'entity_clients': 0, 'non_entity_clients': 0}

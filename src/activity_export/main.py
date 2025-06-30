@@ -31,6 +31,9 @@ def process_activity_data(data: Dict[str, Any], cluster_name: str, output_dir: s
     for namespace in data.get("by_namespace", []):
         ns_id = namespace.get("namespace_id", "")
         ns_path = namespace.get("namespace_path", "")
+        # Convert root namespace path to "root/" when namespace_id is "root"
+        if ns_id == "root" and ns_path == "":
+            ns_path = "root/"
         ns_counts = namespace.get("counts", {})
         namespaces_data.append({
             'namespace_id': ns_id,
