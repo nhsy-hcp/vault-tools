@@ -1,3 +1,17 @@
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "hvac==2.2.0",
+#     "pandas>=2.3.0,<3.0.0",
+#     "requests>=2.32.4,<3.0.0",
+#     "structlog>=23.1.0",
+#     "tenacity>=8.2.3",
+#     "python-json-logger>=2.0.7",
+#     "cachetools>=5.3.0",
+#     "rich>=13.7.0",
+# ]
+# ///
 import argparse
 import os
 import sys

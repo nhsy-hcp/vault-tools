@@ -9,11 +9,32 @@ This module provides centralized logging configuration with:
 
 import logging
 import sys
+import tomllib
 import uuid
 from contextvars import ContextVar
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 
 import structlog
+
+
+def get_version() -> str:
+    """Get application version from package metadata or pyproject.toml."""
+    try:
+        return version("vault-tools")
+    except PackageNotFoundError:
+        # Fallback: read from pyproject.toml for development/uninstalled package
+        try:
+            pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
+            if pyproject_path.exists():
+                with open(pyproject_path, "rb") as f:
+                    pyproject_data = tomllib.load(f)
+                    return pyproject_data.get("project", {}).get("version", "dev")
+        except Exception:
+            pass
+        return "dev"
+
 
 # Context variable for correlation ID (thread-safe)
 correlation_id_var: ContextVar[str | None] = ContextVar("correlation_id", default=None)
@@ -42,7 +63,7 @@ def add_correlation_id(logger: Any, method_name: str, event_dict: dict[str, Any]
 def add_app_context(logger: Any, method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
     """Add application context to log event."""
     event_dict["app"] = "vault-tools"
-    event_dict["version"] = "1.0.0"
+    event_dict["version"] = get_version()
     return event_dict
 
 

@@ -1,103 +1,6 @@
-# Universal AI Agent Guidelines
+# Vault Tools
 
-This document provides core operating constraints for AI agents. These rules apply across all tasks within this environment.
-
-## 1. File System & Environment
-
-- **Scope:** DO NOT write any files outside the project folder.
-- **Temporary Files:** Use `.tmp/` within the project root for all temporary files. Ensure this directory is created if it doesn't exist.
-- **Planning Folder:** Use `.plans/` within the project root for all development plans. Ensure this directory is created if it doesn't exist.
-- **Dependency Hygiene:** Any new libraries or dependencies must be immediately added to the project's dependency manifests (e.g., `pyproject.toml`, `requirements.txt`, `package.json`) before proceeding with implementation.
-
-## 2. Git Operations
-
-- **Staging:** NEVER use `git add .`. Always stage specific files relevant to the task.
-- **Branch Naming:** Use the format `type/short-description` (e.g., `feat/dynamic-secrets`, `fix/vault-connection`). Valid types include `feat`, `fix`, `docs`, `refactor`, `test`, and `chore`.
-- **Commit Messages:** Follow the [Conventional Commits](https://www.conventionalcommits.org/)
-  specification: `type: description` (e.g., `feat: add gcp secrets engine`).
-  Use lowercase and keep the description concise.
-- **Documentation Sync:** Any change to logic, architecture, or configuration must be tracked
-  for documentation updates in the relevant files (e.g., `README.md`, `GEMINI.md`, or `docs/`).
-  Documentation updates are batched and confirmed with the user as the penultimate step before
-  final staging and committing (see section 6.2.4).
-- **Confirmation:** You MUST ask for user confirmation before:
-  - Staging files (propose the list of specific files to be staged).
-  - Creating a new `git branch` (propose the name following the format above).
-  - Performing a `git commit` (propose the message following the format above).
-
-## 3. Code Quality & Verification
-
-- **Configuration Defaults:** If `.pre-commit-config.yaml` or `.gitignore` files do not exist, you MUST ask the user for clarification on the project type (e.g., Python, Node.js, Go) before generating sane defaults for these files.
-- **Pre-commit Verification:** You MUST run `task lint` (or equivalent pre-commit hooks including `gitleaks` and `shellcheck`) and ensure all checks pass before proposing a commit. Automatically fixable issues (like formatting) should be handled before the final proposal.
-- **Pre-commit Best Practices:**
-  - **Installation:** Upon initial project setup, ensure hooks are installed by running `pre-commit install`.
-  - **No Skipping:** NEVER use `--no-verify` or any mechanism to bypass hooks during a commit.
-  - **Auto-Fixes:** Leverage hooks that provide auto-fixes (e.g., `ruff --fix`, `terraform fmt`). Apply these fixes and re-stage files before finalizing the commit.
-  - **Incrementalism:** Run hooks frequently on staged changes to catch errors early, rather than waiting until the end of a task.
-- **Self-Correction:** If linting, `gitleaks`, `shellcheck`, or tests fail, you must attempt to fix the issues internally before reporting back to the user or proposing the changes.
-- **Safety & Secret Management:**
-  - NEVER hardcode secrets, API keys, or private credentials.
-  - Mandate the use of `.env.template` for new environment variables; update the template whenever a new variable is introduced.
-  - Always run `gitleaks` (via `task lint` or standalone) to verify that no sensitive files or patterns are present in the staged changes.
-  - Always verify that no sensitive files (e.g., `.env` files, private keys, or local-only configuration) are staged for commit.
-
-## 4. Automation & Scripting
-
-- **Task Runner:** Use `Taskfile.yml` (via `task`) for all automation and orchestration.
-- **Modularity:** For any automation logic or scripts exceeding 20 lines, create a standalone bash script in the `scripts/` folder and invoke it from the Taskfile.
-- **Script Standards:**
-  - All bash scripts in `scripts/` must use `#!/bin/bash` and `set -euo pipefail` for robust error handling.
-  - All bash scripts MUST pass `shellcheck` linting.
-- **Environment Awareness:** Always verify the runtime environment (operating system, available CLI tools, and versions) before executing complex scripts or automation tasks.
-
-## 5. Standard Task Interface
-
-Projects should ideally implement the following idempotent tasks to provide a consistent interface for AI agents:
-
-- `task init`: Perform one-time environment setup (dependencies, hooks, provider initialization).
-- `task deps`: Check for required dependencies and validate the local environment.
-- `task up`: Start the local development environment or infrastructure.
-- `task down`: Stop and tear down the local development environment.
-- `task clean`: Remove build artifacts, temporary files (`.tmp/`), and cache.
-- `task lint`: Run all code quality, formatting, and security checks (including `gitleaks` and `shellcheck`).
-- `task test`: Execute the local unit and integration test suite.
-- `task test:all`: Run the complete test suite across all modules.
-- `task test:ci`: Execute the full verification pipeline as defined in CI (including linting and all tests).
-- `task build`: Compile, package, or build container images for the project.
-
-## 6. Standard Workflows
-
-### 6.1. Development Lifecycle
-
-1. **Discovery:** Thoroughly explore the codebase and relevant documentation (`docs/`, `README.md`, `GEMINI.md`) before making changes.
-2. **Planning:** Formulate a clear strategy. For complex tasks, save a concise plan to the `.plans/` folder and share the file path with the user for alignment and review.
-3. **Iteration:** Implement changes in small, logical steps. Run local tests frequently to catch issues early.
-
-### 6.2. Review & Verification
-
-1. **Linting Gate:** Run the full project linting suite (e.g., `task lint`) and resolve all issues.
-2. **Test Coverage:** Run all relevant automated tests (e.g., `task test:all`). For bug fixes, ensure a regression test is included.
-3. **CI Simulation:** Verify that local execution matches the CI pipeline configuration. Use `act` to test GitHub Actions locally where possible. Always execute the project's designated CI verification task (e.g., `task test:ci`) to ensure alignment with the remote pipeline.
-4. **Documentation Sync Confirmation:** As the penultimate step of a complete development phase (before final staging and committing), ask the user for confirmation before performing documentation updates. This batching ensures accuracy and minimizes token consumption.
-5. **Clean Up:** Remove any temporary files (`.tmp/`), debug logs, or commented-out code before proposing final changes.
-6. **Final Approval:** Propose staged files, branch names, and commit messages to the user for final confirmation.
-
-## 7. Operational Excellence
-
-- **Communicative Brevity:** Do not provide verbose summaries of tool results or recap actions (e.g., "I have updated the file...") unless explicitly requested. Focus strictly on the task and next steps.
-- **Targeted Ingestion:** For large files (>100 lines), use `grep` to locate relevant sections first. When reading, use the `offset` and `limit` parameters in `read_file` to ingest only the necessary context.
-- **Batching & Parallelism:** Execute independent tool calls (e.g., reading multiple files or searching multiple directories) in parallel within a single turn to minimize round-trips and response time.
-- **Concise Planning:** Keep development plans extremely concise. For detailed strategies, save the plan to the `.plans/` folder and provide the link, rather than outputting long prose in the chat.
-- **Output Management:** For commands expected to produce large outputs (e.g., `terraform plan`, long builds), redirect stdout and stderr to `.tmp/out.log` and `.tmp/err.log`. Inspect these logs using `grep`, `tail`, or `head` to remain within token limits.
-- **Proactive Verification:** Immediately verify the result of any filesystem modification or file write (e.g., using `ls`, `read_file`, or `grep`) to ensure the operation succeeded as intended.
-- **State Awareness:** Always double-check the current state of the environment (e.g., `git status`, `terraform show`, `kubectl get pods`) before initiating destructive or significant state-changing operations.
-- **Markdown to PDF Conversion:** If requested by the user to convert a markdown file to PDF, use `pandoc` with the `typst` PDF engine (e.g., `pandoc -i input.md -o output.pdf --pdf-engine=typst`).
-
----
-
-## Project-Specific Context: Vault Tools
-
-### Project Overview
+## Project Overview
 
 Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providing three main capabilities:
 
@@ -110,13 +13,28 @@ Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providin
 ```
 /vault-tools/
 ├── main.py                   # CLI entry point with unified subcommands
-│
+├── pyproject.toml            # Project metadata and dependencies
+├── setup.py                  # Package setup configuration
+├── uv.lock                   # UV package manager lock file
+├── pytest.ini                # Pytest configuration
+├── Taskfile.yml              # Task automation definitions
+├── .env.example              # Environment variable template
+├── .gitignore                # Git ignore patterns
+├── .gitleaks.toml            # Secret scanning configuration
+├── .markdownlint.json        # Markdown linting rules
+├── .pre-commit-config.yaml   # Pre-commit hooks configuration
+├── AGENTS.md                 # AI agent guidelines (this file)
+├── LICENSE                   # Project license
+├── README.md                 # Project documentation
 ├── src/
 │   ├── common/
-│   │   ├── vault_client.py   # Centralized Vault API client
-│   │   ├── config.py         # Configuration management
-│   │   ├── file_utils.py     # File I/O utilities
-│   │   └── utils.py          # Common utilities
+│   │   ├── vault_client.py         # Centralized Vault API client
+│   │   ├── vault_client_retry.py   # Retry logic for Vault operations
+│   │   ├── config.py               # Configuration management
+│   │   ├── file_utils.py           # File I/O utilities
+│   │   ├── utils.py                # Common utilities
+│   │   ├── audit_logger.py         # Audit logging functionality
+│   │   └── logging_config.py       # Logging configuration
 │   │
 │   ├── namespace_audit/
 │   │   └── main.py           # Multi-threaded namespace traversal
@@ -128,13 +46,30 @@ Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providin
 │       └── main.py           # Entity data extraction
 │
 ├── tests/                    # 119 comprehensive tests
+│   ├── common/               # Common test utilities
 │   ├── namespace_audit/      # 89+ tests with threading & mocking
+│   │   ├── conftest.py       # Pytest configuration
+│   │   ├── fixtures.py       # Test fixtures
+│   │   ├── test_auditor_core.py
+│   │   ├── test_data_classes.py
+│   │   ├── test_namespace_traversal.py
+│   │   ├── test_worker_threads.py
+│   │   ├── test_integration_simple.py
+│   │   ├── test_integration.py
+│   │   └── test_default.py
 │   ├── activity_export/      # 30+ tests for API & data processing
-│   └── fixtures.py           # Centralized test fixtures
-│
+│   │   ├── conftest.py
+│   │   ├── fixtures.py
+│   │   ├── test_data_processing.py
+│   │   ├── test_vault_api.py
+│   │   ├── test_entity_export.py
+│   │   ├── test_integration.py
+│   │   └── test_default.py
+│   └── entity_export/        # Entity export tests
 ├── inputs/                   # Input files for scripts
-├── outputs/                  # Generated reports (configurable)
-└── .plans/                   # Development plans and roadmaps
+└── outputs/                  # Generated reports (configurable)
+    ├── _archive/             # Archived reports
+    └── audit/                # Audit reports
 ```
 
 ## Development Commands

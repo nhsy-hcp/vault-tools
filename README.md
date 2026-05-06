@@ -1,7 +1,6 @@
 # Vault Tools
 
 [![Test Vault Tools](https://github.com/nhsy-hcp/vault-tools/actions/workflows/test.yml/badge.svg)](https://github.com/nhsy-hcp/vault-tools/actions/workflows/test.yml)
-[![codecov](https://codecov.io/gh/nhsy-hcp/vault-tools/branch/main/graph/badge.svg)](https://codecov.io/gh/nhsy-hcp/vault-tools)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
 
