@@ -53,3 +53,6 @@ Thumbs.db
 .env
 /.bob/
 /.plans/
+
+# Testing infrastructure (not for version control)
+testing/
