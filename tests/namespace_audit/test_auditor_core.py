@@ -23,7 +23,7 @@ class TestNamespaceAuditorInitialization:
         assert auditor.vault_client == mock_vault_client
         assert isinstance(auditor.stats, AuditStats)
         assert isinstance(auditor.data, AuditData)
-        assert isinstance(auditor.thread_lock, threading.Lock)
+        assert isinstance(auditor.thread_lock, type(threading.Lock()))
 
     def test_auditor_configuration_defaults(self, mock_vault_client):
         """Test auditor default configuration values."""
