@@ -1,0 +1,167 @@
+version: '3'
+
+# Vault Tools - Task Automation
+# Uses uv for modern, fast Python package management
+
+dotenv: ['.env']
+
+vars:
+  PYTHON_VERSION: "3.12"
+  PROJECT_NAME: "vault-tools"
+
+tasks:
+  init:
+    desc: "Perform one-time environment setup"
+    cmds:
+      - echo "Installing uv package manager..."
+      - command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
+      - echo "Syncing dependencies with uv..."
+      - uv sync
+      - echo "Installing pre-commit hooks..."
+      - uv run pre-commit install
+      - echo "✅ Environment setup complete!"
+
+  deps:
+    desc: "Check for required dependencies and validate environment"
+    cmds:
+      - echo "Checking Python installation..."
+      - command -v python >/dev/null 2>&1 || (echo "❌ Python not found" && exit 1)
+      - python --version
+      - echo "Checking uv installation..."
+      - command -v uv >/dev/null 2>&1 || (echo "❌ uv not installed. Run 'task init'" && exit 1)
+      - echo "Checking virtual environment..."
+      - test -d .venv || (echo "❌ Virtual environment not found. Run 'task init'" && exit 1)
+      - echo "Checking vault binary..."
+      - command -v vault >/dev/null 2>&1 || echo "⚠️  vault binary not found. Install from https://www.vaultproject.io/downloads"
+      - echo "✅ All dependencies satisfied"
+
+  up:
+    desc: "Start local Vault dev server for testing"
+    cmds:
+      - echo "Starting Vault dev server..."
+      - echo "⚠️  Make sure vault binary is installed (https://www.vaultproject.io/downloads)"
+      - echo "Starting vault server in dev mode with root token 'root'..."
+      - echo "Add to your .env file:"
+      - echo "  export VAULT_ADDR='http://127.0.0.1:8200'"
+      - echo "  export VAULT_TOKEN='root'"
+      - echo ""
+      - vault server -dev -dev-root-token-id=root
+
+  down:
+    desc: "Stop development environment (not applicable for CLI tool)"
+    cmds:
+      - echo "ℹ️  This is a CLI tool - no services to stop"
+
+  clean:
+    desc: "Remove build artifacts, temporary files, and cache"
+    cmds:
+      - echo "Cleaning build artifacts..."
+      - rm -rf build/ dist/ *.egg-info/
+      - echo "Cleaning Python cache..."
+      - find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+      - find . -type f -name "*.pyc" -delete
+      - find . -type f -name "*.pyo" -delete
+      - echo "Cleaning test cache..."
+      - rm -rf .pytest_cache/
+      - echo "Cleaning temporary files..."
+      - rm -rf .tmp/
+      - echo "Cleaning coverage reports..."
+      - rm -rf htmlcov/ .coverage
+      - echo "✅ Cleanup complete"
+
+  lint:
+    desc: "Run all code quality, formatting, and security checks"
+    cmds:
+      - echo "Running pre-commit hooks..."
+      - uv run pre-commit run --all-files
+      - echo "✅ All linting checks passed"
+
+  test:
+    desc: "Execute the local unit and integration test suite"
+    cmds:
+      - echo "Running pytest..."
+      - uv run pytest tests/ -v
+      - echo "✅ All tests passed"
+
+  test:all:
+    desc: "Run the complete test suite across all modules"
+    cmds:
+      - echo "Running all tests with coverage..."
+      - uv run pytest tests/ -v --cov=src --cov-report=term-missing
+      - echo "✅ Complete test suite passed"
+
+  test:ci:
+    desc: "Execute the full verification pipeline as defined in CI"
+    cmds:
+      - echo "Running CI verification pipeline..."
+      - task: lint
+      - task: test:all
+      - echo "✅ CI verification complete"
+
+  build:
+    desc: "Build the package for distribution"
+    cmds:
+      - echo "Building package..."
+      - uv build
+      - echo "✅ Package built successfully"
+      - ls -lh dist/
+
+  install:
+    desc: "Install the package in development mode"
+    cmds:
+      - echo "Installing in development mode..."
+      - uv pip install -e .
+      - echo "✅ Package installed"
+      - echo "Run 'vault-tools --help' to verify"
+
+  run:
+    desc: "Run the CLI tool (usage: task run -- <args>)"
+    cmds:
+      - uv run vault-tools {{.CLI_ARGS}}
+
+  format:
+    desc: "Auto-format code with black and isort"
+    cmds:
+      - echo "Formatting code with black..."
+      - uv run black src/ tests/
+      - echo "Sorting imports with isort..."
+      - uv run isort src/ tests/
+      - echo "✅ Code formatted"
+
+  security:
+    desc: "Run security checks with bandit"
+    cmds:
+      - echo "Running security scan..."
+      - uv run bandit -r src/ -c pyproject.toml
+      - echo "✅ Security scan complete"
+
+  secrets:
+    desc: "Scan for secrets with gitleaks"
+    cmds:
+      - echo "Scanning for secrets..."
+      - uv run pre-commit run gitleaks --all-files
+      - echo "✅ No secrets found"
+
+  docs:
+    desc: "Generate or update documentation"
+    cmds:
+      - echo "Documentation is in README.md and .plans/"
+      - echo "See .plans/phase3-high-value-improvements.md for roadmap"
+
+  update:
+    desc: "Update dependencies to latest versions"
+    cmds:
+      - echo "Updating dependencies..."
+      - uv sync --upgrade
+      - echo "✅ Dependencies updated"
+
+  shell:
+    desc: "Activate virtual environment shell"
+    cmds:
+      - echo "Activating virtual environment..."
+      - echo "Run - source .venv/bin/activate"
+
+  help:
+    desc: "Show available tasks"
+    cmds:
+      - task --list

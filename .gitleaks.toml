@@ -1,0 +1,79 @@
+# Gitleaks configuration for vault-tools
+# https://github.com/gitleaks/gitleaks
+
+title = "Gitleaks configuration for vault-tools"
+
+[extend]
+# Extend default gitleaks config
+useDefault = true
+
+[[rules]]
+id = "vault-token"
+description = "Vault Token"
+regex = '''(?i)(hvs\.[a-zA-Z0-9]{24,})'''
+tags = ["vault", "token", "secret"]
+
+[[rules]]
+id = "vault-root-token"
+description = "Vault Root Token"
+regex = '''(?i)(s\.[a-zA-Z0-9]{24,})'''
+tags = ["vault", "token", "secret", "root"]
+
+[[rules]]
+id = "generic-api-key"
+description = "Generic API Key"
+regex = '''(?i)(api[_-]?key|apikey)['":\s]*[=:]\s*['"][a-zA-Z0-9]{20,}['"]'''
+tags = ["api", "key", "secret"]
+
+[[rules]]
+id = "aws-access-key"
+description = "AWS Access Key"
+regex = '''(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}'''
+tags = ["aws", "access-key", "secret"]
+
+[[rules]]
+id = "aws-secret-key"
+description = "AWS Secret Key"
+regex = '''(?i)aws[_-]?secret[_-]?access[_-]?key['":\s]*[=:]\s*['"][a-zA-Z0-9/+=]{40}['"]'''
+tags = ["aws", "secret-key", "secret"]
+
+[[rules]]
+id = "private-key"
+description = "Private Key"
+regex = '''-----BEGIN (RSA|DSA|EC|OPENSSH|PGP) PRIVATE KEY-----'''
+tags = ["private-key", "secret"]
+
+[[rules]]
+id = "generic-password"
+description = "Generic Password"
+regex = '''(?i)(password|passwd|pwd)['":\s]*[=:]\s*['"][^'"\s]{8,}['"]'''
+tags = ["password", "secret"]
+
+[allowlist]
+description = "Allowlist for false positives"
+paths = [
+    '''\.gitleaks\.toml''',
+    '''\.pre-commit-config\.yaml''',
+    '''\.secrets\.baseline''',
+    '''testing/''',
+    '''tests/.*fixtures\.py''',
+    '''tests/.*conftest\.py''',
+    '''\.plans/''',
+    '''docs/''',
+]
+
+regexes = [
+    '''example\.com''',
+    '''localhost''',
+    '''127\.0\.0\.1''',
+    '''0\.0\.0\.0''',
+    '''your-vault-token''',
+    '''your-vault-server''',
+    '''VAULT_TOKEN''',
+    '''VAULT_ADDR''',
+    '''<your-.*>''',
+    '''placeholder''',
+    '''dummy''',
+    '''test[_-]?token''',
+    '''fake[_-]?token''',
+]

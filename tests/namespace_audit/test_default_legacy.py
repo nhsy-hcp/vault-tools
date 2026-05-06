@@ -3,7 +3,7 @@
 
 # Original content has been superseded by:
 # - test_data_classes.py
-# - test_auditor_core.py  
+# - test_auditor_core.py
 # - test_namespace_traversal.py
 # - test_worker_threads.py
 # - test_integration_simple.py

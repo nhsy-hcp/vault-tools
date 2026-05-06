@@ -1,11 +1,10 @@
 """Unit tests for data classes (AuditStats, AuditData)."""
-import time
+
 import threading
+import time
 from datetime import datetime
 
-import pytest
-
-from src.namespace_audit.main import AuditStats, AuditData
+from src.namespace_audit.main import AuditData, AuditStats
 
 
 class TestAuditStats:
@@ -96,16 +95,16 @@ class TestAuditData:
     def test_data_storage_and_retrieval(self):
         """Test storing and retrieving audit data."""
         data = AuditData()
-        
+
         # Add sample namespace data
-        data.namespaces['test/'] = {'id': '123', 'custom_metadata': {}}
-        data.auth_methods['test/'] = {'userpass/': {'type': 'userpass'}}
-        data.secret_engines['test/'] = {'secret/': {'type': 'kv'}}
-        
+        data.namespaces["test/"] = {"id": "123", "custom_metadata": {}}
+        data.auth_methods["test/"] = {"userpass/": {"type": "userpass"}}
+        data.secret_engines["test/"] = {"secret/": {"type": "kv"}}
+
         # Verify data storage
-        assert 'test/' in data.namespaces
-        assert 'test/' in data.auth_methods
-        assert 'test/' in data.secret_engines
-        assert data.namespaces['test/']['id'] == '123'
-        assert data.auth_methods['test/']['userpass/']['type'] == 'userpass'
-        assert data.secret_engines['test/']['secret/']['type'] == 'kv'
+        assert "test/" in data.namespaces
+        assert "test/" in data.auth_methods
+        assert "test/" in data.secret_engines
+        assert data.namespaces["test/"]["id"] == "123"
+        assert data.auth_methods["test/"]["userpass/"]["type"] == "userpass"
+        assert data.secret_engines["test/"]["secret/"]["type"] == "kv"

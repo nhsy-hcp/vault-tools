@@ -1,19 +1,29 @@
-
 import logging
+import os
 import queue
 import threading
 import time
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any
 
 import hvac
 import pandas as pd
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
+from rich.table import Table
 
-from src.common.file_utils import write_json, write_csv
+from src.common.audit_logger import get_audit_logger
+from src.common.file_utils import write_csv, write_json
 from src.common.vault_client import VaultClient, VaultConnectionError
-from src.common.config import NamespaceAuditConfig
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +35,15 @@ class Constants:
     DEFAULT_SLEEP_SECONDS = 3
     DATE_FORMAT = "%Y%m%d"
 
+
 @dataclass
 class AuditStats:
     """Statistics for the audit process."""
+
     processed_count: int = 0
     error_count: int = 0
-    start_time: Optional[datetime] = None
-    end_time: Optional[datetime] = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def start(self) -> None:
@@ -41,7 +53,7 @@ class AuditStats:
         self.end_time = datetime.now()
 
     @property
-    def duration(self) -> Optional[float]:
+    def duration(self) -> float | None:
         if self.start_time and self.end_time:
             return (self.end_time - self.start_time).total_seconds()
         return None
@@ -54,15 +66,26 @@ class AuditStats:
         with self._lock:
             self.error_count += 1
 
+
 @dataclass
 class AuditData:
     """Container for audit results."""
-    namespaces: Dict[str, Any] = field(default_factory=dict)
-    auth_methods: Dict[str, Any] = field(default_factory=dict)
-    secret_engines: Dict[str, Any] = field(default_factory=dict)
+
+    namespaces: dict[str, Any] = field(default_factory=dict)
+    auth_methods: dict[str, Any] = field(default_factory=dict)
+    secret_engines: dict[str, Any] = field(default_factory=dict)
+
 
 class NamespaceAuditor:
-    def __init__(self, vault_client: VaultClient, worker_threads: int = 4, rate_limit_batch_size: int = 100, rate_limit_sleep_seconds: int = 3, rate_limit_disable: bool = False, output_dir: str = "outputs"):
+    def __init__(
+        self,
+        vault_client: VaultClient,
+        worker_threads: int = 4,
+        rate_limit_batch_size: int = 100,
+        rate_limit_sleep_seconds: int = 3,
+        rate_limit_disable: bool = False,
+        output_dir: str = "outputs",
+    ):
         self.vault_client = vault_client
         self.worker_threads = worker_threads
         self.rate_limit_batch_size = rate_limit_batch_size
@@ -72,57 +95,147 @@ class NamespaceAuditor:
         self.stats = AuditStats()
         self.data = AuditData()
         self.thread_lock = threading.Lock()
+        self.console = Console()
+        self.audit_logger = get_audit_logger()
+        self.progress_task = None
+        self.progress = None
 
     def audit_cluster(self, namespace_path: str = ""):
+        start_time = time.time()
+        display_ns = namespace_path if namespace_path else "root"
+
+        # Log audit start
+        self.audit_logger.log_tool_execution(
+            tool_name="namespace-audit",
+            command=f"namespace-audit --namespace {namespace_path}",
+            parameters={
+                "namespace": namespace_path,
+                "worker_threads": self.worker_threads,
+                "rate_limit_batch_size": self.rate_limit_batch_size,
+                "rate_limit_sleep_seconds": self.rate_limit_sleep_seconds,
+                "rate_limit_disable": self.rate_limit_disable,
+            },
+            result="started",
+        )
+
+        self.console.print(
+            Panel.fit(
+                f"[bold cyan]Vault Namespace Audit[/bold cyan]\n" f"Starting namespace: [yellow]{display_ns}[/yellow]\n" f"Worker threads: [green]{self.worker_threads}[/green]",
+                border_style="cyan",
+            )
+        )
+
         logger.info("Starting Vault cluster audit")
         logger.debug(f"Initial namespace parameter: '{namespace_path}'")
         self.stats.start()
 
         try:
             cluster_name = self.vault_client.validate_connection()
+            self.console.print(f"[green]✓[/green] Connected to cluster: [bold]{cluster_name}[/bold]")
 
             path_queue: queue.Queue[str] = queue.Queue()
             # Handle None, "/" or empty namespace paths - all should default to root namespace
-            if namespace_path is None or namespace_path == "/" or namespace_path == "":
-                initial_namespace = ""
-            else:
-                initial_namespace = namespace_path
+            initial_namespace = "" if namespace_path is None or namespace_path == "/" or namespace_path == "" else namespace_path
             logger.debug(f"Initial namespace after processing: '{initial_namespace}'")
             path_queue.put(initial_namespace)
             logger.debug(f"Added initial namespace '{initial_namespace}' to queue")
 
-            workers = []
-            for i in range(self.worker_threads):
-                worker_thread = threading.Thread(
-                    target=self._worker,
-                    args=(path_queue,),
-                    name=f"VaultWorker-{i + 1}"
+            # Start progress tracking
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TimeRemainingColumn(),
+                console=self.console,
+            ) as progress:
+                self.progress = progress
+                self.progress_task = progress.add_task(
+                    "[cyan]Processing namespaces...",
+                    total=None,  # Indeterminate progress
                 )
-                worker_thread.start()
-                workers.append(worker_thread)
 
-            logger.info(f"Started {len(workers)} worker threads")
-            path_queue.join()
+                workers = []
+                for i in range(self.worker_threads):
+                    worker_thread = threading.Thread(
+                        target=self._worker,
+                        args=(path_queue,),
+                        name=f"VaultWorker-{i + 1}",
+                    )
+                    worker_thread.start()
+                    workers.append(worker_thread)
 
-            for _ in workers:
-                path_queue.put(None)
+                logger.info(f"Started {len(workers)} worker threads")
+                path_queue.join()
 
-            for worker in workers:
-                worker.join(timeout=5)
+                for _ in workers:
+                    path_queue.put(None)
+
+                for worker in workers:
+                    worker.join(timeout=5)
 
             self.stats.finish()
+            duration = time.time() - start_time
+
+            # Display cache statistics
+            cache_stats = self.vault_client.get_cache_stats()
+            self.console.print("\n[bold]Cache Performance:[/bold]")
+            self.console.print(f"  Hits: [green]{cache_stats['hits']}[/green] | Misses: [yellow]{cache_stats['misses']}[/yellow] | Hit Rate: [cyan]{cache_stats['hit_rate']}[/cyan]")
+
             self._write_reports(cluster_name)
             self._log_summary()
 
+            # Log successful completion
+            self.audit_logger.log_tool_execution(
+                tool_name="namespace-audit",
+                command=f"namespace-audit --namespace {namespace_path}",
+                parameters={
+                    "namespace": namespace_path,
+                    "worker_threads": self.worker_threads,
+                },
+                result="success",
+                duration_seconds=duration,
+                metadata={
+                    "cluster_name": cluster_name,
+                    "namespaces_processed": self.stats.processed_count,
+                    "errors": self.stats.error_count,
+                    "cache_stats": cache_stats,
+                },
+            )
+
         except VaultConnectionError as e:
-            logger.error(f"Vault connection failed: {e}")
+            error_msg = str(e)
+            logger.error(f"Vault connection failed: {error_msg}")
+            self.console.print(f"[red]✗[/red] Connection failed: {error_msg}")
+
+            # Log failure
+            self.audit_logger.log_tool_execution(
+                tool_name="namespace-audit",
+                command=f"namespace-audit --namespace {namespace_path}",
+                parameters={"namespace": namespace_path},
+                result="failure",
+                duration_seconds=time.time() - start_time,
+                error=error_msg,
+            )
         except Exception as e:
-            logger.exception(f"An unexpected error occurred during the audit: {e}")
+            error_msg = str(e)
+            logger.exception(f"An unexpected error occurred during the audit: {error_msg}")
+            self.console.print(f"[red]✗[/red] Unexpected error: {error_msg}")
+
+            # Log failure
+            self.audit_logger.log_tool_execution(
+                tool_name="namespace-audit",
+                command=f"namespace-audit --namespace {namespace_path}",
+                parameters={"namespace": namespace_path},
+                result="failure",
+                duration_seconds=time.time() - start_time,
+                error=error_msg,
+            )
 
     def _worker(self, path_queue: queue.Queue[str]):
         worker_name = threading.current_thread().name
         logger.debug(f"Worker {worker_name} started")
-        
+
         while True:
             try:
                 logger.debug(f"Worker {worker_name} waiting for namespace from queue")
@@ -156,16 +269,16 @@ class NamespaceAuditor:
         try:
             with self.vault_client.get_client(namespace_path) as client:
                 logger.debug(f"Fetching auth methods for namespace: {display_path}")
-                auth_methods = client.sys.list_auth_methods()['data']
+                auth_methods = client.sys.list_auth_methods()["data"]
                 logger.debug(f"Found {len(auth_methods)} auth methods for namespace: {display_path}")
-                
+
                 logger.debug(f"Fetching secrets engines for namespace: {display_path}")
-                secret_engines = client.sys.list_mounted_secrets_engines()['data']
+                secret_engines = client.sys.list_mounted_secrets_engines()["data"]
                 logger.debug(f"Found {len(secret_engines)} secret engines for namespace: {display_path}")
-                
+
                 with self.thread_lock:
                     # Store namespace_path without trailing slash if not root
-                    stored_namespace_path = namespace_path.rstrip('/') if namespace_path != "" else ""
+                    stored_namespace_path = namespace_path.rstrip("/") if namespace_path != "" else ""
                     logger.debug(f"Storing auth methods for namespace '{stored_namespace_path}': {len(auth_methods)} entries")
                     self.data.auth_methods[stored_namespace_path] = auth_methods
                     logger.debug(f"Storing secrets engines for namespace '{stored_namespace_path}': {len(secret_engines)} entries")
@@ -177,19 +290,19 @@ class NamespaceAuditor:
                         logger.debug(f"Attempting to list child namespaces for: {display_path}")
                         raw_namespaces_response = client.sys.list_namespaces()
                         # logger.debug(f"Raw namespaces response for {display_path}: {raw_namespaces_response}")
-                        child_namespaces = raw_namespaces_response['data']['key_info']
-                        
+                        child_namespaces = raw_namespaces_response["data"]["key_info"]
+
                         if child_namespaces:
                             logger.debug(f"Found {len(child_namespaces)} child namespaces in {display_path}: {list(child_namespaces.keys())}")
                             for name, info in child_namespaces.items():
                                 # Construct child_path: if parent is root (""), child is like "bu01/", else "parent/bu01/"
                                 child_path_full = f"{namespace_path}{name}"
-                                
+
                                 logger.debug(f"Processing child namespace '{name}' -> constructed path: '{child_path_full}'")
                                 logger.debug(f"Adding namespace '{child_path_full}' to processing queue")
-                                path_queue.put(child_path_full) # Put full path with trailing slash for API calls
+                                path_queue.put(child_path_full)  # Put full path with trailing slash for API calls
                                 with self.thread_lock:
-                                    stored_path = child_path_full.rstrip('/')
+                                    stored_path = child_path_full.rstrip("/")
                                     self.data.namespaces[stored_path] = info
                                     logger.debug(f"Stored namespace data for '{stored_path}' in data collection")
                         else:
@@ -208,18 +321,36 @@ class NamespaceAuditor:
 
     def _write_reports(self, cluster_name: str):
         date_str = datetime.now().strftime("%Y%m%d")
-        import os
+
         os.makedirs(self.output_dir, exist_ok=True)
+
+        # Convert empty string namespace keys to "/" for JSON output
+        def convert_namespace_keys(data_dict):
+            """Convert empty string keys to '/' for root namespace representation."""
+            converted = {}
+            for key, value in data_dict.items():
+                new_key = "/" if key == "" else key
+                converted[new_key] = value
+            return converted
 
         # Write JSON files
         logger.debug(f"Writing namespaces JSON with {len(self.data.namespaces)} namespaces")
-        write_json(f"{self.output_dir}/{cluster_name}-namespaces-{date_str}.json", self.data.namespaces)
-        
+        write_json(
+            f"{self.output_dir}/{cluster_name}-namespaces-{date_str}.json",
+            convert_namespace_keys(self.data.namespaces),
+        )
+
         logger.debug(f"Writing auth methods JSON with {len(self.data.auth_methods)} namespace entries")
-        write_json(f"{self.output_dir}/{cluster_name}-auth-methods-{date_str}.json", self.data.auth_methods)
-        
+        write_json(
+            f"{self.output_dir}/{cluster_name}-auth-methods-{date_str}.json",
+            convert_namespace_keys(self.data.auth_methods),
+        )
+
         logger.debug(f"Writing secrets engines JSON with {len(self.data.secret_engines)} namespace entries")
-        write_json(f"{self.output_dir}/{cluster_name}-secrets-engines-{date_str}.json", self.data.secret_engines)
+        write_json(
+            f"{self.output_dir}/{cluster_name}-secrets-engines-{date_str}.json",
+            convert_namespace_keys(self.data.secret_engines),
+        )
 
         # Write CSV summaries
         self._write_namespace_summary(f"{self.output_dir}/{cluster_name}-summary-namespaces-{date_str}.csv")
@@ -229,10 +360,10 @@ class NamespaceAuditor:
     def _write_namespace_summary(self, file_path: str):
         if not self.data.namespaces:
             return
-        df = pd.DataFrame.from_dict(self.data.namespaces, orient='index')
-        df['path'] = df.index
-        df = df[['path', 'id', 'custom_metadata']]
-        write_csv(file_path, df.to_dict('records'), df.columns.tolist())
+        df = pd.DataFrame.from_dict(self.data.namespaces, orient="index")
+        df["path"] = df.index
+        df = df[["path", "id", "custom_metadata"]]
+        write_csv(file_path, df.to_dict("records"), df.columns.tolist())
 
     def _write_auth_methods_summary(self, file_path: str):
         self._write_item_summary(file_path, self.data.auth_methods, "auth_methods")
@@ -240,36 +371,56 @@ class NamespaceAuditor:
     def _write_secrets_engines_summary(self, file_path: str):
         self._write_item_summary(file_path, self.data.secret_engines, "secrets_engines")
 
-    def _write_item_summary(self, file_path: str, data: Dict[str, Any], item_type: str):
+    def _write_item_summary(self, file_path: str, data: dict[str, Any], item_type: str):
         rows = []
         for namespace, items in data.items():
-            row = {'namespace': namespace}
-            for item_name, item_data in items.items():
-                type_key = item_data.get('type')
+            row = {"namespace": namespace}
+            for _item_name, item_data in items.items():
+                type_key = item_data.get("type")
                 if type_key:
                     row[type_key] = row.get(type_key, 0) + 1
             rows.append(row)
-        
+
         if not rows:
             return
 
         df = pd.DataFrame(rows)
         df = df.fillna(0)
         # Convert numeric columns to int to avoid float output in CSV
-        numeric_columns = df.select_dtypes(include=['float64']).columns
-        df[numeric_columns] = df[numeric_columns].astype('int64')
-        write_csv(file_path, df.to_dict('records'), df.columns.tolist())
+        numeric_columns = df.select_dtypes(include=["float64"]).columns
+        df[numeric_columns] = df[numeric_columns].astype("int64")
+        write_csv(file_path, df.to_dict("records"), df.columns.tolist())
 
     def _log_summary(self):
         duration = self.stats.duration
+
+        # Create summary table
+        table = Table(title="Audit Summary", show_header=True, header_style="bold cyan")
+        table.add_column("Metric", style="cyan", width=30)
+        table.add_column("Value", style="green", width=20)
+
+        table.add_row("Namespaces Processed", str(self.stats.processed_count))
+        table.add_row(
+            "Total Auth Methods",
+            str(sum(len(methods) for methods in self.data.auth_methods.values())),
+        )
+        table.add_row(
+            "Total Secret Engines",
+            str(sum(len(engines) for engines in self.data.secret_engines.values())),
+        )
+        table.add_row("Duration", f"{duration:.2f} seconds")
+        table.add_row("Worker Threads", str(self.worker_threads))
+
+        if self.stats.error_count > 0:
+            table.add_row("Errors", f"[red]{self.stats.error_count}[/red]")
+        else:
+            table.add_row("Errors", "[green]0[/green]")
+
+        self.console.print("\n")
+        self.console.print(table)
+
+        # Log to standard logger as well
         logger.info("Audit finished.")
         logger.info(f"Processed {self.stats.processed_count} namespaces in {duration:.2f} seconds.")
         if self.stats.error_count > 0:
             logger.warning(f"Encountered {self.stats.error_count} errors.")
-
-
-
-
-    
-
-    

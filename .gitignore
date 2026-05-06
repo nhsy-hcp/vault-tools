@@ -51,3 +51,5 @@ Thumbs.db
 
 # Environment variables
 .env
+/.bob/
+/.plans/
