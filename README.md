@@ -49,30 +49,7 @@ source .venv/bin/activate  # On Unix/macOS
 vault-tools --help
 ```
 
-### Option 2: Using pip (Legacy)
-
-```bash
-# Clone the repository
-git clone https://github.com/your-username/vault-tools.git
-cd vault-tools
-
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On Unix/macOS
-# .venv\Scripts\activate   # On Windows
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Or install as package
-pip install -e .
-
-# Run the CLI
-vault-tools --help
-python main.py --help
-```
-
-### Option 3: Install Pre-commit Hooks (Recommended for Contributors)
+### Option 2: Install Pre-commit Hooks
 
 ```bash
 # With uv
@@ -182,12 +159,38 @@ See `python main.py <command> --help` for all options.
 ## Testing
 
 ```bash
-pytest tests/ -v                    # Run all tests
-pytest tests/namespace_audit/ -v    # Run specific module
-pytest tests/ --cov=src             # With coverage
+# Run all tests
+pytest tests/ -v
+
+# Run specific module
+pytest tests/namespace_audit/ -v
+
+# Run with coverage
+pytest tests/ --cov=src
+
+# Test GitHub Actions workflow locally (requires act)
+task test:gha
 ```
 
 **119 tests** with comprehensive coverage across all modules.
+
+### Continuous Integration
+
+The project uses GitHub Actions for automated testing on all branches:
+
+- Python 3.12 with uv package manager
+- Pre-commit hooks (linting, security scanning)
+- Full test suite with coverage reporting
+
+Test locally with `act` before pushing:
+
+```bash
+# Install act: https://github.com/nektos/act
+brew install act  # macOS
+
+# Validate workflow structure (dry-run)
+task test:gha
+```
 
 ## Architecture
 

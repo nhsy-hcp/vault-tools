@@ -103,11 +103,11 @@ tasks:
     cmds:
       - echo "Testing GitHub Actions workflow with act..."
       - command -v act >/dev/null 2>&1 || (echo "❌ act not installed. Install from https://github.com/nektos/act" && exit 1)
-      - echo "⚠️  Note: Full execution may fail on M-series Macs due to QEMU limitations"
+      - 'echo "⚠️  Note: Full execution may fail on M-series Macs due to QEMU limitations"'
       - echo "Running dry-run to validate workflow structure..."
       - act -j test --container-architecture linux/amd64 -P ubuntu-latest=catthehacker/ubuntu:act-latest --dryrun
       - echo "✅ GitHub Actions workflow structure validated"
-      - echo "💡 For full CI testing, push to GitHub or use: act -j test --container-architecture linux/arm64"
+      - 'echo "💡 For full CI testing, push to GitHub or use: act -j test --container-architecture linux/arm64"'
 
   build:
     desc: "Build the package for distribution"
