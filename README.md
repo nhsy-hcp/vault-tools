@@ -1,5 +1,10 @@
 # Vault Tools
 
+[![Test Vault Tools](https://github.com/nhsy-hcp/vault-tools/actions/workflows/test.yml/badge.svg)](https://github.com/nhsy-hcp/vault-tools/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/nhsy-hcp/vault-tools/branch/main/graph/badge.svg)](https://codecov.io/gh/nhsy-hcp/vault-tools)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
+
 A unified CLI tool for comprehensive HashiCorp Vault operations, providing defensive security capabilities for namespace auditing, activity monitoring, and entity management.
 
 ## Features
@@ -11,7 +16,7 @@ A unified CLI tool for comprehensive HashiCorp Vault operations, providing defen
 ## Quick Start
 
 1. **Prerequisites**: Python 3.12+ and access to a HashiCorp Vault instance
-2. **Install**: `uv sync` (or `pip install -r requirements.txt` for legacy)
+2. **Install**: `uv sync`
 3. **Configure**: Set `VAULT_ADDR` and `VAULT_TOKEN` environment variables
 4. **Run**: `uv run vault-tools --help` or `python main.py --help` to see available commands
 
@@ -22,11 +27,11 @@ A unified CLI tool for comprehensive HashiCorp Vault operations, providing defen
 ### Prerequisites
 
 - Python 3.12 or higher
-- [uv](https://docs.astral.sh/uv/) package manager (recommended) or pip
+- [uv](https://docs.astral.sh/uv/) package manager
 - Access to a HashiCorp Vault instance
 - Valid Vault token with appropriate permissions
 
-### Option 1: Using uv (Recommended - Modern & Fast)
+### Setup and Run
 
 ```bash
 # Install uv if not already installed
@@ -49,15 +54,11 @@ source .venv/bin/activate  # On Unix/macOS
 vault-tools --help
 ```
 
-### Option 2: Install Pre-commit Hooks
+### Pre-commit Hooks
 
 ```bash
 # With uv
 uv run pre-commit install
-
-# Or with pip
-pip install pre-commit
-pre-commit install
 
 # Run manually on all files
 pre-commit run --all-files
