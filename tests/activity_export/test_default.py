@@ -1,5 +1,10 @@
 from datetime import datetime, timedelta
-from src.common.utils import get_first_day_of_month, get_last_day_of_month, get_last_month
+
+from src.common.utils import (
+    get_first_day_of_month,
+    get_last_day_of_month,
+    get_last_month,
+)
 
 
 def test_get_first_day_of_month():
@@ -9,7 +14,11 @@ def test_get_first_day_of_month():
 
 
 def test_get_last_day_of_month_1():
-    month = datetime(2024, 3, 15, )
+    month = datetime(
+        2024,
+        3,
+        15,
+    )
     expected = datetime(2024, 3, 31, 0, 0, 0)
     assert get_last_day_of_month(month) == expected
 
@@ -30,15 +39,15 @@ def test_get_last_month():
     # Test that the function returns a datetime object for the last day of the previous month
     result = get_last_month()
     assert isinstance(result, datetime)
-    
+
     # Verify it's the last day of the previous month
     today = datetime.today()
     expected_month = today.month - 1 if today.month > 1 else 12
     expected_year = today.year if today.month > 1 else today.year - 1
-    
+
     assert result.month == expected_month
     assert result.year == expected_year
-    
+
     # Verify it's the last day of that month by checking that adding one day moves to next month
     next_day = result + timedelta(days=1)
     assert next_day.day == 1

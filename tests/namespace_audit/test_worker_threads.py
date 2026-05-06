@@ -1,12 +1,13 @@
 """Tests for worker thread functionality."""
+
 import queue
 import threading
 from unittest.mock import Mock
 
 import pytest
 
-from src.namespace_audit.main import NamespaceAuditor
 from src.common.vault_client import VaultClient
+from src.namespace_audit.main import NamespaceAuditor
 
 
 class TestWorkerThreads:
@@ -21,7 +22,7 @@ class TestWorkerThreads:
         # Mock the traverse method to avoid actual Vault calls
         # The method takes (namespace_path, path_queue) parameters
         auditor._traverse_namespace = Mock(return_value=None)
-        
+
         return auditor
 
     def test_worker_processes_queue_items(self, auditor_with_mock_traverse):
@@ -32,10 +33,7 @@ class TestWorkerThreads:
         test_queue.put(None)  # Shutdown signal
 
         # Start worker in a separate thread
-        worker_thread = threading.Thread(
-            target=auditor_with_mock_traverse._worker,
-            args=(test_queue,)
-        )
+        worker_thread = threading.Thread(target=auditor_with_mock_traverse._worker, args=(test_queue,))
         worker_thread.start()
         worker_thread.join(timeout=2)  # Give more time for processing
 
@@ -47,10 +45,7 @@ class TestWorkerThreads:
         test_queue = queue.Queue()
         test_queue.put(None)  # Immediate shutdown
 
-        worker_thread = threading.Thread(
-            target=auditor_with_mock_traverse._worker,
-            args=(test_queue,)
-        )
+        worker_thread = threading.Thread(target=auditor_with_mock_traverse._worker, args=(test_queue,))
         worker_thread.start()
         worker_thread.join(timeout=1)
 
@@ -62,12 +57,9 @@ class TestWorkerThreads:
         test_queue = queue.Queue()
         # Don't put anything in queue, should timeout and continue
 
-        worker_thread = threading.Thread(
-            target=auditor_with_mock_traverse._worker,
-            args=(test_queue,)
-        )
+        worker_thread = threading.Thread(target=auditor_with_mock_traverse._worker, args=(test_queue,))
         worker_thread.start()
-        
+
         # Put shutdown signal after a delay
         test_queue.put(None)
         worker_thread.join(timeout=2)
@@ -79,15 +71,12 @@ class TestWorkerThreads:
         """Test worker handles errors in traverse method."""
         # Make traverse method raise an exception
         auditor_with_mock_traverse._traverse_namespace.side_effect = Exception("Test error")
-        
+
         test_queue = queue.Queue()
         test_queue.put("error-namespace/")
         test_queue.put(None)  # Shutdown signal
 
-        worker_thread = threading.Thread(
-            target=auditor_with_mock_traverse._worker,
-            args=(test_queue,)
-        )
+        worker_thread = threading.Thread(target=auditor_with_mock_traverse._worker, args=(test_queue,))
         worker_thread.start()
         worker_thread.join(timeout=2)
 
@@ -100,17 +89,14 @@ class TestWorkerThreads:
         auditor_with_mock_traverse.rate_limit_disable = False
         auditor_with_mock_traverse.rate_limit_batch_size = 2
         auditor_with_mock_traverse.rate_limit_sleep_seconds = 0.01  # Short for testing
-        
+
         test_queue = queue.Queue()
         test_queue.put("namespace1/")
         test_queue.put("namespace2/")  # Should trigger rate limit
         test_queue.put("namespace3/")
         test_queue.put(None)  # Shutdown signal
 
-        worker_thread = threading.Thread(
-            target=auditor_with_mock_traverse._worker,
-            args=(test_queue,)
-        )
+        worker_thread = threading.Thread(target=auditor_with_mock_traverse._worker, args=(test_queue,))
         worker_thread.start()
         worker_thread.join(timeout=3)
 
@@ -125,40 +111,36 @@ class TestWorkerThreadIntegration:
         """Test multiple worker threads working together."""
         mock_client = Mock(spec=VaultClient)
         auditor = NamespaceAuditor(mock_client, worker_threads=2)
-        
+
         # Mock traverse to avoid actual API calls
         processed_namespaces = []
-        
+
         def mock_traverse(namespace_path, path_queue):
             processed_namespaces.append(namespace_path)
-            
+
         auditor._traverse_namespace = mock_traverse
-        
+
         # Create test queue with multiple items
         test_queue = queue.Queue()
         namespaces = [f"namespace{i}/" for i in range(5)]
         for ns in namespaces:
             test_queue.put(ns)
-        
+
         # Add shutdown signals for each worker
         for _ in range(2):
             test_queue.put(None)
-        
+
         # Start multiple workers
         workers = []
         for i in range(2):
-            worker = threading.Thread(
-                target=auditor._worker,
-                args=(test_queue,),
-                name=f"Worker-{i}"
-            )
+            worker = threading.Thread(target=auditor._worker, args=(test_queue,), name=f"Worker-{i}")
             workers.append(worker)
             worker.start()
-        
+
         # Wait for completion
         for worker in workers:
             worker.join(timeout=3)
-        
+
         # Verify all namespaces were processed
         assert len(processed_namespaces) == 5
         assert set(processed_namespaces) == set(namespaces)
@@ -167,21 +149,18 @@ class TestWorkerThreadIntegration:
         """Test proper queue.task_done() usage."""
         mock_client = Mock(spec=VaultClient)
         auditor = NamespaceAuditor(mock_client)
-        
+
         # Mock traverse to avoid actual API calls
         auditor._traverse_namespace = Mock()
-        
+
         test_queue = queue.Queue()
         test_queue.put("test-namespace/")
         test_queue.put(None)
-        
+
         # Start worker
-        worker_thread = threading.Thread(
-            target=auditor._worker,
-            args=(test_queue,)
-        )
+        worker_thread = threading.Thread(target=auditor._worker, args=(test_queue,))
         worker_thread.start()
         worker_thread.join(timeout=2)
-        
+
         # Queue should be properly managed
         assert test_queue.empty() or test_queue.qsize() == 0

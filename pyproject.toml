@@ -4,14 +4,35 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vault-tools"
-version = "1.0.0"
-description = "Unified CLI tool for interacting with HashiCorp Vault"
-readme = "CLAUDE.md"
-requires-python = ">=3.8"
+version = "2.0.0"
+description = "Unified CLI tool for HashiCorp Vault operations - namespace auditing, activity monitoring, and entity management"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "Vault Tools Contributors"}
+]
+keywords = ["vault", "hashicorp", "security", "audit", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Developers",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "hvac==2.2.0",
     "pandas>=2.3.0,<3.0.0",
     "requests>=2.32.4,<3.0.0",
+    "structlog>=23.1.0",
+    "tenacity>=8.2.3",
+    "python-json-logger>=2.0.7",
+    "cachetools>=5.3.0",
+    "rich>=13.7.0",
 ]
 
 [project.optional-dependencies]
@@ -26,44 +47,18 @@ dev = [
 [project.scripts]
 vault-tools = "main:main"
 
-[tool.black]
-line-length = 88
-target-version = ['py38']
-include = '\.pyi?$'
-extend-exclude = '''
-/(
-  # directories
-  \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
-  | \.venv
-  | build
-  | dist
-)/
-'''
+[tool.ruff]
+line-length = 200
+target-version = "py312"
 
-[tool.isort]
-profile = "black"
-multi_line_output = 3
-include_trailing_comma = true
-force_grid_wrap = 0
-use_parentheses = true
-ensure_newline_before_comments = true
-line_length = 88
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "T20", "SIM"]
+ignore = ["E501"]  # Line too long (handled by formatter)
 
-[tool.flake8]
-max-line-length = 88
-extend-ignore = ["E203", "W503"]
-exclude = [
-    ".git",
-    "__pycache__",
-    ".venv",
-    "build",
-    "dist",
-    "*.egg-info",
-]
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
 
 [tool.mypy]
 python_version = "3.8"

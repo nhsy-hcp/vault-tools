@@ -1,40 +1,28 @@
-
 import argparse
-import logging
 import os
 import sys
 
-from src.common.vault_client import VaultClient
-from src.common.config import GlobalConfig
-from src.namespace_audit.main import NamespaceAuditor
 from src.activity_export.main import run_activity_export
+from src.common.config import GlobalConfig
+from src.common.logging_config import (
+    get_structured_logger,
+    set_correlation_id,
+    setup_logging,
+)
+from src.common.vault_client import VaultClient
 from src.entity_export.main import run_entity_export
+from src.namespace_audit.main import NamespaceAuditor
 
 
-def setup_logging(debug: bool = False) -> None:
-    """Configure logging for the application.
-    
-    Args:
-        debug: If True, enable DEBUG level logging for all loggers.
-               If False, use INFO level logging.
-    """
-    level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    if debug:
-        logging.getLogger('hvac').setLevel(logging.DEBUG)
-        logging.getLogger('requests').setLevel(logging.DEBUG)
-        logging.getLogger('urllib3').setLevel(logging.DEBUG)
-
-def create_vault_client() -> VaultClient:
+def create_vault_client(logger) -> VaultClient:
     """Create and validate Vault client from environment variables.
-    
+
+    Args:
+        logger: Structured logger instance
+
     Returns:
         VaultClient: Configured Vault client instance.
-        
+
     Raises:
         SystemExit: If required environment variables are not set.
     """
@@ -47,20 +35,26 @@ def create_vault_client() -> VaultClient:
             missing_vars.append("VAULT_ADDR")
         if not vault_token:
             missing_vars.append("VAULT_TOKEN")
-        
-        print(f"Missing required environment variables: {', '.join(missing_vars)}", file=sys.stderr)
-        print("Please set these variables:", file=sys.stderr)
+
+        logger.error(
+            "missing_required_environment_variables",
+            missing_vars=missing_vars,
+            vault_addr_set=bool(vault_addr),
+            vault_token_set=bool(vault_token),
+        )
+
         if not vault_addr:
-            print("  export VAULT_ADDR='https://your-vault-server.com'", file=sys.stderr)
+            pass
         if not vault_token:
-            print("  export VAULT_TOKEN='your-vault-token'", file=sys.stderr)
+            pass
         sys.exit(1)
-    
+
     return VaultClient(vault_addr, vault_token)
+
 
 def main() -> None:
     """Main entry point for the Vault Tools CLI application.
-    
+
     Parses command line arguments and executes the appropriate tool:
     - namespace-audit: Audit Vault namespaces, auth methods, and secret engines
     - activity-export: Export Vault activity logs and usage metrics
@@ -69,6 +63,7 @@ def main() -> None:
     """
     parser = argparse.ArgumentParser(description="Vault Tools CLI")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
+    parser.add_argument("--json-logs", action="store_true", help="Output logs in JSON format.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # Namespace Audit command
@@ -88,52 +83,169 @@ def main() -> None:
 
     # All command
     parser_all = subparsers.add_parser("all", help="Run all available commands.")
-    parser_all.add_argument("-s", "--start-date", required=True, type=str, help="Start date (YYYY-MM-DD) for activity and entity exports.")
-    parser_all.add_argument("-e", "--end-date", required=True, type=str, help="End date (YYYY-MM-DD) for activity and entity exports.")
-    parser_all.add_argument("-n", "--namespace", type=str, default="", help="Namespace path to audit (default: "") for namespace audit.")
-    parser_all.add_argument("-w", "--workers", type=int, default=4, help="Number of worker threads for namespace audit.")
+    parser_all.add_argument(
+        "-s",
+        "--start-date",
+        required=True,
+        type=str,
+        help="Start date (YYYY-MM-DD) for activity and entity exports.",
+    )
+    parser_all.add_argument(
+        "-e",
+        "--end-date",
+        required=True,
+        type=str,
+        help="End date (YYYY-MM-DD) for activity and entity exports.",
+    )
+    parser_all.add_argument(
+        "-n",
+        "--namespace",
+        type=str,
+        default="",
+        help="Namespace path to audit (default: " ") for namespace audit.",
+    )
+    parser_all.add_argument(
+        "-w",
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of worker threads for namespace audit.",
+    )
 
     args = parser.parse_args()
-    setup_logging(args.debug)
-    
-    # Create logger after setup_logging
-    logger = logging.getLogger(__name__)
+
+    # Setup structured logging
+    setup_logging(debug=args.debug, json_logs=args.json_logs)
+
+    # Generate correlation ID for this execution
+    import uuid
+
+    correlation_id = str(uuid.uuid4())
+    set_correlation_id(correlation_id)
+
+    # Create structured logger
+    logger = get_structured_logger(__name__)
+
+    logger.info(
+        "vault_tools_started",
+        command=args.command,
+        debug=args.debug,
+        json_logs=args.json_logs,
+    )
+
     if args.debug:
-        logger.debug("Debug logging enabled")
-        logger.debug(f"Command line arguments: {vars(args)}")
-    
+        logger.debug("debug_logging_enabled", args=vars(args))
+
     # Load global configuration and create vault client
     global_config = GlobalConfig.from_environment()
-    vault_client = create_vault_client()
+    vault_client = create_vault_client(logger)
 
-    if args.command == "namespace-audit":
-        logger.debug(f"Running namespace-audit with namespace='{args.namespace}', workers={args.workers}")
-        auditor = NamespaceAuditor(vault_client, worker_threads=args.workers, output_dir=global_config.output_dir)
-        auditor.audit_cluster(args.namespace)
-    elif args.command == "activity-export":
-        logger.debug(f"Running activity-export with start_date='{args.start_date}', end_date='{args.end_date}'")
-        cluster_name = vault_client.validate_connection()
-        run_activity_export(vault_client, args.start_date, args.end_date, cluster_name, output_dir=global_config.output_dir)
-    elif args.command == "entity-export":
-        logger.debug(f"Running entity-export with start_date='{args.start_date}', end_date='{args.end_date}'")
-        cluster_name = vault_client.validate_connection()
-        run_entity_export(vault_client, args.start_date, args.end_date, cluster_name, output_dir=global_config.output_dir)
-    elif args.command == "all":
-        logger.debug(f"Running all commands with start_date='{args.start_date}', end_date='{args.end_date}', namespace='{args.namespace}', workers={args.workers}")
-        cluster_name = vault_client.validate_connection()
-        
-        # Run namespace-audit
-        logger.debug(f"Starting namespace-audit portion with namespace='{args.namespace}', workers={args.workers}")
-        auditor = NamespaceAuditor(vault_client, worker_threads=args.workers, output_dir=global_config.output_dir)
-        auditor.audit_cluster(args.namespace)
+    try:
+        if args.command == "namespace-audit":
+            logger.info(
+                "command_execution_started",
+                command="namespace-audit",
+                namespace=args.namespace,
+                workers=args.workers,
+            )
+            auditor = NamespaceAuditor(
+                vault_client,
+                worker_threads=args.workers,
+                output_dir=global_config.output_dir,
+            )
+            auditor.audit_cluster(args.namespace)
+            logger.info("command_execution_completed", command="namespace-audit")
 
-        # Run activity-export
-        logger.debug(f"Starting activity-export portion with start_date='{args.start_date}', end_date='{args.end_date}'")
-        run_activity_export(vault_client, args.start_date, args.end_date, cluster_name, output_dir=global_config.output_dir)
+        elif args.command == "activity-export":
+            logger.info(
+                "command_execution_started",
+                command="activity-export",
+                start_date=args.start_date,
+                end_date=args.end_date,
+            )
+            cluster_name = vault_client.validate_connection()
+            run_activity_export(
+                vault_client,
+                args.start_date,
+                args.end_date,
+                cluster_name,
+                output_dir=global_config.output_dir,
+            )
+            logger.info("command_execution_completed", command="activity-export")
 
-        # Run entity-export
-        logger.debug(f"Starting entity-export portion with start_date='{args.start_date}', end_date='{args.end_date}'")
-        run_entity_export(vault_client, args.start_date, args.end_date, cluster_name, output_dir=global_config.output_dir)
+        elif args.command == "entity-export":
+            logger.info(
+                "command_execution_started",
+                command="entity-export",
+                start_date=args.start_date,
+                end_date=args.end_date,
+            )
+            cluster_name = vault_client.validate_connection()
+            run_entity_export(
+                vault_client,
+                args.start_date,
+                args.end_date,
+                cluster_name,
+                output_dir=global_config.output_dir,
+            )
+            logger.info("command_execution_completed", command="entity-export")
+
+        elif args.command == "all":
+            logger.info(
+                "command_execution_started",
+                command="all",
+                start_date=args.start_date,
+                end_date=args.end_date,
+                namespace=args.namespace,
+                workers=args.workers,
+            )
+            cluster_name = vault_client.validate_connection()
+
+            # Run namespace-audit
+            logger.info("subcommand_started", subcommand="namespace-audit")
+            auditor = NamespaceAuditor(
+                vault_client,
+                worker_threads=args.workers,
+                output_dir=global_config.output_dir,
+            )
+            auditor.audit_cluster(args.namespace)
+            logger.info("subcommand_completed", subcommand="namespace-audit")
+
+            # Run activity-export
+            logger.info("subcommand_started", subcommand="activity-export")
+            run_activity_export(
+                vault_client,
+                args.start_date,
+                args.end_date,
+                cluster_name,
+                output_dir=global_config.output_dir,
+            )
+            logger.info("subcommand_completed", subcommand="activity-export")
+
+            # Run entity-export
+            logger.info("subcommand_started", subcommand="entity-export")
+            run_entity_export(
+                vault_client,
+                args.start_date,
+                args.end_date,
+                cluster_name,
+                output_dir=global_config.output_dir,
+            )
+            logger.info("subcommand_completed", subcommand="entity-export")
+
+            logger.info("command_execution_completed", command="all")
+
+        logger.info("vault_tools_completed", command=args.command)
+
+    except Exception as e:
+        logger.exception(
+            "vault_tools_failed",
+            command=args.command,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
+        raise
+
 
 if __name__ == "__main__":
     main()

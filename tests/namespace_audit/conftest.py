@@ -1,45 +1,59 @@
-"""Shared test fixtures and configuration."""
-import sys
+"""Pytest configuration and fixtures for namespace_audit tests."""
+
 import os
-import pytest
+import sys
 
 # Add the parent directory to Python path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Import fixtures from the new fixtures module
-from .fixtures import mock_vault_client, auditor, sample_audit_data, populated_auditor, mock_threading
+# Import all fixtures from the fixtures module
+import pytest
+
+from tests.namespace_audit.fixtures import (
+    auditor,
+    mock_file_operations,
+    mock_threading,
+    mock_vault_client,
+    populated_auditor,
+    sample_audit_data,
+)
+
 
 @pytest.fixture
 def mock_vault_responses():
     """Mock Vault API responses for testing."""
     return {
-        'health': {
-            'cluster_name': 'test-cluster',
-            'sealed': False,
-            'initialized': True
+        "health": {
+            "cluster_name": "test-cluster",
+            "sealed": False,
+            "initialized": True,
         },
-        'auth_methods': {
-            'userpass/': {'type': 'userpass'},
-            'token/': {'type': 'token'}
+        "auth_methods": {
+            "userpass/": {"type": "userpass"},
+            "token/": {"type": "token"},
         },
-        'secret_engines': {
-            'secret/': {'type': 'kv'},
-            'pki/': {'type': 'pki'}
-        },
-        'namespaces': {
-            'data': {
-                'key_info': {
-                    'team-a/': {'id': '123'},
-                    'team-b/': {'id': '456'}
-                }
-            }
-        }
+        "secret_engines": {"secret/": {"type": "kv"}, "pki/": {"type": "pki"}},
+        "namespaces": {"data": {"key_info": {"team-a/": {"id": "123"}, "team-b/": {"id": "456"}}}},
     }
+
 
 @pytest.fixture
 def temp_dir():
     """Provide a temporary directory for file operations."""
     import tempfile
     from pathlib import Path
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         yield Path(tmp_dir)
+
+
+__all__ = [
+    "auditor",
+    "mock_file_operations",
+    "mock_threading",
+    "mock_vault_client",
+    "mock_vault_responses",
+    "populated_auditor",
+    "sample_audit_data",
+    "temp_dir",
+]

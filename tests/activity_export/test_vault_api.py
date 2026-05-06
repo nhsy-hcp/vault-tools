@@ -1,15 +1,16 @@
 """Tests for Vault API interaction functions."""
-import pytest
-from unittest.mock import patch, Mock
 
-from src.common.vault_client import VaultClient, VaultAPIError
+from unittest.mock import patch
+
+import pytest
+
 from src.activity_export.main import get_activity_data
-from src.common.file_utils import write_csv
-from .fixtures import mock_vault_client, sample_activity_data, sample_namespace_csv_data, sample_mounts_csv_data
+from src.common.vault_client import VaultAPIError
 
 
 class FileProcessingError(Exception):
     """Mock exception for file processing errors."""
+
     pass
 
 
@@ -39,28 +40,24 @@ class TestDataProcessing:
     def test_process_activity_data_creates_csv_data(self, sample_activity_data):
         """Test that process_activity_data creates correct CSV data structure."""
         from src.activity_export.main import process_activity_data
-        
-        with patch('src.activity_export.main.write_csv') as mock_write_csv:
-            with patch('src.activity_export.main.write_json') as mock_write_json:
-                namespaces_data, mounts_data = process_activity_data(sample_activity_data, "test-cluster")
-                
-                # Verify the data structure
-                assert len(namespaces_data) == 1
-                assert len(mounts_data) == 1
-                assert namespaces_data[0]['namespace_id'] == "root"  # namespace_id
-                assert mounts_data[0]['mount_path'] == "auth/token/"  # mount_path
+
+        with patch("src.activity_export.main.write_csv"), patch("src.activity_export.main.write_json"):
+            namespaces_data, mounts_data = process_activity_data(sample_activity_data, "test-cluster")
+
+            # Verify the data structure
+            assert len(namespaces_data) == 1
+            assert len(mounts_data) == 1
+            assert namespaces_data[0]["namespace_id"] == "root"  # namespace_id
+            assert mounts_data[0]["mount_path"] == "auth/token/"  # mount_path
 
     def test_process_empty_activity_data(self):
         """Test processing empty activity data."""
         from src.activity_export.main import process_activity_data
-        
+
         empty_data = {"by_namespace": []}
-        
-        with patch('src.activity_export.main.write_csv') as mock_write_csv:
-            with patch('src.activity_export.main.write_json') as mock_write_json:
-                namespaces_data, mounts_data = process_activity_data(empty_data, "test-cluster")
-                
-                assert len(namespaces_data) == 0
-                assert len(mounts_data) == 0
 
+        with patch("src.activity_export.main.write_csv"), patch("src.activity_export.main.write_json"):
+            namespaces_data, mounts_data = process_activity_data(empty_data, "test-cluster")
 
+            assert len(namespaces_data) == 0
+            assert len(mounts_data) == 0
