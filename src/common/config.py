@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 
 from .exceptions import ConfigurationError
+from .utils import normalise_namespace_path
 
 # Note (CF3): all boolean env-var parsing in this module intentionally uses the
 # pattern `.lower() == "true"` — this is consistent across every boolean flag
@@ -44,10 +45,18 @@ class GlobalConfig:
             raise ConfigurationError(f"Output directory '{self.output_dir}' is not writable. " "Set VAULT_TOOLS_OUTPUT_DIR to a writable path.")
 
     @classmethod
-    def from_environment(cls) -> "GlobalConfig":
-        """Create configuration from environment variables."""
+    def from_environment(cls, output_dir: str | None = None) -> "GlobalConfig":
+        """Create configuration from environment variables.
+
+        Args:
+            output_dir: Overrides ``VAULT_TOOLS_OUTPUT_DIR`` when set (the CLI
+                ``--output-dir`` flag). Passed through the constructor so
+                ``__post_init__`` validates the directory that will actually be
+                written to. Assigning to ``output_dir`` after construction
+                bypasses that check and defers the failure to report-write time.
+        """
         return cls(
-            output_dir=os.environ.get("VAULT_TOOLS_OUTPUT_DIR", "outputs"),
+            output_dir=output_dir if output_dir is not None else os.environ.get("VAULT_TOOLS_OUTPUT_DIR", "outputs"),
             debug=os.environ.get("VAULT_TOOLS_DEBUG", "false").lower() == "true",
         )
 
@@ -74,9 +83,9 @@ class NamespaceAuditConfig(VaultConfig):
         if self.hvac_timeout <= 0:
             raise ConfigurationError(f"HVAC timeout must be positive (got {self.hvac_timeout}). Set VAULT_TOOLS_TIMEOUT to a positive integer.")
 
-        # Ensure namespace path ends with / if not empty
-        if self.namespace_path and not self.namespace_path.endswith("/"):
-            self.namespace_path += "/"
+        # Canonical form (trailing slash on non-root) via the shared helper —
+        # see normalise_namespace_path for the convention (C1).
+        self.namespace_path = normalise_namespace_path(self.namespace_path)
 
     @classmethod
     def from_environment(cls, **overrides) -> "NamespaceAuditConfig":
@@ -108,9 +117,7 @@ class NamespaceAuditConfig(VaultConfig):
 
         # Normalise namespace path from env before passing to config so
         # __post_init__ receives an already-canonical value (CF2).
-        raw_namespace = os.environ.get("VAULT_TOOLS_NAMESPACE", "")
-        if raw_namespace and not raw_namespace.endswith("/"):
-            raw_namespace += "/"
+        raw_namespace = normalise_namespace_path(os.environ.get("VAULT_TOOLS_NAMESPACE", ""))
 
         config = cls(
             vault_addr=vault_addr,

@@ -30,23 +30,45 @@ class TestNormaliseNamespacePath:
     def test_single_slash_returns_root(self):
         assert normalise_namespace_path("/") == ""
 
-    def test_plain_name_unchanged(self):
-        assert normalise_namespace_path("foo") == "foo"
+    # Canonical form carries a trailing slash on non-root paths: that is what
+    # Vault's namespace API expects, and what NamespaceAuditConfig produces.
+    # The helper previously stripped the slash, contradicting both.
 
-    def test_trailing_slash_stripped(self):
-        assert normalise_namespace_path("foo/") == "foo"
+    def test_plain_name_gains_trailing_slash(self):
+        assert normalise_namespace_path("foo") == "foo/"
 
-    def test_nested_trailing_slash_stripped(self):
-        assert normalise_namespace_path("foo/bar/") == "foo/bar"
+    def test_trailing_slash_preserved(self):
+        assert normalise_namespace_path("foo/") == "foo/"
+
+    def test_nested_trailing_slash_preserved(self):
+        assert normalise_namespace_path("foo/bar/") == "foo/bar/"
 
     def test_deep_nesting_preserved(self):
-        assert normalise_namespace_path("a/b/c/") == "a/b/c"
+        assert normalise_namespace_path("a/b/c/") == "a/b/c/"
 
     def test_whitespace_stripped(self):
-        assert normalise_namespace_path("  foo/ ") == "foo"
+        assert normalise_namespace_path("  foo/ ") == "foo/"
+
+    def test_duplicate_trailing_slashes_collapsed(self):
+        assert normalise_namespace_path("foo//") == "foo/"
 
     def test_only_slashes_returns_root(self):
         assert normalise_namespace_path("///") == ""
+
+    def test_is_idempotent(self):
+        once = normalise_namespace_path("foo/bar")
+        assert normalise_namespace_path(once) == once
+
+    def test_matches_config_post_init_convention(self):
+        """The helper and NamespaceAuditConfig must not disagree (C1)."""
+        from src.common.config import NamespaceAuditConfig
+
+        cfg = NamespaceAuditConfig(
+            vault_addr="https://vault.example.com",
+            vault_token="s.test",
+            namespace_path="team-a",
+        )
+        assert cfg.namespace_path == normalise_namespace_path("team-a")
 
 
 # ---------------------------------------------------------------------------
@@ -91,19 +113,24 @@ class TestEntityExportSchemaValidation:
         result = process_entity_export_data(data, "cluster")
         assert result is None
 
-    def test_missing_namespace_id_returns_none(self):
+    def test_missing_namespace_id_still_exports(self, tmp_path):
+        """Namespace columns are optional — Vault omits them on OSS clusters.
+
+        E4's schema check is preserved, but it guards client_type only. Treating
+        the namespace columns as required made this a silent no-op export.
+        """
         from src.entity_export.main import process_entity_export_data
 
         data = [{"namespace_path": "root/", "client_type": "entity"}]
-        result = process_entity_export_data(data, "cluster")
-        assert result is None
+        result = process_entity_export_data(data, "cluster", output_dir=str(tmp_path))
+        assert result is not None
 
-    def test_missing_namespace_path_returns_none(self):
+    def test_missing_namespace_path_still_exports(self, tmp_path):
         from src.entity_export.main import process_entity_export_data
 
         data = [{"namespace_id": "root", "client_type": "entity"}]
-        result = process_entity_export_data(data, "cluster")
-        assert result is None
+        result = process_entity_export_data(data, "cluster", output_dir=str(tmp_path))
+        assert result is not None
 
     def test_all_required_columns_present_succeeds(self):
         from src.entity_export.main import process_entity_export_data
@@ -175,8 +202,18 @@ class TestCircuitBreakerConfig:
 # ---------------------------------------------------------------------------
 
 
-class TestWorkerQueueTimeoutWarning:
-    def test_queue_empty_emits_warning(self):
+class TestWorkerQueueTimeout:
+    def test_worker_survives_queue_empty_timeout(self):
+        """A get() timeout must not call task_done().
+
+        Regression test: calling task_done() on the queue.Empty path either
+        raises ValueError('task_done() called too many times') from the finally
+        block — killing the worker — or decrements another worker's count, which
+        lets path_queue.join() return while namespaces are still in flight and
+        reports get written from incomplete data.
+        """
+        import time
+
         from src.namespace_audit.main import NamespaceAuditor
 
         mock_client = Mock(spec=VaultClient)
@@ -185,10 +222,39 @@ class TestWorkerQueueTimeoutWarning:
 
         test_queue = queue.Queue()
 
-        # Do not put anything — let the get() time out once, then send shutdown
-        def send_shutdown():
-            import time
+        # Force one Empty timeout, then hand the worker real work.
+        def feed():
+            time.sleep(1.2)
+            test_queue.put("child/")
+            test_queue.put(None)
 
+        feeder = threading.Thread(target=feed)
+        feeder.start()
+
+        worker_thread = threading.Thread(target=auditor._worker, args=(test_queue,))
+        worker_thread.start()
+        worker_thread.join(timeout=10)
+        feeder.join()
+
+        assert not worker_thread.is_alive(), "worker did not exit cleanly"
+        # The worker survived the timeout and went on to process the real item.
+        auditor._traverse_namespace.assert_called_once_with("child/", test_queue)
+        # Balanced counters: join() returns immediately rather than hanging.
+        test_queue.join()
+
+    def test_queue_empty_logs_at_debug(self):
+        """A tail-end timeout is normal, so it must not log at warning."""
+        import time
+
+        from src.namespace_audit.main import NamespaceAuditor
+
+        mock_client = Mock(spec=VaultClient)
+        auditor = NamespaceAuditor(mock_client, worker_queue_timeout=1)
+        auditor._traverse_namespace = Mock()
+
+        test_queue = queue.Queue()
+
+        def send_shutdown():
             time.sleep(1.2)
             test_queue.put(None)
 
@@ -202,6 +268,84 @@ class TestWorkerQueueTimeoutWarning:
 
         t.join()
 
-        # warning should have been called for the timeout
+        debug_calls = [str(c) for c in mock_logger.debug.call_args_list]
+        assert any("timed out" in msg for msg in debug_calls)
         warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
-        assert any("timed out" in msg for msg in warning_calls)
+        assert not any("timed out" in msg for msg in warning_calls)
+
+
+class TestQueueDepthWarning:
+    def test_warns_once_above_threshold(self):
+        """Unbounded queue keeps memory visibility via a one-shot warning."""
+        from src.namespace_audit.main import NamespaceAuditor
+
+        auditor = NamespaceAuditor(Mock(spec=VaultClient), queue_depth_warn_threshold=2)
+        test_queue = queue.Queue()
+        for i in range(5):
+            test_queue.put(f"ns{i}/")
+
+        with patch("src.namespace_audit.main.logger") as mock_logger:
+            auditor._warn_on_queue_depth(test_queue)
+            auditor._warn_on_queue_depth(test_queue)
+
+        assert mock_logger.warning.call_count == 1
+
+    def test_silent_below_threshold(self):
+        from src.namespace_audit.main import NamespaceAuditor
+
+        auditor = NamespaceAuditor(Mock(spec=VaultClient), queue_depth_warn_threshold=100)
+        test_queue = queue.Queue()
+        test_queue.put("ns/")
+
+        with patch("src.namespace_audit.main.logger") as mock_logger:
+            auditor._warn_on_queue_depth(test_queue)
+
+        mock_logger.warning.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# U2 — get_last_month timezone contract
+# ---------------------------------------------------------------------------
+
+
+class TestDateHelperTimezoneContract:
+    def test_get_last_month_is_timezone_aware(self):
+        """The return type changed from naive to aware; pin it deliberately."""
+        from src.common.utils import get_last_month
+
+        assert get_last_month().tzinfo is not None
+
+    def test_get_last_month_is_last_day_of_previous_month(self):
+        from datetime import UTC, datetime
+
+        from src.common.utils import get_last_month
+
+        result = get_last_month()
+        today = datetime.now(UTC)
+        assert result < today.replace(day=1)
+        # Adding a day must roll into the current month.
+        from datetime import timedelta
+
+        assert (result + timedelta(days=1)).month == today.month
+
+    def test_month_helpers_preserve_tzinfo(self):
+        """get_first/last_day_of_month use .replace(), so awareness carries."""
+        from datetime import UTC, datetime
+
+        from src.common.utils import get_first_day_of_month, get_last_day_of_month
+
+        aware = datetime(2026, 2, 15, 12, 30, tzinfo=UTC)
+        assert get_first_day_of_month(aware).tzinfo is UTC
+        assert get_last_day_of_month(aware).tzinfo is UTC
+        assert get_last_day_of_month(aware).day == 28  # 2026 is not a leap year
+
+    def test_mixing_with_naive_datetime_raises(self):
+        """Documents the trap the docstring now warns about."""
+        from datetime import datetime
+
+        import pytest
+
+        from src.common.utils import get_last_month
+
+        with pytest.raises(TypeError):
+            _ = get_last_month() - datetime.now()

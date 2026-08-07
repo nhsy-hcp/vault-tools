@@ -19,12 +19,13 @@ import uuid
 
 from src.activity_export.main import run_activity_export
 from src.common.config import GlobalConfig
+from src.common.exceptions import ConfigurationError
 from src.common.logging_config import (
     get_structured_logger,
     set_correlation_id,
     setup_logging,
 )
-from src.common.utils import validate_date_format
+from src.common.utils import normalise_namespace_path, validate_date_format
 from src.common.vault_client import VaultClient
 from src.entity_export.main import run_entity_export
 from src.namespace_audit.main import NamespaceAuditor
@@ -86,43 +87,52 @@ def validate_dates(start_date: str, end_date: str, logger) -> None:
         sys.exit(1)
 
 
-def main() -> None:
-    """Main entry point for the Vault Tools CLI application.
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the CLI argument parser.
 
-    Parses command line arguments and executes the appropriate tool:
-    - namespace-audit: Audit Vault namespaces, auth methods, and secret engines
-    - activity-export: Export Vault activity logs and usage metrics
-    - entity-export: Export Vault entity data
-    - all: Run all available tools in sequence
+    Separate from main() so the parsing rules can be tested without executing
+    any command.
     """
-    parser = argparse.ArgumentParser(description="Vault Tools CLI")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
-    parser.add_argument("--json-logs", action="store_true", help="Output logs in JSON format.")
-    parser.add_argument(
+    # Global flags live on a shared parent so they are accepted either before or
+    # after the subcommand — `main.py namespace-audit --output-dir X` is the
+    # order most users reach for, and registering them only on the top-level
+    # parser made that an "unrecognized arguments" error.
+    # default=SUPPRESS is required, not cosmetic: a shared parent is applied to
+    # both the top-level parser and each subparser, and the subparser parses
+    # last. With an ordinary default the subparser would overwrite a value given
+    # before the subcommand with its own default, silently discarding it.
+    # SUPPRESS leaves the attribute unset when the flag is absent, so whichever
+    # position supplied it wins. Read them with getattr() in main().
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--debug", action="store_true", default=argparse.SUPPRESS, help="Enable debug logging.")
+    common.add_argument("--json-logs", action="store_true", default=argparse.SUPPRESS, help="Output logs in JSON format.")
+    common.add_argument(
         "--output-dir",
         type=str,
-        default=None,
-        help="Output directory for reports (overrides VAULT_TOOLS_OUTPUT_DIR env var).",
+        default=argparse.SUPPRESS,
+        help="Output directory for reports (overrides VAULT_TOOLS_OUTPUT_DIR env var). Accepted before or after the subcommand.",
     )
+
+    parser = argparse.ArgumentParser(description="Vault Tools CLI", parents=[common])
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # Namespace Audit command
-    parser_audit = subparsers.add_parser("namespace-audit", help="Audit Vault namespaces.")
+    parser_audit = subparsers.add_parser("namespace-audit", help="Audit Vault namespaces.", parents=[common])
     parser_audit.add_argument("-n", "--namespace", type=str, default="", help="Namespace path to audit.")
     parser_audit.add_argument("-w", "--workers", type=int, default=4, help="Number of worker threads.")
 
     # Activity Export command
-    parser_activity = subparsers.add_parser("activity-export", help="Export activity data.")
+    parser_activity = subparsers.add_parser("activity-export", help="Export activity data.", parents=[common])
     parser_activity.add_argument("-s", "--start-date", required=True, type=str, help="Start date (YYYY-MM-DD)")
     parser_activity.add_argument("-e", "--end-date", required=True, type=str, help="End date (YYYY-MM-DD)")
 
     # Entity Export command
-    parser_entity = subparsers.add_parser("entity-export", help="Export entity data.")
+    parser_entity = subparsers.add_parser("entity-export", help="Export entity data.", parents=[common])
     parser_entity.add_argument("-s", "--start-date", required=True, type=str, help="Start date (YYYY-MM-DD)")
     parser_entity.add_argument("-e", "--end-date", required=True, type=str, help="End date (YYYY-MM-DD)")
 
     # All command
-    parser_all = subparsers.add_parser("all", help="Run all available commands.")
+    parser_all = subparsers.add_parser("all", help="Run all available commands.", parents=[common])
     parser_all.add_argument(
         "-s",
         "--start-date",
@@ -152,10 +162,34 @@ def main() -> None:
         help="Number of worker threads for namespace audit.",
     )
 
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    """Main entry point for the Vault Tools CLI application.
+
+    Parses command line arguments and executes the appropriate tool:
+    - namespace-audit: Audit Vault namespaces, auth methods, and secret engines
+    - activity-export: Export Vault activity logs and usage metrics
+    - entity-export: Export Vault entity data
+    - all: Run all available tools in sequence
+    """
+    args = build_parser().parse_args()
+
+    # Global flags use default=SUPPRESS (see above), so the attribute is absent
+    # when the flag was not supplied in either position.
+    debug = getattr(args, "debug", False)
+    json_logs = getattr(args, "json_logs", False)
+    output_dir = getattr(args, "output_dir", None)
+
+    # Canonicalise the namespace once, here, so every downstream consumer sees
+    # the trailing-slash form Vault's namespace API expects (C1). Only the
+    # namespace-audit and all subcommands take one.
+    if hasattr(args, "namespace"):
+        args.namespace = normalise_namespace_path(args.namespace)
 
     # Setup structured logging
-    setup_logging(debug=args.debug, json_logs=args.json_logs)
+    setup_logging(debug=debug, json_logs=json_logs)
 
     # Generate correlation ID for this execution
     correlation_id = str(uuid.uuid4())
@@ -167,18 +201,25 @@ def main() -> None:
     logger.info(
         "vault_tools_started",
         command=args.command,
-        debug=args.debug,
-        json_logs=args.json_logs,
+        debug=debug,
+        json_logs=json_logs,
     )
 
-    if args.debug:
+    if debug:
         logger.debug("debug_logging_enabled", args=vars(args))
 
     # Load global configuration and create vault client.
-    # CLI --output-dir flag takes precedence over the environment variable.
-    global_config = GlobalConfig.from_environment()
-    if args.output_dir is not None:
-        global_config.output_dir = args.output_dir
+    # The CLI --output-dir flag takes precedence over the environment variable
+    # and is passed through the constructor so the directory is created and
+    # writability-checked up front. Assigning it afterwards skipped that check,
+    # deferring the failure until after a full namespace traversal had run.
+    try:
+        global_config = GlobalConfig.from_environment(output_dir=output_dir)
+    except ConfigurationError as e:
+        logger.error("invalid_output_directory", error=str(e))
+        sys.stderr.write(f"Error: {e}\n")
+        sys.exit(1)
+
     vault_client = create_vault_client(logger)
 
     try:

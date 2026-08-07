@@ -1,10 +1,25 @@
-"""Tests for AuditLogger — thread safety and sensitive field redaction."""
+"""Tests for AuditLogger — thread safety, lifecycle, and sensitive field redaction."""
 
 import json
 import threading
 import time
 
-from src.common.audit_logger import AuditLogger, _redact
+import pytest
+
+from src.common.audit_logger import (
+    AuditLogger,
+    _redact,
+    get_audit_logger,
+    reset_audit_logger,
+)
+from tests.fake_secrets import fake_token
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_audit_logger():
+    """Keep the process-wide singleton from leaking between tests."""
+    yield
+    reset_audit_logger()
 
 
 class TestRedact:
@@ -55,6 +70,108 @@ class TestRedact:
         assert _redact("plain string") == "plain string"
         assert _redact(42) == 42
         assert _redact(None) is None
+
+
+class TestRedactValueScrubbing:
+    """Key names alone are not enough — tokens hide in free-text values.
+
+    Regression tests: callers pass `error=str(e)`, and VaultAPIError messages
+    used to carry the raw Vault response body under the non-sensitive key
+    "error", so key-name matching let token material through untouched.
+    """
+
+    @pytest.mark.parametrize(
+        "scheme,body",
+        [
+            ("hvs", "CAESIJq3mNotARealTokenValue123"),
+            ("hvb", "AAAAAQpNotARealBatchTokenValue456"),
+            ("hvr", "NotARealRecoveryTokenValue789"),
+            ("s", "abcdefghij0123456789klmnop"),
+        ],
+    )
+    def test_scrubs_token_shapes_from_free_text(self, scheme, body):
+        token = fake_token(scheme, body)
+        data = {"error": f"GET sys/mounts failed with status 403: denied for {token}"}
+        result = _redact(data)
+        assert token not in result["error"]
+        assert "[REDACTED]" in result["error"]
+
+    def test_preserves_surrounding_diagnostic_text(self):
+        token = fake_token("hvs", "CAESIJnotarealvalue123")
+        data = {"error": f"GET sys/mounts failed with status 403: denied for {token}"}
+        result = _redact(data)
+        assert "GET sys/mounts failed with status 403" in result["error"]
+
+    def test_scrubs_tokens_nested_in_lists_and_dicts(self):
+        token = fake_token("hvs", "CAESIJnotarealvalue123")
+        data = {"metadata": {"messages": ["ok", f"leaked {token} here"]}}
+        result = _redact(data)
+        assert token not in json.dumps(result)
+
+    def test_truncates_oversized_free_text(self):
+        data = {"error": "x" * 5000}
+        result = _redact(data)
+        assert len(result["error"]) < 5000
+        assert result["error"].endswith("...[truncated]")
+
+    def test_leaves_ordinary_strings_alone(self):
+        data = {"namespace": "team-a/", "command": "namespace-audit --workers 4"}
+        result = _redact(data)
+        assert result["namespace"] == "team-a/"
+        assert result["command"] == "namespace-audit --workers 4"
+
+
+class TestAuditLoggerLifecycle:
+    """All instances share the process-wide 'vault_tools.audit' logger."""
+
+    def test_second_instance_does_not_mute_the_first(self, tmp_path):
+        """Regression test for silent audit-record loss.
+
+        __init__ used to call handlers.clear() without stopping the previous
+        instance's listener, so the singleton kept a QueueHandler that was no
+        longer attached and every later record was dropped without error.
+        """
+        first = get_audit_logger(log_dir=str(tmp_path))
+        second = AuditLogger(log_dir=str(tmp_path))
+
+        first.log_tool_execution("tool", "cmd", {}, result="from-first")
+        second.log_tool_execution("tool", "cmd", {}, result="from-second")
+
+        time.sleep(0.05)
+        reset_audit_logger()
+        second.close()
+
+        results = [json.loads(ln)["result"] for ln in (tmp_path / "audit.log").read_text().strip().splitlines()]
+        assert "from-first" in results, "records from the first instance were silently dropped"
+        assert "from-second" in results
+
+    def test_close_is_idempotent(self, tmp_path):
+        """close() runs from both explicit shutdown and the atexit hook."""
+        logger = AuditLogger(log_dir=str(tmp_path))
+        logger.close()
+        logger.close()  # must not raise
+
+    def test_close_detaches_own_handler(self, tmp_path):
+        logger = AuditLogger(log_dir=str(tmp_path))
+        assert logger._handler in logger.logger.handlers
+        logger.close()
+        assert logger._handler not in logger.logger.handlers
+
+
+class TestAuditLoggerTimestamp:
+    def test_timestamp_is_utc_aware_with_z_suffix(self, tmp_path):
+        """datetime.utcnow() was deprecated and naive despite the 'Z' suffix."""
+        from datetime import datetime
+
+        logger = AuditLogger(log_dir=str(tmp_path))
+        logger.log_tool_execution("tool", "cmd", {})
+        time.sleep(0.05)
+        logger.close()
+
+        entry = json.loads((tmp_path / "audit.log").read_text().strip().splitlines()[0])
+        assert entry["timestamp"].endswith("Z")
+        parsed = datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00"))
+        assert parsed.tzinfo is not None
 
 
 class TestAuditLoggerRedaction:

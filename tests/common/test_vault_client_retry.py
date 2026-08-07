@@ -4,8 +4,10 @@ import time
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+from tenacity import wait_none
 
-from src.common.exceptions import VaultPermissionError
+from src.common.exceptions import VaultConnectionError, VaultPermissionError
+from src.common.vault_client import VaultClient
 from src.common.vault_client_retry import CircuitBreaker, CircuitBreakerOpenError, VaultClientWithRetry
 
 # ---------------------------------------------------------------------------
@@ -211,3 +213,72 @@ class TestVaultClientWithRetryRequests:
         cm.__exit__ = Mock(return_value=False)
         with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultPermissionError):
             client.get("secret/restricted")
+
+
+class TestRetryExceptionPropagation:
+    """Callers must see the original exception, not tenacity's wrapper.
+
+    Regression tests: the @retry decorators had no reraise=True, so an
+    exhausted retry raised tenacity.RetryError. Nothing in the codebase catches
+    that — NamespaceAuditor.audit_cluster's friendly `except VaultConnectionError`
+    branch was bypassed in favour of the generic handler, and the docstrings
+    promising VaultConnectionError were simply wrong.
+    """
+
+    @pytest.fixture
+    def fast_client(self):
+        """Client with minimal attempts so tests do not sit in backoff."""
+        return VaultClientWithRetry(
+            vault_addr="https://vault.example.com",
+            vault_token="s.testtoken1234",
+            max_retry_attempts=1,
+        )
+
+    def test_get_reraises_vault_connection_error(self, fast_client):
+        import tenacity
+
+        with patch.object(VaultClient, "get", side_effect=VaultConnectionError("down")):
+            with pytest.raises(VaultConnectionError, match="down"):
+                fast_client.get("sys/mounts")
+            # Belt and braces: the tenacity wrapper must not be what escapes.
+            with patch.object(VaultClient, "get", side_effect=VaultConnectionError("down")), pytest.raises(Exception) as exc:
+                fast_client.get("sys/mounts")
+            assert not isinstance(exc.value, tenacity.RetryError)
+
+    def test_post_reraises_vault_connection_error(self, fast_client):
+        with patch.object(VaultClient, "post", side_effect=VaultConnectionError("down")), pytest.raises(VaultConnectionError, match="down"):
+            fast_client.post("auth/token/create")
+
+    def test_non_retryable_error_propagates_immediately(self, fast_client):
+        """A permission error is not a connection problem — no retries."""
+        with patch.object(VaultClient, "get", side_effect=VaultPermissionError("denied")) as mocked, pytest.raises(VaultPermissionError):
+            fast_client.get("sys/mounts")
+        assert mocked.call_count == 1
+
+
+class TestMaxRetryAttemptsIsHonoured:
+    """max_retry_attempts was stored but ignored — stop_after_attempt(3) was hard-coded."""
+
+    @pytest.mark.parametrize("attempts", [1, 2, 4])
+    def test_attempt_count_matches_configuration(self, attempts):
+        client = VaultClientWithRetry(
+            vault_addr="https://vault.example.com",
+            vault_token="s.testtoken1234",
+            max_retry_attempts=attempts,
+        )
+        # Collapse tenacity's backoff so the test runs instantly.
+        with (
+            patch("src.common.vault_client_retry.wait_exponential", return_value=wait_none()),
+            patch.object(VaultClient, "get", side_effect=VaultConnectionError("down")) as mocked,
+            pytest.raises(VaultConnectionError),
+        ):
+            client.get("sys/mounts")
+        assert mocked.call_count == attempts
+
+    def test_rejects_invalid_attempt_count(self):
+        with pytest.raises(ValueError, match="at least 1"):
+            VaultClientWithRetry(
+                vault_addr="https://vault.example.com",
+                vault_token="s.testtoken1234",
+                max_retry_attempts=0,
+            )

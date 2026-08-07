@@ -13,6 +13,7 @@ from src.common.exceptions import (
     VaultPermissionError,
 )
 from src.common.vault_client import VaultClient
+from tests.fake_secrets import fake_token
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -31,11 +32,23 @@ def client():
 
 
 class TestVaultClientInit:
-    def test_missing_addr_raises(self):
+    @pytest.fixture
+    def no_vault_env(self, monkeypatch):
+        """Clear the ambient Vault env vars.
+
+        VaultClient falls back to VAULT_ADDR/VAULT_TOKEN when an argument is
+        empty, so these tests only exercise the missing-value path if the
+        environment is genuinely unset. The Taskfile loads .env, which is why
+        they passed under bare pytest but failed under `task test:ci`.
+        """
+        monkeypatch.delenv("VAULT_ADDR", raising=False)
+        monkeypatch.delenv("VAULT_TOKEN", raising=False)
+
+    def test_missing_addr_raises(self, no_vault_env):
         with pytest.raises(ValueError, match="VAULT_ADDR"):
             VaultClient(vault_addr="", vault_token="s.test")
 
-    def test_missing_token_raises(self):
+    def test_missing_token_raises(self, no_vault_env):
         with pytest.raises(ValueError, match="VAULT_TOKEN"):
             VaultClient(vault_addr="https://vault.example.com", vault_token="")
 
@@ -67,11 +80,30 @@ class TestVaultClientInit:
 
 
 class TestCacheHelpers:
-    def test_cache_key_includes_token_prefix(self, client):
+    def test_cache_key_includes_token_fingerprint(self, client):
+        import hashlib
+
         key = client._cache_key("sys/auth", "ns1", {"k": "v"})
-        # token = "s.testtoken1234" → first 8 chars = "s.testto"
-        token_prefix = client.vault_token[:8]
-        assert key.startswith(f"{token_prefix}:")
+        expected = hashlib.sha256(client.vault_token.encode()).hexdigest()[:16]
+        assert key.startswith(f"{expected}:")
+
+    def test_cache_key_does_not_leak_token_material(self, client):
+        """A raw prefix put real token characters into the key."""
+        key = client._cache_key("sys/auth", "ns1", None)
+        assert client.vault_token not in key
+        assert client.vault_token[:8] not in key
+
+    def test_cache_key_distinguishes_similar_tokens(self, client):
+        """Tokens sharing a scheme prefix must not collide.
+
+        'hvs.' batch tokens leave only a few distinguishing characters in the
+        first 8, so a raw prefix was not a fingerprint at all.
+        """
+        from src.common.vault_client import VaultClient
+
+        a = VaultClient(vault_addr="https://vault.example.com", vault_token=fake_token("hvs", "A" * 16))
+        b = VaultClient(vault_addr="https://vault.example.com", vault_token=fake_token("hvs", "A" * 15 + "B"))
+        assert a._cache_key("sys/auth") != b._cache_key("sys/auth")
 
     def test_cache_key_includes_namespace_and_path(self, client):
         key = client._cache_key("sys/auth", "team-a", None)
@@ -443,3 +475,157 @@ class TestVaultClientPost:
         cm.__exit__ = Mock(return_value=False)
         with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultConnectionError):
             client.post("auth/token/create")
+
+
+class TestErrorBodySummarisation:
+    """Vault error bodies must not be interpolated verbatim into exceptions.
+
+    Exception text reaches the audit log via `error=str(e)`, so a raw
+    response.text could carry token material or wrapped secrets into a file
+    that is explicitly meant to be safe to retain and ship.
+    """
+
+    def _response(self, *, body: bytes, json_payload=None):
+        response = MagicMock(spec=requests.Response)
+        response.content = body
+        if json_payload is None:
+            response.json.side_effect = ValueError("no json")
+        else:
+            response.json.return_value = json_payload
+        return response
+
+    def test_keeps_vault_error_strings(self):
+        from src.common.vault_client import _summarise_error_body
+
+        response = self._response(body=b"{}", json_payload={"errors": ["permission denied"]})
+        assert _summarise_error_body(response) == "permission denied"
+
+    def test_joins_multiple_errors(self):
+        from src.common.vault_client import _summarise_error_body
+
+        response = self._response(body=b"{}", json_payload={"errors": ["a", "b"]})
+        assert _summarise_error_body(response) == "a; b"
+
+    def test_does_not_quote_non_json_body(self):
+        from src.common.vault_client import _summarise_error_body
+
+        token = fake_token("hvs", "CAESIJq3mNotARealTokenValue123")
+        summary = _summarise_error_body(self._response(body=token.encode()))
+        assert token not in summary
+        assert "non-JSON body" in summary
+
+    def test_does_not_quote_unrecognised_json_body(self):
+        from src.common.vault_client import _summarise_error_body
+
+        token = fake_token("hvs", "CAESIJnotarealvalue")
+        response = self._response(body=b"{}", json_payload={"data": {"token": token}})
+        summary = _summarise_error_body(response)
+        assert token not in summary
+        assert "unrecognised JSON body" in summary
+
+    def test_truncates_oversized_error_list(self):
+        from src.common.vault_client import _summarise_error_body
+
+        response = self._response(body=b"{}", json_payload={"errors": ["x" * 2000]})
+        summary = _summarise_error_body(response)
+        assert len(summary) < 2000
+        assert summary.endswith("...[truncated]")
+
+    def test_get_failure_message_excludes_raw_body(self, client):
+        response = MagicMock(spec=requests.Response)
+        response.status_code = 403
+        response.content = b'{"errors":["permission denied"]}'
+        response.json.return_value = {"errors": ["permission denied"]}
+
+        mock_hvac = MagicMock()
+        mock_hvac.adapter.request.return_value = response
+        mock_hvac.url = "https://vault.example.com"
+        cm = MagicMock()
+        cm.__enter__ = Mock(return_value=mock_hvac)
+        cm.__exit__ = Mock(return_value=False)
+
+        with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultAPIError) as excinfo:
+            client.get("sys/mounts")
+
+        message = str(excinfo.value)
+        assert "permission denied" in message
+        assert "403" in message
+
+
+class TestPerRequestTimeout:
+    """V4: a single heavy call can get more headroom than the client default."""
+
+    def test_get_client_defaults_to_client_timeout(self, client):
+        with patch("src.common.vault_client.hvac.Client") as mock_client, client.get_client("ns"):
+            pass
+        assert mock_client.call_args.kwargs["timeout"] == client.hvac_timeout
+
+    def test_get_client_honours_override(self, client):
+        with patch("src.common.vault_client.hvac.Client") as mock_client, client.get_client("ns", timeout=120):
+            pass
+        assert mock_client.call_args.kwargs["timeout"] == 120
+
+    def _ok_client_cm(self, payload):
+        """A get_client() stand-in whose adapter returns a successful response."""
+        mock_hvac = MagicMock()
+        mock_hvac.adapter.request.return_value = payload
+        mock_hvac.url = "https://vault.example.com"
+        cm = MagicMock()
+        cm.__enter__ = Mock(return_value=mock_hvac)
+        cm.__exit__ = Mock(return_value=False)
+        return cm
+
+    def test_get_passes_timeout_through(self, client):
+        cm = self._ok_client_cm({"data": {}})
+        with patch.object(client, "get_client", return_value=cm) as mock_get_client:
+            client.get("sys/mounts", timeout=99)
+        assert mock_get_client.call_args.kwargs["timeout"] == 99
+
+    def test_get_defaults_timeout_to_none(self, client):
+        """None means 'use the client default', resolved inside get_client."""
+        cm = self._ok_client_cm({"data": {}})
+        with patch.object(client, "get_client", return_value=cm) as mock_get_client:
+            client.get("sys/mounts")
+        assert mock_get_client.call_args.kwargs["timeout"] is None
+
+    def test_post_passes_timeout_through(self, client):
+        response = MagicMock(spec=requests.Response)
+        response.status_code = 204
+        response.content = b""
+        cm = self._ok_client_cm(response)
+        with patch.object(client, "get_client", return_value=cm) as mock_get_client:
+            client.post("auth/token/create", timeout=99)
+        assert mock_get_client.call_args.kwargs["timeout"] == 99
+
+
+class TestAdapterRetryConfiguration:
+    """V2: retryable statuses must surface as precise errors, not RetryError."""
+
+    def test_raise_on_status_disabled(self, client):
+        adapter = client.session.get_adapter("https://vault.example.com")
+        assert adapter.max_retries.raise_on_status is False
+
+    def test_request_timeout_status_is_retryable(self, client):
+        adapter = client.session.get_adapter("https://vault.example.com")
+        assert 408 in adapter.max_retries.status_forcelist
+
+    def test_server_error_statuses_retryable(self, client):
+        adapter = client.session.get_adapter("https://vault.example.com")
+        for status in (429, 500, 502, 503, 504):
+            assert status in adapter.max_retries.status_forcelist
+
+    def test_post_is_retryable(self, client):
+        adapter = client.session.get_adapter("https://vault.example.com")
+        assert "POST" in adapter.max_retries.allowed_methods
+
+    def test_exhausted_retries_raise_vault_connection_error(self, client):
+        """RetryError would otherwise land in the generic 'Unexpected error' branch."""
+        mock_hvac = MagicMock()
+        mock_hvac.adapter.request.side_effect = requests.exceptions.RetryError("too many retries")
+        mock_hvac.url = "https://vault.example.com"
+        cm = MagicMock()
+        cm.__enter__ = Mock(return_value=mock_hvac)
+        cm.__exit__ = Mock(return_value=False)
+
+        with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultConnectionError, match="Retries exhausted"):
+            client.get("sys/mounts")

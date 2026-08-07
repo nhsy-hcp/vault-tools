@@ -173,3 +173,53 @@ class TestStructuredLoggerAdapter:
             raise ValueError("boom")
         except ValueError:
             adapter.exception("caught exception")
+
+
+class TestStructuredLoggerAdapterLevelControl:
+    """setLevel/addHandler must never silently discard the call.
+
+    Regression tests: these were added as no-ops that only emitted a debug
+    line. That is worse than the AttributeError they replaced — a caller
+    raising verbosity got silence with no indication anything was ignored.
+    """
+
+    def test_set_level_reaches_stdlib_logger(self):
+        import logging
+
+        from src.common.logging_config import get_structured_logger
+
+        adapter = get_structured_logger("tests.level_control")
+        adapter.setLevel(logging.DEBUG)
+        assert logging.getLogger("tests.level_control").level == logging.DEBUG
+
+        adapter.setLevel(logging.ERROR)
+        assert logging.getLogger("tests.level_control").level == logging.ERROR
+
+    def test_add_handler_reaches_stdlib_logger(self):
+        import logging
+
+        from src.common.logging_config import get_structured_logger
+
+        adapter = get_structured_logger("tests.handler_control")
+        handler = logging.NullHandler()
+        try:
+            adapter.addHandler(handler)
+            assert handler in logging.getLogger("tests.handler_control").handlers
+        finally:
+            logging.getLogger("tests.handler_control").removeHandler(handler)
+
+    def test_raises_when_no_stdlib_logger_available(self):
+        import logging
+
+        import pytest
+
+        from src.common.logging_config import StructuredLoggerAdapter
+
+        class Opaque:
+            """A bound logger exposing neither _logger nor name."""
+
+        adapter = StructuredLoggerAdapter(Opaque())
+        with pytest.raises(NotImplementedError, match="setup_logging"):
+            adapter.setLevel(logging.DEBUG)
+        with pytest.raises(NotImplementedError, match="setup_logging"):
+            adapter.addHandler(logging.NullHandler())

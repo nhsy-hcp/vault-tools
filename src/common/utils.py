@@ -50,31 +50,41 @@ def get_last_day_of_month(month: datetime) -> datetime:
 
 
 def normalise_namespace_path(path: str | None) -> str:
-    """Normalise a Vault namespace path to a canonical form.
+    """Normalise a Vault namespace path to the canonical API form.
+
+    Vault's namespace API expects a trailing slash on non-root paths, so that is
+    what this returns. Root is the empty string. This is the single source of
+    truth for the convention (finding C1) — config and CLI entry points all
+    route through it rather than repeating the rule inline.
 
     Rules:
-    - ``None``, ``""``, or ``"/"`` → ``""``  (root namespace)
-    - Any other value → strip surrounding whitespace and trailing slash
+    - ``None``, ``""``, ``"/"``, or whitespace → ``""``  (root namespace)
+    - Any other value → whitespace stripped, exactly one trailing slash
 
     Examples::
 
-        normalise_namespace_path(None)       # ""
-        normalise_namespace_path("")         # ""
-        normalise_namespace_path("/")        # ""
-        normalise_namespace_path("foo/")     # "foo"
-        normalise_namespace_path("foo/bar/") # "foo/bar"
+        normalise_namespace_path(None)        # ""
+        normalise_namespace_path("")          # ""
+        normalise_namespace_path("/")         # ""
+        normalise_namespace_path("foo")       # "foo/"
+        normalise_namespace_path("foo/")      # "foo/"
+        normalise_namespace_path("foo/bar//") # "foo/bar/"
     """
     if not path:
         return ""
     stripped = path.strip().rstrip("/")
-    return "" if stripped == "" else stripped
+    return "" if stripped == "" else f"{stripped}/"
 
 
 def get_last_month() -> datetime:
     """Get the last day of the previous month from today's date (UTC).
 
     Returns:
-        datetime: A UTC-aware datetime set to the last day of the previous month.
+        datetime: A timezone-aware (UTC) datetime set to the last day of the
+        previous month. Note the tz-awareness: combining the result with a naive
+        datetime — ``get_last_month() - datetime.now()``, for instance — raises
+        TypeError. Use ``datetime.now(UTC)`` on the other side of any such
+        expression.
     """
     # Use UTC so behaviour is consistent regardless of the host timezone (U2).
     # U1 is already correctly implemented via calendar.monthrange above.

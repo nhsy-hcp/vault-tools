@@ -11,7 +11,7 @@ import os
 import threading
 
 import requests
-from tenacity import after_log, before_sleep_log, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import Retrying, after_log, before_sleep_log, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 # Import base client and exceptions
 from .vault_client import VaultClient, VaultConnectionError
@@ -127,6 +127,8 @@ class VaultClientWithRetry(VaultClient):
             hvac_timeout=hvac_timeout,
             **kwargs,
         )
+        if max_retry_attempts < 1:
+            raise ValueError(f"max_retry_attempts must be at least 1 (got {max_retry_attempts})")
         self.max_retry_attempts = max_retry_attempts
         self.enable_circuit_breaker = enable_circuit_breaker
         self.circuit_breaker_failure_threshold = circuit_breaker_failure_threshold
@@ -142,9 +144,8 @@ class VaultClientWithRetry(VaultClient):
         Endpoints are grouped by their first two path segments so that, for
         example, ``identity/entity`` and ``identity/group`` each get their own
         independent breaker rather than sharing one for all of ``identity/*``.
-        This is finer-grained than grouping by the first segment alone, which
-        was the original finding (R4) — the two-segment strategy is already the
-        correct fix and is preserved here.
+        This replaced the original first-segment-only grouping, which was too
+        coarse (finding R4).
         """
         if not self.enable_circuit_breaker:
             return None
@@ -161,65 +162,89 @@ class VaultClientWithRetry(VaultClient):
 
         return self.circuit_breakers[prefix]
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((VaultConnectionError, requests.exceptions.ConnectionError, requests.exceptions.Timeout)),
-        before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
-        after=after_log(logging.getLogger(__name__), logging.DEBUG),
-    )
-    def get(self, path: str, params: dict = None, namespace: str = "") -> dict:
+    def _build_retryer(self) -> Retrying:
+        """Build a retry controller for a single request.
+
+        Constructed per call rather than shared: tenacity's Retrying keeps
+        mutable per-run statistics on the instance, and namespace_audit drives
+        this client from several worker threads at once.
+
+        reraise=True is essential. Without it tenacity wraps the final failure in
+        tenacity.RetryError, which is not what any caller catches — the friendly
+        "connection failed" branch in NamespaceAuditor.audit_cluster looks for
+        VaultConnectionError and would be bypassed entirely.
+        """
+        module_logger = logging.getLogger(__name__)
+        return Retrying(
+            stop=stop_after_attempt(self.max_retry_attempts),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            retry=retry_if_exception_type((VaultConnectionError, requests.exceptions.ConnectionError, requests.exceptions.Timeout)),
+            before_sleep=before_sleep_log(module_logger, logging.WARNING),
+            after=after_log(module_logger, logging.DEBUG),
+            reraise=True,
+        )
+
+    def get(self, path: str, params: dict = None, namespace: str = "", timeout: int | None = None) -> dict:
         """Make GET request to Vault API with automatic retry and circuit breaker.
+
+        Retries up to ``max_retry_attempts`` times on connection-level failures,
+        then re-raises the original exception.
 
         Args:
             path: API endpoint path
             params: Optional query parameters
             namespace: Optional namespace path
+            timeout: Optional per-request timeout override in seconds
 
         Returns:
             Response data as dictionary
 
         Raises:
             VaultAPIError: For API errors
-            VaultConnectionError: For connection issues (triggers retry)
+            VaultConnectionError: For connection issues, after retries are exhausted
             VaultPermissionError: For authorization issues
             VaultDataError: For malformed responses
             CircuitBreakerOpenError: When circuit breaker is open
         """
+        return self._build_retryer()(self._get_once, path, params, namespace, timeout)
+
+    def _get_once(self, path: str, params: dict, namespace: str, timeout: int | None) -> dict:
+        """Single GET attempt, routed through the endpoint's circuit breaker."""
         circuit_breaker = self._get_circuit_breaker(path)
         if circuit_breaker:
-            return circuit_breaker.call(super().get, path, params, namespace)
-        return super().get(path, params, namespace)
+            return circuit_breaker.call(super().get, path, params, namespace, timeout)
+        return super().get(path, params, namespace, timeout)
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((VaultConnectionError, requests.exceptions.ConnectionError, requests.exceptions.Timeout)),
-        before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
-        after=after_log(logging.getLogger(__name__), logging.DEBUG),
-    )
-    def post(self, path: str, data: dict = None, namespace: str = "") -> dict:
+    def post(self, path: str, data: dict = None, namespace: str = "", timeout: int | None = None) -> dict:
         """Make POST request to Vault API with automatic retry and circuit breaker.
+
+        Retries up to ``max_retry_attempts`` times on connection-level failures,
+        then re-raises the original exception.
 
         Args:
             path: API endpoint path
             data: Optional request body data
             namespace: Optional namespace path
+            timeout: Optional per-request timeout override in seconds
 
         Returns:
             Response data as dictionary
 
         Raises:
             VaultAPIError: For API errors
-            VaultConnectionError: For connection issues (triggers retry)
+            VaultConnectionError: For connection issues, after retries are exhausted
             VaultPermissionError: For authorization issues
             VaultDataError: For malformed responses
             CircuitBreakerOpenError: When circuit breaker is open
         """
+        return self._build_retryer()(self._post_once, path, data, namespace, timeout)
+
+    def _post_once(self, path: str, data: dict, namespace: str, timeout: int | None) -> dict:
+        """Single POST attempt, routed through the endpoint's circuit breaker."""
         circuit_breaker = self._get_circuit_breaker(path)
         if circuit_breaker:
-            return circuit_breaker.call(super().post, path, data, namespace)
-        return super().post(path, data, namespace)
+            return circuit_breaker.call(super().post, path, data, namespace, timeout)
+        return super().post(path, data, namespace, timeout)
 
     def validate_connection(self) -> str:
         """Validate Vault connection with circuit breaker protection.

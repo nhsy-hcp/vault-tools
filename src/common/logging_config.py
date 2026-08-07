@@ -176,14 +176,12 @@ class StructuredLoggerAdapter:
     def log(self, level: int, msg: str, **kwargs) -> None:
         """Log message at the given numeric level."""
         # structlog uses named levels; map via stdlib
-        import logging as _logging
-
         method = {
-            _logging.DEBUG: self.debug,
-            _logging.INFO: self.info,
-            _logging.WARNING: self.warning,
-            _logging.ERROR: self.error,
-            _logging.CRITICAL: self.critical,
+            logging.DEBUG: self.debug,
+            logging.INFO: self.info,
+            logging.WARNING: self.warning,
+            logging.ERROR: self.error,
+            logging.CRITICAL: self.critical,
         }.get(level, self.info)
         method(msg, **kwargs)
 
@@ -194,13 +192,32 @@ class StructuredLoggerAdapter:
         except AttributeError:
             return True
 
+    def _stdlib_logger(self) -> logging.Logger | None:
+        """Return the stdlib logger backing this adapter, if reachable."""
+        underlying = getattr(self.logger, "_logger", None)
+        if isinstance(underlying, logging.Logger):
+            return underlying
+        name = getattr(self.logger, "name", None)
+        return logging.getLogger(name) if name else None
+
     def setLevel(self, level) -> None:  # noqa: N802
-        """No-op: level control is not meaningful on a structlog bound logger."""
-        self.logger.debug("setLevel called on StructuredLoggerAdapter (no-op)", level=level)
+        """Set the level on the underlying stdlib logger.
+
+        Delegates rather than silently accepting the call. A no-op here is worse
+        than the AttributeError it replaced: a caller raising verbosity would
+        get silence with no indication the request was discarded.
+        """
+        logger = self._stdlib_logger()
+        if logger is None:
+            raise NotImplementedError("This logger has no stdlib logger to configure; set levels via setup_logging(debug=...) instead.")
+        logger.setLevel(level)
 
     def addHandler(self, handler) -> None:  # noqa: N802
-        """No-op: handler management is not meaningful on a structlog bound logger."""
-        self.logger.debug("addHandler called on StructuredLoggerAdapter (no-op)")
+        """Attach a handler to the underlying stdlib logger."""
+        logger = self._stdlib_logger()
+        if logger is None:
+            raise NotImplementedError("This logger has no stdlib logger to attach handlers to; configure handlers via setup_logging() instead.")
+        logger.addHandler(handler)
 
     def bind(self, **kwargs) -> "StructuredLoggerAdapter":
         """Bind context to logger."""

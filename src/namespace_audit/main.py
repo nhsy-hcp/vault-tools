@@ -41,6 +41,10 @@ class AuditStats:
     """Statistics for the audit process."""
 
     processed_count: int = 0
+    # Namespaces known to exist: the root plus every child discovered so far.
+    # Serves as the progress-bar denominator, which grows as traversal uncovers
+    # more of the tree and converges on processed_count at completion (N4).
+    discovered_count: int = 1
     error_count: int = 0
     forbidden_count: int = 0
     start_time: datetime | None = None
@@ -64,6 +68,12 @@ class AuditStats:
         with self._lock:
             self.processed_count += 1
             return self.processed_count
+
+    def add_discovered(self, count: int) -> int:
+        """Record newly discovered child namespaces and return the new total."""
+        with self._lock:
+            self.discovered_count += count
+            return self.discovered_count
 
     def increment_errors(self) -> None:
         with self._lock:
@@ -94,7 +104,7 @@ class NamespaceAuditor:
         rate_limit_disable: bool = False,
         output_dir: str = "outputs",
         worker_queue_timeout: int = 300,
-        max_queue_size: int = 10_000,
+        queue_depth_warn_threshold: int = 10_000,
     ):
         self.vault_client = vault_client
         self.worker_threads = worker_threads
@@ -103,7 +113,8 @@ class NamespaceAuditor:
         self.rate_limit_disable = rate_limit_disable
         self.output_dir = output_dir
         self.worker_queue_timeout = worker_queue_timeout
-        self.max_queue_size = max_queue_size
+        self.queue_depth_warn_threshold = queue_depth_warn_threshold
+        self._queue_depth_warned = False
         self.stats = AuditStats()
         self.data = AuditData()
         self.thread_lock = threading.Lock()
@@ -145,7 +156,11 @@ class NamespaceAuditor:
             cluster_name = self.vault_client.validate_connection()
             self.console.print(f"[green]✓[/green] Connected to cluster: [bold]{cluster_name}[/bold]")
 
-            path_queue: queue.Queue[str] = queue.Queue(maxsize=self.max_queue_size)
+            # The queue must stay unbounded: worker threads are also the
+            # producers (they enqueue child namespaces from _traverse_namespace),
+            # so a maxsize would let a worker block on put() waiting for itself.
+            # Memory visibility comes from the depth warning instead.
+            path_queue: queue.Queue[str] = queue.Queue()
             # Handle None, "/" or empty namespace paths - all should default to root namespace
             initial_namespace = "" if namespace_path is None or namespace_path == "/" or namespace_path == "" else namespace_path
             logger.debug(f"Initial namespace after processing: '{initial_namespace}'")
@@ -162,11 +177,13 @@ class NamespaceAuditor:
                 console=self.console,
             ) as progress:
                 self.progress = progress
-                # Use total=None so Rich renders an advancing counter rather
-                # than a percentage bar — we don't know the total upfront.
+                # The total is the number of namespaces discovered so far
+                # (starting at 1 for the root) and grows as children are found,
+                # so the bar shows real progress and converges rather than
+                # spinning indefinitely (N4).
                 self.progress_task = progress.add_task(
                     "[cyan]Processing namespaces...",
-                    total=None,
+                    total=self.stats.discovered_count,
                 )
 
                 workers = []
@@ -247,35 +264,60 @@ class NamespaceAuditor:
                 error=error_msg,
             )
 
+    def _refresh_progress(self) -> None:
+        """Push current discovered/processed counts to the progress bar.
+
+        Safe to call from worker threads: rich's Progress.update is internally
+        locked, and both counters are read from the lock-protected AuditStats.
+        """
+        if self.progress is None or self.progress_task is None:
+            return
+        processed = self.stats.processed_count
+        # Clamp so the bar can never render past 100%. Discovery normally runs
+        # ahead of processing, but the two counters are incremented at different
+        # points by different threads and a display artefact is not worth a lock
+        # spanning both.
+        total = max(self.stats.discovered_count, processed)
+        self.progress.update(self.progress_task, completed=processed, total=total)
+
+    def _warn_on_queue_depth(self, path_queue: queue.Queue[str]) -> None:
+        """Warn once when the pending-namespace queue grows unusually deep.
+
+        The queue is intentionally unbounded (see audit_cluster), so this is
+        the only backpressure signal available.
+        """
+        if self._queue_depth_warned:
+            return
+        depth = path_queue.qsize()
+        if depth > self.queue_depth_warn_threshold:
+            self._queue_depth_warned = True
+            logger.warning(
+                f"Namespace queue depth is {depth}, above the warning threshold of {self.queue_depth_warn_threshold}. Memory use will grow with the queue; consider auditing a narrower namespace subtree."
+            )
+
     def _worker(self, path_queue: queue.Queue[str]):
         worker_name = threading.current_thread().name
         logger.debug(f"Worker {worker_name} started")
 
         while True:
+            # The get() is deliberately outside the try block below: task_done()
+            # must only ever be called for an item that was actually retrieved,
+            # otherwise it corrupts the counter that path_queue.join() depends on.
             try:
                 logger.debug(f"Worker {worker_name} waiting for namespace from queue")
                 namespace_path = path_queue.get(timeout=self.worker_queue_timeout)
+            except queue.Empty:
+                # Normal at the tail of a run while peers finish their subtrees.
+                logger.debug(f"Worker {worker_name} timed out waiting for queue item after {self.worker_queue_timeout}s")
+                continue
+
+            try:
                 if namespace_path is None:
                     logger.debug(f"Worker {worker_name} received shutdown signal")
                     break
 
                 logger.debug(f"Worker {worker_name} got namespace: '{namespace_path}'")
-
-                # Read the new count atomically via increment so the check is
-                # not subject to a race condition between the read and the
-                # increment that occurs in _traverse_namespace.
-                current_count = self.stats.processed_count
-                with self.stats._lock:
-                    current_count = self.stats.processed_count
-                if not self.rate_limit_disable and current_count > 0 and current_count % self.rate_limit_batch_size == 0:
-                    logger.info(f"Rate limiting - sleeping for {self.rate_limit_sleep_seconds} seconds")
-                    time.sleep(self.rate_limit_sleep_seconds)
-
                 self._traverse_namespace(namespace_path, path_queue)
-
-            except queue.Empty:
-                logger.warning(f"Worker {worker_name} timed out waiting for queue item after {self.worker_queue_timeout}s")
-                continue
             except Exception as e:
                 logger.exception(f"Error in worker thread: {e}")
                 self.stats.increment_errors()
@@ -286,7 +328,16 @@ class NamespaceAuditor:
         display_path = "root" if namespace_path == "" else namespace_path
         logger.info(f"Processing namespace: {display_path}")
         logger.debug(f"Getting Vault client for namespace: '{namespace_path}'")
-        self.stats.increment_processed()
+
+        # Rate limiting is driven by the value returned from the increment so
+        # that check-and-act is atomic: every count is observed exactly once, by
+        # exactly one thread. Reading the counter separately would let two
+        # workers both miss (or both hit) a batch boundary.
+        processed = self.stats.increment_processed()
+        self._refresh_progress()
+        if not self.rate_limit_disable and processed % self.rate_limit_batch_size == 0:
+            logger.info(f"Rate limiting - sleeping for {self.rate_limit_sleep_seconds} seconds")
+            time.sleep(self.rate_limit_sleep_seconds)
 
         try:
             with self.vault_client.get_client(namespace_path) as client:
@@ -316,6 +367,10 @@ class NamespaceAuditor:
 
                         if child_namespaces:
                             logger.debug(f"Found {len(child_namespaces)} child namespaces in {display_path}: {list(child_namespaces.keys())}")
+                            # Grow the progress denominator before enqueueing so
+                            # the bar never reports more done than known (N4).
+                            self.stats.add_discovered(len(child_namespaces))
+                            self._refresh_progress()
                             for name, info in child_namespaces.items():
                                 # Construct child_path: if parent is root (""), child is like "bu01/", else "parent/bu01/"
                                 child_path_full = f"{namespace_path}{name}"
@@ -323,8 +378,7 @@ class NamespaceAuditor:
                                 logger.debug(f"Processing child namespace '{name}' -> constructed path: '{child_path_full}'")
                                 logger.debug(f"Adding namespace '{child_path_full}' to processing queue")
                                 path_queue.put(child_path_full)  # Put full path with trailing slash for API calls
-                                if path_queue.qsize() > self.max_queue_size * 0.9:
-                                    logger.warning(f"Namespace queue is above 90% capacity ({path_queue.qsize()}/{self.max_queue_size}); consider increasing max_queue_size")
+                                self._warn_on_queue_depth(path_queue)
                                 with self.thread_lock:
                                     stored_path = child_path_full.rstrip("/")
                                     self.data.namespaces[stored_path] = info

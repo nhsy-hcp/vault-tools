@@ -17,8 +17,17 @@ from src.common.vault_client import VaultClient
 logger = logging.getLogger(__name__)
 
 
-# Columns that must be present for processing to succeed.
-REQUIRED_COLUMNS = frozenset({"namespace_id", "namespace_path", "client_type"})
+# Columns without which processing genuinely cannot proceed. Only client_type
+# qualifies — it is the source of the derived entity_type column.
+#
+# namespace_id / namespace_path are deliberately NOT required: Vault omits them
+# on non-namespaced (OSS) clusters and on older API versions, and the export is
+# still perfectly usable without them. Requiring them turned a working export
+# into a silent no-op for those clusters.
+REQUIRED_COLUMNS = frozenset({"client_type"})
+
+# Optional columns used only for the root-namespace display fix-up below.
+NAMESPACE_COLUMNS = ("namespace_id", "namespace_path")
 
 
 def get_entity_export_data(client: VaultClient, start_date: str, end_date: str) -> list[dict[str, Any]]:
@@ -53,10 +62,14 @@ def process_entity_export_data(data: list[dict[str, Any]], cluster_name: str, ou
 
     df["entity_type"] = df["client_type"]
 
-    # Convert root namespace path to "root/" when namespace_id is "root"
-    if "namespace_id" in df.columns and "namespace_path" in df.columns:
+    # Convert root namespace path to "root/" when namespace_id is "root".
+    # Absent namespace columns are normal on OSS clusters — note it and carry on.
+    if all(column in df.columns for column in NAMESPACE_COLUMNS):
         mask = (df["namespace_id"] == "root") & (df["namespace_path"] == "")
         df.loc[mask, "namespace_path"] = "root/"
+    else:
+        missing_optional = [column for column in NAMESPACE_COLUMNS if column not in df.columns]
+        logger.warning(f"Namespace columns absent from entity export data: {missing_optional}. Skipping root namespace normalisation; the export is otherwise unaffected.")
 
     date_str = datetime.now().strftime(FILE_DATE_FORMAT)
 
@@ -64,11 +77,12 @@ def process_entity_export_data(data: list[dict[str, Any]], cluster_name: str, ou
         logger.debug(f"Writing entity export JSON with {len(data)} entity records")
         write_json(f"{output_dir}/{cluster_name}-entity-export-{date_str}.json", data)
 
-        # Convert numeric columns to nullable int to avoid float output in CSV.
-        # Int64 (capital I) is pandas' nullable integer type and avoids overflow
-        # that the non-nullable int64 can silently produce on very large counts.
+        # Convert numeric columns to int to avoid float output in CSV.
+        # fillna(0) first: without it, NaN survives the cast and pandas writes
+        # the literal string "<NA>" into the CSV, turning a numeric column into
+        # text for every downstream consumer. Matches namespace_audit.
         numeric_columns = df.select_dtypes(include=["float64"]).columns
-        df[numeric_columns] = df[numeric_columns].astype("Int64")
+        df[numeric_columns] = df[numeric_columns].fillna(0).astype("int64")
 
         logger.debug(f"Writing entity export CSV with {len(df)} entity records")
         write_csv(
