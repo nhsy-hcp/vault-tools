@@ -16,6 +16,10 @@ from src.common.vault_client import VaultClient
 logger = logging.getLogger(__name__)
 
 
+# Columns that must be present for processing to succeed.
+REQUIRED_COLUMNS = frozenset({"namespace_id", "namespace_path", "client_type"})
+
+
 def get_entity_export_data(client: VaultClient, start_date: str, end_date: str) -> list[dict[str, Any]]:
     start_rfc3339 = f"{start_date}T00:00:00Z"
     end_rfc3339 = f"{end_date}T23:59:59Z"
@@ -31,8 +35,9 @@ def process_entity_export_data(data: list[dict[str, Any]], cluster_name: str, ou
         return None
 
     df = pd.DataFrame(data)
-    if "client_type" not in df.columns:
-        logger.error("Column 'client_type' not found in data")
+    missing = REQUIRED_COLUMNS - set(df.columns)
+    if missing:
+        logger.error(f"Required columns missing from entity export data: {sorted(missing)}")
         return None
 
     df["entity_type"] = df["client_type"]

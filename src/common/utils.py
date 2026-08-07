@@ -1,3 +1,4 @@
+import calendar
 import logging
 from datetime import datetime, timedelta
 
@@ -40,8 +41,29 @@ def get_last_day_of_month(month: datetime) -> datetime:
     Returns:
         datetime: A datetime object set to the last day of the month.
     """
-    next_month = month.replace(day=28) + timedelta(days=4)
-    return next_month - timedelta(days=next_month.day)
+    last_day = calendar.monthrange(month.year, month.month)[1]
+    return month.replace(day=last_day)
+
+
+def normalise_namespace_path(path: str | None) -> str:
+    """Normalise a Vault namespace path to a canonical form.
+
+    Rules:
+    - ``None``, ``""``, or ``"/"`` → ``""``  (root namespace)
+    - Any other value → strip surrounding whitespace and trailing slash
+
+    Examples::
+
+        normalise_namespace_path(None)       # ""
+        normalise_namespace_path("")         # ""
+        normalise_namespace_path("/")        # ""
+        normalise_namespace_path("foo/")     # "foo"
+        normalise_namespace_path("foo/bar/") # "foo/bar"
+    """
+    if not path:
+        return ""
+    stripped = path.strip().rstrip("/")
+    return "" if stripped == "" else stripped
 
 
 def get_last_month() -> datetime:

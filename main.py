@@ -23,6 +23,7 @@ from src.common.logging_config import (
     set_correlation_id,
     setup_logging,
 )
+from src.common.utils import validate_date_format
 from src.common.vault_client import VaultClient
 from src.entity_export.main import run_entity_export
 from src.namespace_audit.main import NamespaceAuditor
@@ -56,14 +57,32 @@ def create_vault_client(logger) -> VaultClient:
             vault_addr_set=bool(vault_addr),
             vault_token_set=bool(vault_token),
         )
-
-        if not vault_addr:
-            pass
-        if not vault_token:
-            pass
         sys.exit(1)
 
     return VaultClient(vault_addr, vault_token)
+
+
+def validate_dates(start_date: str, end_date: str, logger) -> None:
+    """Validate date format and ordering; exit with a clear message on failure.
+
+    Args:
+        start_date: Start date string (expected YYYY-MM-DD).
+        end_date:   End date string (expected YYYY-MM-DD).
+        logger:     Structured logger instance for error reporting.
+    """
+    for label, value in (("start-date", start_date), ("end-date", end_date)):
+        try:
+            validate_date_format(value)
+        except ValueError as exc:
+            logger.error("invalid_date_argument", field=label, value=value, error=str(exc))
+            sys.stderr.write(f"Error: {exc}\n")
+            sys.exit(1)
+
+    if start_date > end_date:
+        msg = f"--start-date ({start_date}) must not be after --end-date ({end_date})"
+        logger.error("invalid_date_range", start_date=start_date, end_date=end_date)
+        sys.stderr.write(f"Error: {msg}\n")
+        sys.exit(1)
 
 
 def main() -> None:
@@ -171,6 +190,7 @@ def main() -> None:
             logger.info("command_execution_completed", command="namespace-audit")
 
         elif args.command == "activity-export":
+            validate_dates(args.start_date, args.end_date, logger)
             logger.info(
                 "command_execution_started",
                 command="activity-export",
@@ -188,6 +208,7 @@ def main() -> None:
             logger.info("command_execution_completed", command="activity-export")
 
         elif args.command == "entity-export":
+            validate_dates(args.start_date, args.end_date, logger)
             logger.info(
                 "command_execution_started",
                 command="entity-export",
@@ -205,6 +226,7 @@ def main() -> None:
             logger.info("command_execution_completed", command="entity-export")
 
         elif args.command == "all":
+            validate_dates(args.start_date, args.end_date, logger)
             logger.info(
                 "command_execution_started",
                 command="all",

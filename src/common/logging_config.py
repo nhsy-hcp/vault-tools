@@ -157,6 +157,39 @@ class StructuredLoggerAdapter:
         """Log exception with traceback."""
         self.logger.exception(msg, **kwargs)
 
+    def critical(self, msg: str, **kwargs) -> None:
+        """Log critical message with optional context."""
+        self.logger.critical(msg, **kwargs)
+
+    def log(self, level: int, msg: str, **kwargs) -> None:
+        """Log message at the given numeric level."""
+        # structlog uses named levels; map via stdlib
+        import logging as _logging
+
+        method = {
+            _logging.DEBUG: self.debug,
+            _logging.INFO: self.info,
+            _logging.WARNING: self.warning,
+            _logging.ERROR: self.error,
+            _logging.CRITICAL: self.critical,
+        }.get(level, self.info)
+        method(msg, **kwargs)
+
+    def isEnabledFor(self, level: int) -> bool:  # noqa: N802
+        """Return True if the underlying logger would emit at this level."""
+        try:
+            return self.logger.isEnabledFor(level)
+        except AttributeError:
+            return True
+
+    def setLevel(self, level) -> None:  # noqa: N802
+        """No-op: level control is not meaningful on a structlog bound logger."""
+        self.logger.debug("setLevel called on StructuredLoggerAdapter (no-op)", level=level)
+
+    def addHandler(self, handler) -> None:  # noqa: N802
+        """No-op: handler management is not meaningful on a structlog bound logger."""
+        self.logger.debug("addHandler called on StructuredLoggerAdapter (no-op)")
+
     def bind(self, **kwargs) -> "StructuredLoggerAdapter":
         """Bind context to logger."""
         return StructuredLoggerAdapter(self.logger.bind(**kwargs))

@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass
 
-from .vault_client import ConfigurationError
+from .exceptions import ConfigurationError
 
 
 @dataclass

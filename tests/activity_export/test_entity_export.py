@@ -43,6 +43,7 @@ class TestEntityExportFunctionality:
             {
                 "client_id": "client-1",
                 "namespace_id": "root",
+                "namespace_path": "",
                 "timestamp": "2024-01-01T10:00:00Z",
                 "mount_accessor": "accessor-1",
                 "client_type": "entity",
@@ -50,6 +51,7 @@ class TestEntityExportFunctionality:
             {
                 "client_id": "client-2",
                 "namespace_id": "ns1",
+                "namespace_path": "ns1/",
                 "timestamp": "2024-01-01T11:00:00Z",
                 "mount_accessor": "accessor-2",
                 "client_type": "non_entity",
@@ -57,6 +59,7 @@ class TestEntityExportFunctionality:
             {
                 "client_id": "client-3",
                 "namespace_id": "root",
+                "namespace_path": "",
                 "timestamp": "2024-01-02T09:00:00Z",
                 "mount_accessor": "accessor-1",
                 "client_type": "entity",

@@ -10,35 +10,16 @@ from cachetools import TTLCache
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-
-class VaultAPIError(Exception):
-    """Custom exception for Vault API errors."""
-
-    pass
-
-
-class VaultConnectionError(Exception):
-    """Custom exception for Vault connection issues."""
-
-    pass
-
-
-class VaultDataError(Exception):
-    """Custom exception for malformed Vault API responses."""
-
-    pass
-
-
-class VaultPermissionError(Exception):
-    """Custom exception for Vault authorization issues."""
-
-    pass
-
-
-class ConfigurationError(Exception):
-    """Custom exception for configuration-related errors."""
-
-    pass
+# Re-export all exceptions from the shared module so existing callers that do
+#   from src.common.vault_client import VaultAPIError, ...
+# continue to work without changes.
+from .exceptions import (  # noqa: F401
+    ConfigurationError,
+    VaultAPIError,
+    VaultConnectionError,
+    VaultDataError,
+    VaultPermissionError,
+)
 
 
 class VaultClient:

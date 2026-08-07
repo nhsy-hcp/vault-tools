@@ -87,6 +87,8 @@ class NamespaceAuditor:
         rate_limit_sleep_seconds: int = 3,
         rate_limit_disable: bool = False,
         output_dir: str = "outputs",
+        worker_queue_timeout: int = 300,
+        max_queue_size: int = 10_000,
     ):
         self.vault_client = vault_client
         self.worker_threads = worker_threads
@@ -94,6 +96,8 @@ class NamespaceAuditor:
         self.rate_limit_sleep_seconds = rate_limit_sleep_seconds
         self.rate_limit_disable = rate_limit_disable
         self.output_dir = output_dir
+        self.worker_queue_timeout = worker_queue_timeout
+        self.max_queue_size = max_queue_size
         self.stats = AuditStats()
         self.data = AuditData()
         self.thread_lock = threading.Lock()
@@ -135,7 +139,7 @@ class NamespaceAuditor:
             cluster_name = self.vault_client.validate_connection()
             self.console.print(f"[green]✓[/green] Connected to cluster: [bold]{cluster_name}[/bold]")
 
-            path_queue: queue.Queue[str] = queue.Queue()
+            path_queue: queue.Queue[str] = queue.Queue(maxsize=self.max_queue_size)
             # Handle None, "/" or empty namespace paths - all should default to root namespace
             initial_namespace = "" if namespace_path is None or namespace_path == "/" or namespace_path == "" else namespace_path
             logger.debug(f"Initial namespace after processing: '{initial_namespace}'")
@@ -241,7 +245,7 @@ class NamespaceAuditor:
         while True:
             try:
                 logger.debug(f"Worker {worker_name} waiting for namespace from queue")
-                namespace_path = path_queue.get(timeout=300)
+                namespace_path = path_queue.get(timeout=self.worker_queue_timeout)
                 if namespace_path is None:
                     logger.debug(f"Worker {worker_name} received shutdown signal")
                     break
@@ -261,6 +265,7 @@ class NamespaceAuditor:
                 self._traverse_namespace(namespace_path, path_queue)
 
             except queue.Empty:
+                logger.warning(f"Worker {worker_name} timed out waiting for queue item after {self.worker_queue_timeout}s")
                 continue
             except Exception as e:
                 logger.exception(f"Error in worker thread: {e}")
@@ -309,6 +314,8 @@ class NamespaceAuditor:
                                 logger.debug(f"Processing child namespace '{name}' -> constructed path: '{child_path_full}'")
                                 logger.debug(f"Adding namespace '{child_path_full}' to processing queue")
                                 path_queue.put(child_path_full)  # Put full path with trailing slash for API calls
+                                if path_queue.qsize() > self.max_queue_size * 0.9:
+                                    logger.warning(f"Namespace queue is above 90% capacity ({path_queue.qsize()}/{self.max_queue_size}); consider increasing max_queue_size")
                                 with self.thread_lock:
                                     stored_path = child_path_full.rstrip("/")
                                     self.data.namespaces[stored_path] = info

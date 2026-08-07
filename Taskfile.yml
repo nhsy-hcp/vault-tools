@@ -90,12 +90,19 @@ tasks:
       - uv run pytest tests/ -v --cov=src --cov-report=term-missing
       - echo "✅ Complete test suite passed"
 
+  test:coverage:
+    desc: "Run the test suite and enforce a minimum 80% coverage threshold"
+    cmds:
+      - echo "Running tests with 80% minimum coverage gate..."
+      - uv run pytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=80
+      - echo "✅ Coverage gate passed (≥80%)"
+
   test:ci:
     desc: "Execute the full verification pipeline as defined in CI"
     cmds:
       - echo "Running CI verification pipeline..."
       - task: lint
-      - task: test:all
+      - task: test:coverage
       - echo "✅ CI verification complete"
 
   test:gha:

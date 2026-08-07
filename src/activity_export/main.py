@@ -34,6 +34,10 @@ def get_activity_data(client: VaultClient, start_date: str, end_date: str) -> di
 def process_activity_data(data: dict[str, Any], cluster_name: str, output_dir: str = "outputs"):
     date_str = datetime.now().strftime("%Y%m%d")
 
+    if not isinstance(data, dict):
+        logger.warning("process_activity_data received non-dict data; returning empty results")
+        return [], []
+
     # Process namespaces and mounts
     namespaces_data = []
     mounts_data = []

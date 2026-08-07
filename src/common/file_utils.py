@@ -4,13 +4,9 @@ import logging
 import os
 from typing import Any
 
+from .exceptions import FileProcessingError  # noqa: F401
+
 logger = logging.getLogger(__name__)
-
-
-class FileProcessingError(Exception):
-    """Custom exception for file processing errors."""
-
-    pass
 
 
 def write_csv(file_path: str, data: list[dict[str, Any]], headers: list[str] = None):
@@ -23,7 +19,7 @@ def write_csv(file_path: str, data: list[dict[str, Any]], headers: list[str] = N
                 return  # Nothing to write
 
             fieldnames = headers if headers else list(data[0].keys())
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, restval="")
 
             writer.writeheader()
             writer.writerows(data)

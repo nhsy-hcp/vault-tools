@@ -55,7 +55,7 @@ class CircuitBreaker:
             # Check if circuit should transition from open to half-open
             if self.state == "open":
                 if self.last_failure_time and (time.time() - self.last_failure_time) > self.recovery_timeout:
-                    self.logger.info("circuit_breaker_half_open", recovery_timeout=self.recovery_timeout)
+                    self.logger.info("circuit_breaker_half_open recovery_timeout=%s", self.recovery_timeout)
                     self.state = "half-open"
                 else:
                     raise CircuitBreakerOpenError(f"Circuit breaker is open. Last failure: {self.failure_count} failures. " f"Will retry after {self.recovery_timeout}s recovery timeout.")
@@ -65,7 +65,7 @@ class CircuitBreaker:
             # Success — reset failure count
             with self._lock:
                 if self.state == "half-open":
-                    self.logger.info("circuit_breaker_closed", message="Circuit breaker recovered")
+                    self.logger.info("circuit_breaker_closed: Circuit breaker recovered")
                     self.state = "closed"
                 self.failure_count = 0
             return result
@@ -77,10 +77,10 @@ class CircuitBreaker:
                 if self.failure_count >= self.failure_threshold:
                     self.state = "open"
                     self.logger.error(
-                        "circuit_breaker_opened",
-                        failure_count=self.failure_count,
-                        threshold=self.failure_threshold,
-                        error=str(e),
+                        "circuit_breaker_opened failure_count=%s threshold=%s error=%s",
+                        self.failure_count,
+                        self.failure_threshold,
+                        str(e),
                     )
             raise
 
@@ -101,6 +101,8 @@ class VaultClientWithRetry(VaultClient):
         hvac_timeout: int = 30,
         max_retry_attempts: int = 3,
         enable_circuit_breaker: bool = True,
+        circuit_breaker_failure_threshold: int = 5,
+        circuit_breaker_recovery_timeout: int = 60,
         **kwargs,
     ):
         """Initialize VaultClientWithRetry.
@@ -112,6 +114,8 @@ class VaultClientWithRetry(VaultClient):
             hvac_timeout: Request timeout in seconds
             max_retry_attempts: Maximum number of retry attempts
             enable_circuit_breaker: Enable circuit breaker pattern
+            circuit_breaker_failure_threshold: Failures before opening a circuit breaker
+            circuit_breaker_recovery_timeout: Seconds before a breaker attempts recovery
             **kwargs: Additional keyword arguments forwarded to VaultClient
         """
         super().__init__(
@@ -123,18 +127,29 @@ class VaultClientWithRetry(VaultClient):
         )
         self.max_retry_attempts = max_retry_attempts
         self.enable_circuit_breaker = enable_circuit_breaker
+        self.circuit_breaker_failure_threshold = circuit_breaker_failure_threshold
+        self.circuit_breaker_recovery_timeout = circuit_breaker_recovery_timeout
         self.circuit_breakers: dict[str, CircuitBreaker] = {}
 
     def _get_circuit_breaker(self, endpoint: str) -> CircuitBreaker | None:
-        """Get or create circuit breaker for endpoint."""
+        """Get or create circuit breaker for endpoint.
+
+        Endpoints are grouped by their first two path segments so that, for
+        example, ``identity/entity`` and ``identity/group`` each get their own
+        independent breaker rather than sharing one for all of ``identity/*``.
+        """
         if not self.enable_circuit_breaker:
             return None
 
-        # Group endpoints by prefix for circuit breaker
-        prefix = endpoint.split("/")[0] if "/" in endpoint else endpoint
+        # Use first two segments for finer-grained isolation.
+        parts = endpoint.split("/")
+        prefix = "/".join(parts[:2]) if len(parts) >= 2 else parts[0]
 
         if prefix not in self.circuit_breakers:
-            self.circuit_breakers[prefix] = CircuitBreaker(failure_threshold=5, recovery_timeout=60)
+            self.circuit_breakers[prefix] = CircuitBreaker(
+                failure_threshold=self.circuit_breaker_failure_threshold,
+                recovery_timeout=self.circuit_breaker_recovery_timeout,
+            )
 
         return self.circuit_breakers[prefix]
 
