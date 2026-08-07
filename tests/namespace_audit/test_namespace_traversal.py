@@ -69,7 +69,9 @@ class TestNamespaceDataFetching:
 
         assert "test/" not in auditor.data.auth_methods
         assert "test/" not in auditor.data.secret_engines
-        assert auditor.stats.error_count == 1
+        # Forbidden access is tracked in forbidden_count, not error_count (N5 fix).
+        assert auditor.stats.error_count == 0
+        assert auditor.stats.forbidden_count == 1
 
     def test_traverse_namespace_error_handling(self, auditor):
         """Test error handling during namespace traversal."""

@@ -1,8 +1,12 @@
 import calendar
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger(__name__)
+
+# Shared date format constants — use these everywhere instead of inline literals.
+DATE_FORMAT = "%Y-%m-%d"  # Parsing/validation (YYYY-MM-DD)
+FILE_DATE_FORMAT = "%Y%m%d"  # File name suffix (YYYYMMDD)
 
 
 def validate_date_format(date_str: str) -> None:
@@ -15,7 +19,7 @@ def validate_date_format(date_str: str) -> None:
         ValueError: If date format is invalid.
     """
     try:
-        datetime.strptime(date_str, "%Y-%m-%d")
+        datetime.strptime(date_str, DATE_FORMAT)
     except ValueError as e:
         raise ValueError(f"Invalid date format '{date_str}'. Expected format: YYYY-MM-DD") from e
 
@@ -67,9 +71,11 @@ def normalise_namespace_path(path: str | None) -> str:
 
 
 def get_last_month() -> datetime:
-    """Get the last day of the previous month from today's date.
+    """Get the last day of the previous month from today's date (UTC).
 
     Returns:
-        datetime: A datetime object set to the last day of the previous month.
+        datetime: A UTC-aware datetime set to the last day of the previous month.
     """
-    return datetime.today().replace(day=1) - timedelta(days=1)
+    # Use UTC so behaviour is consistent regardless of the host timezone (U2).
+    # U1 is already correctly implemented via calendar.monthrange above.
+    return datetime.now(UTC).replace(day=1) - timedelta(days=1)

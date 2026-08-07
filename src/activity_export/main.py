@@ -10,6 +10,7 @@ from rich.table import Table
 
 from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import FileProcessingError, write_csv, write_json
+from src.common.utils import FILE_DATE_FORMAT
 from src.common.vault_client import VaultAPIError, VaultClient
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ def get_activity_data(client: VaultClient, start_date: str, end_date: str) -> di
 
 
 def process_activity_data(data: dict[str, Any], cluster_name: str, output_dir: str = "outputs"):
-    date_str = datetime.now().strftime("%Y%m%d")
+    date_str = datetime.now().strftime(FILE_DATE_FORMAT)
 
     if not isinstance(data, dict):
         logger.warning("process_activity_data received non-dict data; returning empty results")
@@ -47,6 +48,10 @@ def process_activity_data(data: dict[str, Any], cluster_name: str, output_dir: s
         # Convert root namespace path to "root/" when namespace_id is "root"
         if ns_id == "root" and ns_path == "":
             ns_path = "root/"
+        elif ns_path == "":
+            # Non-root namespace with an empty path is unexpected; preserve the
+            # truthful empty string and emit a debug log for observability.
+            logger.debug(f"namespace_id {ns_id!r} has empty namespace_path; leaving as-is")
         ns_counts = namespace.get("counts", {})
         namespaces_data.append(
             {

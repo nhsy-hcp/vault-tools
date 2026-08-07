@@ -11,6 +11,7 @@ from rich.table import Table
 
 from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import FileProcessingError, write_csv, write_json
+from src.common.utils import FILE_DATE_FORMAT
 from src.common.vault_client import VaultClient
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,16 @@ REQUIRED_COLUMNS = frozenset({"namespace_id", "namespace_path", "client_type"})
 
 
 def get_entity_export_data(client: VaultClient, start_date: str, end_date: str) -> list[dict[str, Any]]:
+    """Fetch entity export data from Vault.
+
+    Args:
+        client: Vault client instance.
+        start_date: Start date string in YYYY-MM-DD format.
+        end_date: End date string in YYYY-MM-DD format.
+
+    Returns:
+        list[dict[str, Any]]: List of entity records returned by the Vault API.
+    """
     start_rfc3339 = f"{start_date}T00:00:00Z"
     end_rfc3339 = f"{end_date}T23:59:59Z"
     params = {"start_time": start_rfc3339, "end_time": end_rfc3339, "format": "json"}
@@ -47,15 +58,17 @@ def process_entity_export_data(data: list[dict[str, Any]], cluster_name: str, ou
         mask = (df["namespace_id"] == "root") & (df["namespace_path"] == "")
         df.loc[mask, "namespace_path"] = "root/"
 
-    date_str = datetime.now().strftime("%Y%m%d")
+    date_str = datetime.now().strftime(FILE_DATE_FORMAT)
 
     try:
         logger.debug(f"Writing entity export JSON with {len(data)} entity records")
         write_json(f"{output_dir}/{cluster_name}-entity-export-{date_str}.json", data)
 
-        # Convert numeric columns to int to avoid float output in CSV
+        # Convert numeric columns to nullable int to avoid float output in CSV.
+        # Int64 (capital I) is pandas' nullable integer type and avoids overflow
+        # that the non-nullable int64 can silently produce on very large counts.
         numeric_columns = df.select_dtypes(include=["float64"]).columns
-        df[numeric_columns] = df[numeric_columns].astype("int64")
+        df[numeric_columns] = df[numeric_columns].astype("Int64")
 
         logger.debug(f"Writing entity export CSV with {len(df)} entity records")
         write_csv(

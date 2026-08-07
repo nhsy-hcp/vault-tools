@@ -15,6 +15,7 @@
 import argparse
 import os
 import sys
+import uuid
 
 from src.activity_export.main import run_activity_export
 from src.common.config import GlobalConfig
@@ -97,6 +98,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Vault Tools CLI")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
     parser.add_argument("--json-logs", action="store_true", help="Output logs in JSON format.")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory for reports (overrides VAULT_TOOLS_OUTPUT_DIR env var).",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # Namespace Audit command
@@ -151,8 +158,6 @@ def main() -> None:
     setup_logging(debug=args.debug, json_logs=args.json_logs)
 
     # Generate correlation ID for this execution
-    import uuid
-
     correlation_id = str(uuid.uuid4())
     set_correlation_id(correlation_id)
 
@@ -169,8 +174,11 @@ def main() -> None:
     if args.debug:
         logger.debug("debug_logging_enabled", args=vars(args))
 
-    # Load global configuration and create vault client
+    # Load global configuration and create vault client.
+    # CLI --output-dir flag takes precedence over the environment variable.
     global_config = GlobalConfig.from_environment()
+    if args.output_dir is not None:
+        global_config.output_dir = args.output_dir
     vault_client = create_vault_client(logger)
 
     try:
@@ -235,6 +243,7 @@ def main() -> None:
                 namespace=args.namespace,
                 workers=args.workers,
             )
+            # Validate connection once and reuse the cluster name for all sub-tools.
             cluster_name = vault_client.validate_connection()
 
             # Run namespace-audit
@@ -247,7 +256,7 @@ def main() -> None:
             auditor.audit_cluster(args.namespace)
             logger.info("subcommand_completed", subcommand="namespace-audit")
 
-            # Run activity-export
+            # Run activity-export (reuses cluster_name from above)
             logger.info("subcommand_started", subcommand="activity-export")
             run_activity_export(
                 vault_client,
@@ -258,7 +267,7 @@ def main() -> None:
             )
             logger.info("subcommand_completed", subcommand="activity-export")
 
-            # Run entity-export
+            # Run entity-export (reuses cluster_name from above)
             logger.info("subcommand_started", subcommand="entity-export")
             run_entity_export(
                 vault_client,

@@ -7,7 +7,9 @@ This module provides centralized logging configuration with:
 - Context-aware logging
 """
 
+import functools
 import logging
+import os
 import sys
 import tomllib
 import uuid
@@ -19,8 +21,13 @@ from typing import Any
 import structlog
 
 
+@functools.lru_cache(maxsize=1)
 def get_version() -> str:
-    """Get application version from package metadata or pyproject.toml."""
+    """Get application version from package metadata or pyproject.toml.
+
+    Result is cached for the lifetime of the process (LC1) so pyproject.toml
+    is read at most once even when this is called on every log event.
+    """
     try:
         return version("vault-tools")
     except PackageNotFoundError:
@@ -98,8 +105,11 @@ def setup_logging(debug: bool = False, json_logs: bool = False) -> None:
         # JSON output for production/log aggregation
         processors = shared_processors + [structlog.processors.format_exc_info, structlog.processors.JSONRenderer()]
     else:
-        # Human-readable console output for development
-        processors = shared_processors + [structlog.processors.format_exc_info, structlog.dev.ConsoleRenderer(colors=True)]
+        # Human-readable console output for development.
+        # LC3: disable ANSI colours when stdout is not a TTY (e.g. CI) or when
+        # the NO_COLOR env var is set (https://no-color.org/).
+        use_colors = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+        processors = shared_processors + [structlog.processors.format_exc_info, structlog.dev.ConsoleRenderer(colors=use_colors)]
 
     structlog.configure(
         processors=processors,
@@ -109,7 +119,9 @@ def setup_logging(debug: bool = False, json_logs: bool = False) -> None:
         cache_logger_on_first_use=True,
     )
 
-    # Reduce noise from third-party libraries
+    # LC4: suppress verbose output from third-party libraries in non-debug mode.
+    # These libraries produce INFO/DEBUG chatter that obscures vault-tools output.
+    # In debug mode all levels are intentionally left unrestricted for diagnosis.
     if not debug:
         logging.getLogger("hvac").setLevel(logging.WARNING)
         logging.getLogger("requests").setLevel(logging.WARNING)

@@ -5,6 +5,10 @@ from dataclasses import dataclass
 
 from .exceptions import ConfigurationError
 
+# Note (CF3): all boolean env-var parsing in this module intentionally uses the
+# pattern `.lower() == "true"` — this is consistent across every boolean flag
+# and is the correct approach; there is no inconsistency to fix.
+
 
 @dataclass
 class VaultConfig:
@@ -28,6 +32,16 @@ class GlobalConfig:
 
     output_dir: str = "outputs"
     debug: bool = False
+
+    def __post_init__(self):
+        """Validate and prepare configuration after initialization."""
+        # Ensure output_dir exists and is writable (CF4).
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+        except OSError as e:
+            raise ConfigurationError(f"Cannot create output directory '{self.output_dir}': {e}") from e
+        if not os.access(self.output_dir, os.W_OK):
+            raise ConfigurationError(f"Output directory '{self.output_dir}' is not writable. " "Set VAULT_TOOLS_OUTPUT_DIR to a writable path.")
 
     @classmethod
     def from_environment(cls) -> "GlobalConfig":
@@ -92,11 +106,17 @@ class NamespaceAuditConfig(VaultConfig):
         except ValueError as e:
             raise ConfigurationError(f"VAULT_TOOLS_TIMEOUT must be an integer (got '{os.environ.get('VAULT_TOOLS_TIMEOUT')}')") from e
 
+        # Normalise namespace path from env before passing to config so
+        # __post_init__ receives an already-canonical value (CF2).
+        raw_namespace = os.environ.get("VAULT_TOOLS_NAMESPACE", "")
+        if raw_namespace and not raw_namespace.endswith("/"):
+            raw_namespace += "/"
+
         config = cls(
             vault_addr=vault_addr,
             vault_token=vault_token,
             vault_skip_verify=vault_skip_verify,
-            namespace_path=os.environ.get("VAULT_TOOLS_NAMESPACE", ""),
+            namespace_path=raw_namespace,
             worker_threads=worker_threads,
             rate_limit_disable=os.environ.get("VAULT_TOOLS_NO_RATE_LIMIT", "false").lower() == "true",
             rate_limit_batch_size=rate_limit_batch_size,

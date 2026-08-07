@@ -19,8 +19,16 @@ class TestGetVersion:
 
         from src.common.logging_config import get_version
 
+        # Clear lru_cache so this test is not affected by prior calls that
+        # cached the real installed version (LC1 fix introduces the cache).
+        get_version.cache_clear()
+
         with patch("src.common.logging_config.version", side_effect=PackageNotFoundError), patch("src.common.logging_config.Path.exists", return_value=False):
             result = get_version()
+
+        # Restore cache so subsequent tests are not affected.
+        get_version.cache_clear()
+
         assert result == "dev"
 
 

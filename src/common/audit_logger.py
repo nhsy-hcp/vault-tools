@@ -60,11 +60,16 @@ class AuditLogger:
         Initialize audit logger.
 
         Args:
-            log_dir: Directory for audit logs (default: ./outputs/audit)
+            log_dir: Directory for audit logs.  When omitted the
+                ``VAULT_TOOLS_AUDIT_DIR`` environment variable is consulted,
+                falling back to ``./outputs/audit`` (AL4).
             max_bytes: Maximum size of each log file (default: 10MB)
             backup_count: Number of backup files to keep (default: 5)
         """
-        self.log_dir = Path(log_dir) if log_dir else Path("outputs/audit")
+        # AL4: honour env var so the audit dir is configurable without code changes.
+        if log_dir is None:
+            log_dir = os.environ.get("VAULT_TOOLS_AUDIT_DIR", "outputs/audit")
+        self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
         # Create audit logger
@@ -96,8 +101,9 @@ class AuditLogger:
         # Ensure the listener is stopped cleanly on interpreter exit
         atexit.register(self.close)
 
-        # Get user context once
-        self.user_context = self._get_user_context()
+        # AL5: do not cache user context at init — _get_user_context() is called
+        # per log entry so forked processes and long-lived loggers always reflect
+        # the current PID and username rather than stale init-time values.
 
     def close(self) -> None:
         """Stop the background logging thread cleanly."""
@@ -116,7 +122,7 @@ class AuditLogger:
         entry = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "event_type": event_type,
-            **self.user_context,
+            **self._get_user_context(),
             **data,
         }
         return json.dumps(_redact(entry), default=str)

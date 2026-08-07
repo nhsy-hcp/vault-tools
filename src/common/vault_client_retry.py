@@ -7,6 +7,7 @@ This module extends the base VaultClient with:
 """
 
 import logging
+import os
 import threading
 
 import requests
@@ -102,7 +103,7 @@ class VaultClientWithRetry(VaultClient):
         max_retry_attempts: int = 3,
         enable_circuit_breaker: bool = True,
         circuit_breaker_failure_threshold: int = 5,
-        circuit_breaker_recovery_timeout: int = 60,
+        circuit_breaker_recovery_timeout: int = None,
         **kwargs,
     ):
         """Initialize VaultClientWithRetry.
@@ -115,7 +116,8 @@ class VaultClientWithRetry(VaultClient):
             max_retry_attempts: Maximum number of retry attempts
             enable_circuit_breaker: Enable circuit breaker pattern
             circuit_breaker_failure_threshold: Failures before opening a circuit breaker
-            circuit_breaker_recovery_timeout: Seconds before a breaker attempts recovery
+            circuit_breaker_recovery_timeout: Seconds before a breaker attempts recovery.
+                Defaults to the VAULT_TOOLS_CB_RECOVERY_TIMEOUT env var, or 60 seconds.
             **kwargs: Additional keyword arguments forwarded to VaultClient
         """
         super().__init__(
@@ -128,6 +130,9 @@ class VaultClientWithRetry(VaultClient):
         self.max_retry_attempts = max_retry_attempts
         self.enable_circuit_breaker = enable_circuit_breaker
         self.circuit_breaker_failure_threshold = circuit_breaker_failure_threshold
+        # Allow env-var override so recovery timeout is configurable without code changes.
+        if circuit_breaker_recovery_timeout is None:
+            circuit_breaker_recovery_timeout = int(os.environ.get("VAULT_TOOLS_CB_RECOVERY_TIMEOUT", "60"))
         self.circuit_breaker_recovery_timeout = circuit_breaker_recovery_timeout
         self.circuit_breakers: dict[str, CircuitBreaker] = {}
 
@@ -137,11 +142,14 @@ class VaultClientWithRetry(VaultClient):
         Endpoints are grouped by their first two path segments so that, for
         example, ``identity/entity`` and ``identity/group`` each get their own
         independent breaker rather than sharing one for all of ``identity/*``.
+        This is finer-grained than grouping by the first segment alone, which
+        was the original finding (R4) — the two-segment strategy is already the
+        correct fix and is preserved here.
         """
         if not self.enable_circuit_breaker:
             return None
 
-        # Use first two segments for finer-grained isolation.
+        # Two-segment prefix gives per-operation isolation within a service.
         parts = endpoint.split("/")
         prefix = "/".join(parts[:2]) if len(parts) >= 2 else parts[0]
 
@@ -212,3 +220,18 @@ class VaultClientWithRetry(VaultClient):
         if circuit_breaker:
             return circuit_breaker.call(super().post, path, data, namespace)
         return super().post(path, data, namespace)
+
+    def validate_connection(self) -> str:
+        """Validate Vault connection with circuit breaker protection.
+
+        Wraps the base validate_connection() call through the circuit breaker
+        for the ``sys/health`` endpoint so connectivity checks are subject to
+        the same fail-fast semantics as regular API calls.
+
+        Returns:
+            Cluster name string from the Vault health endpoint.
+        """
+        circuit_breaker = self._get_circuit_breaker("sys/health")
+        if circuit_breaker:
+            return circuit_breaker.call(super().validate_connection)
+        return super().validate_connection()

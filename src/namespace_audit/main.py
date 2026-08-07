@@ -23,6 +23,7 @@ from rich.table import Table
 
 from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import write_csv, write_json
+from src.common.utils import FILE_DATE_FORMAT
 from src.common.vault_client import VaultClient, VaultConnectionError
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,6 @@ class Constants:
     DEFAULT_TIMEOUT = 3
     DEFAULT_BATCH_SIZE = 100
     DEFAULT_SLEEP_SECONDS = 3
-    DATE_FORMAT = "%Y%m%d"
 
 
 @dataclass
@@ -42,6 +42,7 @@ class AuditStats:
 
     processed_count: int = 0
     error_count: int = 0
+    forbidden_count: int = 0
     start_time: datetime | None = None
     end_time: datetime | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -67,6 +68,11 @@ class AuditStats:
     def increment_errors(self) -> None:
         with self._lock:
             self.error_count += 1
+
+    def increment_forbidden(self) -> None:
+        """Increment the forbidden (permission-denied) counter atomically."""
+        with self._lock:
+            self.forbidden_count += 1
 
 
 @dataclass
@@ -156,9 +162,11 @@ class NamespaceAuditor:
                 console=self.console,
             ) as progress:
                 self.progress = progress
+                # Use total=None so Rich renders an advancing counter rather
+                # than a percentage bar — we don't know the total upfront.
                 self.progress_task = progress.add_task(
                     "[cyan]Processing namespaces...",
-                    total=None,  # Indeterminate progress
+                    total=None,
                 )
 
                 workers = []
@@ -205,6 +213,7 @@ class NamespaceAuditor:
                     "cluster_name": cluster_name,
                     "namespaces_processed": self.stats.processed_count,
                     "errors": self.stats.error_count,
+                    "forbidden": self.stats.forbidden_count,
                     "cache_stats": cache_stats,
                 },
             )
@@ -329,13 +338,13 @@ class NamespaceAuditor:
 
         except hvac.exceptions.Forbidden:
             logger.warning(f"Permission denied for namespace: {display_path}")
-            self.stats.increment_errors()
+            self.stats.increment_forbidden()
         except Exception as e:
             logger.error(f"Error processing namespace {display_path}: {e}")
             self.stats.increment_errors()
 
     def _write_reports(self, cluster_name: str):
-        date_str = datetime.now().strftime("%Y%m%d")
+        date_str = datetime.now().strftime(FILE_DATE_FORMAT)
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -401,9 +410,11 @@ class NamespaceAuditor:
 
         df = pd.DataFrame(rows)
         df = df.fillna(0)
-        # Convert numeric columns to int to avoid float output in CSV
+        # Convert numeric columns to nullable int to avoid float output in CSV.
+        # Int64 (capital I) is pandas' nullable integer type and avoids overflow
+        # that the non-nullable int64 can silently produce on very large counts.
         numeric_columns = df.select_dtypes(include=["float64"]).columns
-        df[numeric_columns] = df[numeric_columns].astype("int64")
+        df[numeric_columns] = df[numeric_columns].astype("Int64")
         write_csv(file_path, df.to_dict("records"), df.columns.tolist())
 
     def _log_summary(self):
@@ -431,11 +442,18 @@ class NamespaceAuditor:
         else:
             table.add_row("Errors", "[green]0[/green]")
 
+        if self.stats.forbidden_count > 0:
+            table.add_row("Permission Denied (skipped)", f"[yellow]{self.stats.forbidden_count}[/yellow]")
+        else:
+            table.add_row("Permission Denied (skipped)", "[green]0[/green]")
+
         self.console.print("\n")
         self.console.print(table)
 
         # Log to standard logger as well
         logger.info("Audit finished.")
         logger.info(f"Processed {self.stats.processed_count} namespaces in {duration:.2f} seconds.")
+        if self.stats.forbidden_count > 0:
+            logger.warning(f"Permission denied for {self.stats.forbidden_count} namespace(s) — skipped.")
         if self.stats.error_count > 0:
             logger.warning(f"Encountered {self.stats.error_count} errors.")
