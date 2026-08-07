@@ -15,7 +15,6 @@ class TestNamespaceDataFetching:
         mock_hvac_client = Mock()
         mock_hvac_client.sys.list_auth_methods.return_value = {"data": {"userpass/": {"type": "userpass"}}}
         mock_hvac_client.sys.list_mounted_secrets_engines.return_value = {"data": {"secret/": {"type": "kv"}}}
-        # Non-root namespaces don't discover children (to avoid recursion)
         mock_hvac_client.sys.list_namespaces.return_value = {"data": {"key_info": {"team-a/": {"id": "123"}}}}
 
         # Mock the context manager properly using MagicMock to support magic methods
@@ -30,8 +29,10 @@ class TestNamespaceDataFetching:
         # Verify auth methods and secret engines are stored
         assert "test" in auditor.data.auth_methods
         assert "test" in auditor.data.secret_engines
-        # Non-root namespaces don't populate child namespaces (by design)
-        assert path_queue.empty()  # No children added to queue from non-root namespace
+        # Children of a non-root namespace are discovered and queued with their
+        # path resolved against the parent
+        assert "test/team-a" in auditor.data.namespaces
+        assert path_queue.get() == "test/team-a/"
 
     def test_fetch_namespace_data_invalid_path(self, auditor):
         """Test namespace data fetch with invalid path."""
@@ -120,11 +121,10 @@ class TestNamespacePathProcessing:
         assert path_queue.get() == "prod/"
 
     def test_nested_namespace_processing(self, auditor):
-        """Test processing nested namespaces (non-root don't discover children)."""
+        """Test that deeply nested namespaces still discover their own children."""
         mock_hvac_client = Mock()
         mock_hvac_client.sys.list_auth_methods.return_value = {"data": {"ldap/": {"type": "ldap"}}}
         mock_hvac_client.sys.list_mounted_secrets_engines.return_value = {"data": {"database/": {"type": "database"}}}
-        # Non-root namespaces don't call list_namespaces (by design to avoid recursion)
         mock_hvac_client.sys.list_namespaces.return_value = {"data": {"key_info": {"dev/": {"id": "789"}}}}
 
         mock_context_manager = MagicMock()
@@ -138,8 +138,33 @@ class TestNamespacePathProcessing:
         # Verify auth methods and secret engines are stored
         assert "prod/team-a" in auditor.data.auth_methods
         assert "prod/team-a" in auditor.data.secret_engines
-        # Non-root namespaces don't populate child namespaces (by design)
-        assert path_queue.empty()  # No children added from non-root namespace
+        # Discovery continues below the second level
+        assert "prod/team-a/dev" in auditor.data.namespaces
+        assert path_queue.get() == "prod/team-a/dev/"
+
+    def test_already_visited_child_is_not_requeued(self, auditor):
+        """A namespace reported twice is only enqueued once."""
+        mock_hvac_client = Mock()
+        mock_hvac_client.sys.list_auth_methods.return_value = {"data": {}}
+        mock_hvac_client.sys.list_mounted_secrets_engines.return_value = {"data": {}}
+        mock_hvac_client.sys.list_namespaces.return_value = {"data": {"key_info": {"dev/": {"id": "789"}}}}
+
+        mock_context_manager = MagicMock()
+        mock_context_manager.__enter__.return_value = mock_hvac_client
+        mock_context_manager.__exit__.return_value = None
+        auditor.vault_client.get_client.return_value = mock_context_manager
+
+        path_queue = queue.Queue()
+        auditor._traverse_namespace("prod/", path_queue)
+        discovered_after_first = auditor.stats.discovered_count
+
+        # Same parent walked again: the child is already known, so nothing new
+        # is queued and the progress denominator does not grow.
+        auditor._traverse_namespace("prod/", path_queue)
+
+        assert path_queue.get() == "prod/dev/"
+        assert path_queue.empty()
+        assert auditor.stats.discovered_count == discovered_after_first
 
     def test_empty_namespace_processing(self, auditor):
         """Test processing namespace with no auth methods or secret engines."""

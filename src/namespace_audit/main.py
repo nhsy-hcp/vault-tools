@@ -117,6 +117,11 @@ class NamespaceAuditor:
         self._queue_depth_warned = False
         self.stats = AuditStats()
         self.data = AuditData()
+        # Namespaces already discovered, keyed without the trailing slash. The
+        # tree is finite, but a namespace can be reached only once, so this
+        # guards against enqueueing (and billing an API round-trip for) the
+        # same path twice if Vault ever reports overlapping children.
+        self.visited: set[str] = set()
         self.thread_lock = threading.Lock()
         self.console = Console()
         self.audit_logger = get_audit_logger()
@@ -164,6 +169,8 @@ class NamespaceAuditor:
             # Handle None, "/" or empty namespace paths - all should default to root namespace
             initial_namespace = "" if namespace_path is None or namespace_path == "/" or namespace_path == "" else namespace_path
             logger.debug(f"Initial namespace after processing: '{initial_namespace}'")
+            with self.thread_lock:
+                self.visited = {initial_namespace.rstrip("/")}
             path_queue.put(initial_namespace)
             logger.debug(f"Added initial namespace '{initial_namespace}' to queue")
 
@@ -357,38 +364,55 @@ class NamespaceAuditor:
                     logger.debug(f"Storing secrets engines for namespace '{stored_namespace_path}': {len(secret_engines)} entries")
                     self.data.secret_engines[stored_namespace_path] = secret_engines
 
-                # Only traverse child namespaces from root namespace to avoid recursion
-                if namespace_path == "":
-                    try:
-                        logger.debug(f"Attempting to list child namespaces for: {display_path}")
-                        raw_namespaces_response = client.sys.list_namespaces()
-                        # logger.debug(f"Raw namespaces response for {display_path}: {raw_namespaces_response}")
-                        child_namespaces = raw_namespaces_response["data"]["key_info"]
+                # Every namespace is asked for its children, so the queue walks
+                # the whole tree rather than stopping one level below the
+                # starting point. The visited set below keeps the walk finite.
+                try:
+                    logger.debug(f"Attempting to list child namespaces for: {display_path}")
+                    raw_namespaces_response = client.sys.list_namespaces()
+                    child_namespaces = raw_namespaces_response["data"]["key_info"]
 
-                        if child_namespaces:
-                            logger.debug(f"Found {len(child_namespaces)} child namespaces in {display_path}: {list(child_namespaces.keys())}")
+                    if child_namespaces:
+                        logger.debug(f"Found {len(child_namespaces)} child namespaces in {display_path}: {list(child_namespaces.keys())}")
+
+                        # Claim the unseen children under one lock, then enqueue
+                        # outside it: the denominator must count only what this
+                        # thread actually put on the queue, or two workers
+                        # discovering a shared child would inflate the total.
+                        new_children: list[str] = []
+                        with self.thread_lock:
+                            for name, info in child_namespaces.items():
+                                # list_namespaces returns names relative to the current
+                                # namespace, so the absolute path is parent + name.
+                                child_path_full = f"{namespace_path}{name}"
+                                stored_path = child_path_full.rstrip("/")
+                                if stored_path in self.visited:
+                                    logger.debug(f"Skipping already-visited namespace '{stored_path}'")
+                                    continue
+                                self.visited.add(stored_path)
+                                self.data.namespaces[stored_path] = info
+                                new_children.append(child_path_full)
+                                logger.debug(f"Stored namespace data for '{stored_path}' in data collection")
+
+                        if new_children:
                             # Grow the progress denominator before enqueueing so
                             # the bar never reports more done than known (N4).
-                            self.stats.add_discovered(len(child_namespaces))
+                            self.stats.add_discovered(len(new_children))
                             self._refresh_progress()
-                            for name, info in child_namespaces.items():
-                                # Construct child_path: if parent is root (""), child is like "bu01/", else "parent/bu01/"
-                                child_path_full = f"{namespace_path}{name}"
-
-                                logger.debug(f"Processing child namespace '{name}' -> constructed path: '{child_path_full}'")
+                            for child_path_full in new_children:
                                 logger.debug(f"Adding namespace '{child_path_full}' to processing queue")
                                 path_queue.put(child_path_full)  # Put full path with trailing slash for API calls
                                 self._warn_on_queue_depth(path_queue)
-                                with self.thread_lock:
-                                    stored_path = child_path_full.rstrip("/")
-                                    self.data.namespaces[stored_path] = info
-                                    logger.debug(f"Stored namespace data for '{stored_path}' in data collection")
-                        else:
-                            logger.debug(f"No child namespaces found for {display_path}")
-                    except hvac.exceptions.InvalidPath:
-                        logger.debug(f"InvalidPath exception for {display_path} - no child namespaces available")
-                else:
-                    logger.debug(f"Skipping child namespace discovery for non-root namespace: {display_path}")
+                    else:
+                        logger.debug(f"No child namespaces found for {display_path}")
+                except hvac.exceptions.InvalidPath:
+                    logger.debug(f"InvalidPath exception for {display_path} - no child namespaces available")
+                except hvac.exceptions.Forbidden:
+                    # The auth methods and engines above were already captured;
+                    # only the subtree below this namespace is lost, so record
+                    # the gap without discarding what this namespace returned.
+                    logger.warning(f"Permission denied listing child namespaces for: {display_path}")
+                    self.stats.increment_forbidden()
 
         except hvac.exceptions.Forbidden:
             logger.warning(f"Permission denied for namespace: {display_path}")
