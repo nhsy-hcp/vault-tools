@@ -286,6 +286,13 @@ class TestVaultClientGet:
         with self._patched_get(client, resp), pytest.raises(VaultAPIError, match="404"):
             client.get("sys/nonexistent")
 
+    def test_get_204_no_content_returns_empty(self, client):
+        """204 means the query matched nothing, which is a success, not a failure."""
+        resp = self._mock_response(status=204, text="", content=b"")
+        with self._patched_get(client, resp):
+            result = client.get("sys/internal/counters/activity/export")
+        assert result == []
+
     def test_ndjson_response_parsed_as_list(self, client):
         ndjson = '{"a":1}\n{"b":2}\n'
         mock_resp = Mock(spec=requests.Response)

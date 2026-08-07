@@ -203,7 +203,7 @@ class VaultClient:
             error_msg = f"Connection error: {e}. Please verify VAULT_ADDR ({self.vault_addr}) is correct and accessible."
             raise VaultConnectionError(error_msg) from e
 
-    def get(self, path: str, params: dict = None, namespace: str = "", timeout: int | None = None) -> dict:
+    def get(self, path: str, params: dict = None, namespace: str = "", timeout: int | None = None) -> dict | list:
         """Make GET request to Vault API with caching support.
 
         Args:
@@ -212,6 +212,11 @@ class VaultClient:
             namespace: Optional namespace path.
             timeout: Per-request timeout override in seconds; defaults to the
                 client-wide ``hvac_timeout``.
+
+        Returns:
+            dict | list: The decoded response body — a dict for regular JSON
+                endpoints, a list for NDJSON ones such as the activity export.
+                A 204 No Content response yields an empty list.
         """
         # Check cache for cacheable endpoints
         cache_key = self._cache_key(path, namespace, params)
@@ -234,6 +239,14 @@ class VaultClient:
                     result = response
                 elif not isinstance(response, requests.Response):
                     raise VaultDataError(f"Expected requests.Response object or dict, but got {type(response)} for GET {path}. Raw response: {response}")
+                elif response.status_code == 204:
+                    # 204 No Content is Vault's success response for a query that
+                    # matched nothing — most visibly the activity/entity export
+                    # endpoints over a window with no client records. Treating it
+                    # as an error aborted whole runs on quiet periods, so return
+                    # the empty result the caller would have got from a 200.
+                    self.logger.debug(f"No content (204) for GET {path}; returning empty result")
+                    result = []
                 elif response.status_code != 200:
                     raise VaultAPIError(f"GET {path} failed with status {response.status_code}: {_summarise_error_body(response)}")
                 else:
