@@ -29,4 +29,7 @@ jobs:
       run: uv run pre-commit run --all-files
 
     - name: Run tests with coverage
-      run: uv run pytest tests/ -v --cov=src --cov-report=term-missing --cov-report=xml
+      # --cov-fail-under matches `task test:coverage` so the gate that guards
+      # local runs also guards the remote pipeline; without it coverage could
+      # regress on a merge without failing anything.
+      run: uv run pytest tests/ -v --cov=src --cov-report=term-missing --cov-report=xml --cov-fail-under=80
