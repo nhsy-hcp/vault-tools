@@ -5,10 +5,6 @@ version: '3'
 
 dotenv: ['.env']
 
-vars:
-  PYTHON_VERSION: "3.12"
-  PROJECT_NAME: "vault-tools"
-
 tasks:
   init:
     desc: "Perform one-time environment setup"
@@ -47,26 +43,23 @@ tasks:
       - echo ""
       - vault server -dev -dev-root-token-id=root
 
-  down:
-    desc: "Stop development environment (not applicable for CLI tool)"
-    cmds:
-      - echo "ℹ️  This is a CLI tool - no services to stop"
-
   clean:
     desc: "Remove build artifacts, temporary files, and cache"
     cmds:
       - echo "Cleaning build artifacts..."
       - rm -rf build/ dist/ *.egg-info/
+      # Prune .venv and .git before matching: the venv alone holds ~100
+      # __pycache__ directories that belong to installed dependencies, not to
+      # this project, and deleting them only forces needless recompilation.
       - echo "Cleaning Python cache..."
-      - find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-      - find . -type f -name "*.pyc" -delete
-      - find . -type f -name "*.pyo" -delete
-      - echo "Cleaning test cache..."
-      - rm -rf .pytest_cache/
+      - find . -path ./.venv -prune -o -path ./.git -prune -o -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+      - find . -path ./.venv -prune -o -path ./.git -prune -o -type f -name "*.py[co]" -delete
+      - echo "Cleaning test and lint caches..."
+      - rm -rf .pytest_cache/ .ruff_cache/
       - echo "Cleaning temporary files..."
       - rm -rf .tmp/
       - echo "Cleaning coverage reports..."
-      - rm -rf htmlcov/ .coverage
+      - rm -rf htmlcov/ .coverage coverage.xml
       - echo "✅ Cleanup complete"
 
   lint:
@@ -106,15 +99,25 @@ tasks:
       - echo "✅ CI verification complete"
 
   test:gha:
-    desc: "Test GitHub Actions locally with act (dry-run only on M-series Macs)"
+    desc: "Run the GitHub Actions test job locally with act"
+    vars:
+      # The container architecture must match the host, or every step runs
+      # under QEMU emulation: slow on Apple Silicon and liable to fail
+      # outright. Override to reproduce CI's own architecture, e.g.
+      # `task test:gha ACT_ARCH=linux/amd64`.
+      ACT_ARCH: '{{.ACT_ARCH | default (printf "linux/%s" ARCH)}}'
     cmds:
-      - echo "Testing GitHub Actions workflow with act..."
       - command -v act >/dev/null 2>&1 || (echo "❌ act not installed. Install from https://github.com/nektos/act" && exit 1)
-      - 'echo "⚠️  Note: Full execution may fail on M-series Macs due to QEMU limitations"'
-      - echo "Running dry-run to validate workflow structure..."
-      - act -j test --container-architecture linux/amd64 -P ubuntu-latest=catthehacker/ubuntu:act-latest --dryrun
-      - echo "✅ GitHub Actions workflow structure validated"
-      - 'echo "💡 For full CI testing, push to GitHub or use: act -j test --container-architecture linux/arm64"'
+      # Validate first: a schema error is far cheaper to surface here than
+      # after pulling an image and starting a container.
+      - echo "Validating workflow definitions..."
+      - act --validate
+      - echo "✅ Workflow definitions valid"
+      - echo "Checking container engine..."
+      - docker info >/dev/null 2>&1 || (echo "❌ No reachable container engine. Start Docker or Podman and retry." && exit 1)
+      - 'echo "Running GitHub Actions test job on {{.ACT_ARCH}}..."'
+      - act -j test --container-architecture {{.ACT_ARCH}} -P ubuntu-latest=catthehacker/ubuntu:act-latest
+      - echo "✅ GitHub Actions test job passed"
 
   build:
     desc: "Build the package for distribution"
@@ -137,47 +140,12 @@ tasks:
     cmds:
       - uv run vault-tools {{.CLI_ARGS}}
 
-  format:
-    desc: "Auto-format code with black and isort"
-    cmds:
-      - echo "Formatting code with black..."
-      - uv run black src/ tests/
-      - echo "Sorting imports with isort..."
-      - uv run isort src/ tests/
-      - echo "✅ Code formatted"
-
-  security:
-    desc: "Run security checks with bandit"
-    cmds:
-      - echo "Running security scan..."
-      - uv run bandit -r src/ -c pyproject.toml
-      - echo "✅ Security scan complete"
-
-  secrets:
-    desc: "Scan for secrets with gitleaks"
-    cmds:
-      - echo "Scanning for secrets..."
-      - uv run pre-commit run gitleaks --all-files
-      - echo "✅ No secrets found"
-
-  docs:
-    desc: "Generate or update documentation"
-    cmds:
-      - echo "Documentation is in README.md and .plans/"
-      - echo "See .plans/phase3-high-value-improvements.md for roadmap"
-
   update:
     desc: "Update dependencies to latest versions"
     cmds:
       - echo "Updating dependencies..."
       - uv sync --upgrade
       - echo "✅ Dependencies updated"
-
-  shell:
-    desc: "Activate virtual environment shell"
-    cmds:
-      - echo "Activating virtual environment..."
-      - echo "Run - source .venv/bin/activate"
 
   help:
     desc: "Show available tasks"
