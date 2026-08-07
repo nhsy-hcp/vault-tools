@@ -127,18 +127,20 @@ pytest tests/ -m "integration" -v
 ### Code Quality
 
 ```bash
-# Run all linting and security checks
+# Run all linting, formatting, and secret-scanning checks
 task lint
 
-# Auto-format code
-task format
+# Run the same checks the pre-commit hook runs, on staged files only
+uv run pre-commit run
 
-# Security scan
-task security
-
-# Secret scanning
-task secrets
+# Run a single hook across the repository
+uv run pre-commit run ruff-format --all-files
+uv run pre-commit run gitleaks --all-files
 ```
+
+Formatting, import sorting, and secret scanning are all pre-commit hooks
+(`ruff-format`, `ruff`'s `I` rules, and `gitleaks`), so they run automatically
+on every commit rather than from a separate task.
 
 ## Environment Variables
 
