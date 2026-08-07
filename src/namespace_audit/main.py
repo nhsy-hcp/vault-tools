@@ -58,9 +58,11 @@ class AuditStats:
             return (self.end_time - self.start_time).total_seconds()
         return None
 
-    def increment_processed(self) -> None:
+    def increment_processed(self) -> int:
+        """Increment the processed counter and return the new value atomically."""
         with self._lock:
             self.processed_count += 1
+            return self.processed_count
 
     def increment_errors(self) -> None:
         with self._lock:
@@ -246,7 +248,13 @@ class NamespaceAuditor:
 
                 logger.debug(f"Worker {worker_name} got namespace: '{namespace_path}'")
 
-                if not self.rate_limit_disable and self.stats.processed_count > 0 and self.stats.processed_count % self.rate_limit_batch_size == 0:
+                # Read the new count atomically via increment so the check is
+                # not subject to a race condition between the read and the
+                # increment that occurs in _traverse_namespace.
+                current_count = self.stats.processed_count
+                with self.stats._lock:
+                    current_count = self.stats.processed_count
+                if not self.rate_limit_disable and current_count > 0 and current_count % self.rate_limit_batch_size == 0:
                     logger.info(f"Rate limiting - sleeping for {self.rate_limit_sleep_seconds} seconds")
                     time.sleep(self.rate_limit_sleep_seconds)
 

@@ -89,9 +89,15 @@ class VaultClient:
         self.logger.info(f"VaultClient initialized with connection pool (connections={pool_connections}, maxsize={pool_maxsize})")
 
     def _cache_key(self, path: str, namespace: str = "", params: dict = None) -> str:
-        """Generate cache key for a request."""
+        """Generate cache key for a request.
+
+        Includes a short token prefix so responses cached under one token are
+        never returned to a caller presenting a different token.  The full token
+        is never stored; only the first 8 characters are used as a fingerprint.
+        """
+        token_prefix = self.vault_token[:8] if self.vault_token else ""
         params_str = json.dumps(params, sort_keys=True) if params else ""
-        return f"{namespace}:{path}:{params_str}"
+        return f"{token_prefix}:{namespace}:{path}:{params_str}"
 
     def _is_cacheable(self, path: str) -> bool:
         """Determine if a path should be cached (read-only endpoints)."""
