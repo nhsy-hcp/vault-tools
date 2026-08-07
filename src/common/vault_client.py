@@ -184,10 +184,10 @@ class VaultClient:
                     raise VaultConnectionError(f"Invalid health status response: {health_status}")
 
                 if client.sys.is_sealed():
-                    raise VaultConnectionError("Vault cluster is sealed. Please unseal the cluster using 'vault operator unseal' " "or ensure auto-unseal is properly configured.")
+                    raise VaultConnectionError("Vault cluster is sealed. Please unseal the cluster using 'vault operator unseal' or ensure auto-unseal is properly configured.")
 
                 if not client.is_authenticated():
-                    raise VaultConnectionError("Vault client is not authenticated. Please check your VAULT_TOKEN environment variable " "and ensure the token has not expired or been revoked.")
+                    raise VaultConnectionError("Vault client is not authenticated. Please check your VAULT_TOKEN environment variable and ensure the token has not expired or been revoked.")
 
                 if not client.sys.is_initialized():
                     raise VaultConnectionError("Vault cluster is not initialized. Please initialize the cluster using 'vault operator init'.")

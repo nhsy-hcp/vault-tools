@@ -42,7 +42,7 @@ class GlobalConfig:
         except OSError as e:
             raise ConfigurationError(f"Cannot create output directory '{self.output_dir}': {e}") from e
         if not os.access(self.output_dir, os.W_OK):
-            raise ConfigurationError(f"Output directory '{self.output_dir}' is not writable. " "Set VAULT_TOOLS_OUTPUT_DIR to a writable path.")
+            raise ConfigurationError(f"Output directory '{self.output_dir}' is not writable. Set VAULT_TOOLS_OUTPUT_DIR to a writable path.")
 
     @classmethod
     def from_environment(cls, output_dir: str | None = None) -> "GlobalConfig":

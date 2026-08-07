@@ -59,7 +59,7 @@ class CircuitBreaker:
                     self.logger.info("circuit_breaker_half_open recovery_timeout=%s", self.recovery_timeout)
                     self.state = "half-open"
                 else:
-                    raise CircuitBreakerOpenError(f"Circuit breaker is open. Last failure: {self.failure_count} failures. " f"Will retry after {self.recovery_timeout}s recovery timeout.")
+                    raise CircuitBreakerOpenError(f"Circuit breaker is open. Last failure: {self.failure_count} failures. Will retry after {self.recovery_timeout}s recovery timeout.")
 
         try:
             result = func(*args, **kwargs)

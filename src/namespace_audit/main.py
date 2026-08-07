@@ -148,7 +148,7 @@ class NamespaceAuditor:
 
         self.console.print(
             Panel.fit(
-                f"[bold cyan]Vault Namespace Audit[/bold cyan]\n" f"Starting namespace: [yellow]{display_ns}[/yellow]\n" f"Worker threads: [green]{self.worker_threads}[/green]",
+                f"[bold cyan]Vault Namespace Audit[/bold cyan]\nStarting namespace: [yellow]{display_ns}[/yellow]\nWorker threads: [green]{self.worker_threads}[/green]",
                 border_style="cyan",
             )
         )

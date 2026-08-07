@@ -152,7 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--namespace",
         type=str,
         default="",
-        help="Namespace path to audit (default: " ") for namespace audit.",
+        help="Namespace path to audit (default: ) for namespace audit.",
     )
     parser_all.add_argument(
         "-w",

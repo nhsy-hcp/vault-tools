@@ -123,7 +123,7 @@ def run_entity_export(
 
     console.print(
         Panel.fit(
-            f"[bold cyan]Vault Entity Export[/bold cyan]\n" f"Date range: [yellow]{start_date}[/yellow] to [yellow]{end_date}[/yellow]\n" f"Cluster: [green]{cluster_name}[/green]",
+            f"[bold cyan]Vault Entity Export[/bold cyan]\nDate range: [yellow]{start_date}[/yellow] to [yellow]{end_date}[/yellow]\nCluster: [green]{cluster_name}[/green]",
             border_style="cyan",
         )
     )
