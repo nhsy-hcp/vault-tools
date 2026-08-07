@@ -8,7 +8,7 @@ version = "2.0.0"
 description = "Unified CLI tool for HashiCorp Vault operations - namespace auditing, activity monitoring, and entity management"
 readme = "README.md"
 requires-python = ">=3.12"
-license = {text = "MIT"}
+license = {text = "MPL-2.0"}
 authors = [
     {name = "Vault Tools Contributors"}
 ]
@@ -19,7 +19,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Topic :: Security",
     "Topic :: System :: Systems Administration",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
