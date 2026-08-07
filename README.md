@@ -37,7 +37,7 @@ A unified CLI tool for comprehensive HashiCorp Vault operations, providing defen
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone the repository
-git clone https://github.com/your-username/vault-tools.git
+git clone https://github.com/nhsy-hcp/vault-tools.git
 cd vault-tools
 
 # Sync dependencies (creates virtual environment automatically)
@@ -65,11 +65,16 @@ pre-commit run --all-files
 
 ## Usage
 
-The main entry point is `main.py` with three primary subcommands:
+Run the CLI directly with `python main.py`, through uv as `uv run vault-tools`,
+or via the task runner as `task run -- <args>` (everything after `--` is passed
+straight through). There are four subcommands:
 
 ### Namespace Audit
 
 Comprehensively audit Vault namespaces, auth methods, and secret engines:
+
+Namespaces are traversed recursively, so a nested hierarchy is audited in full,
+not just its top level.
 
 ```bash
 # Basic namespace audit
@@ -78,20 +83,23 @@ python main.py namespace-audit
 # Audit with custom worker count and output directory
 python main.py namespace-audit --workers 8 --output-dir custom-output
 
+# Audit a subtree rather than the whole cluster
+python main.py namespace-audit --namespace team-a/
+
 # See all options
 python main.py namespace-audit --help
 ```
 
 ### Activity Export
 
-Export Vault activity logs and usage metrics:
+Export Vault activity logs and usage metrics. Both dates are required:
 
 ```bash
-# Export activity logs for the last 30 days
-python main.py activity-export --days 30
+# Export for a specific date range
+python main.py activity-export --start-date 2026-01-01 --end-date 2026-01-31
 
-# Export for specific date range
-python main.py activity-export --start-date 2024-01-01 --end-date 2024-01-31
+# Short flags
+python main.py activity-export -s 2026-01-01 -e 2026-01-31
 
 # See all options
 python main.py activity-export --help
@@ -99,14 +107,27 @@ python main.py activity-export --help
 
 ### Entity Export
 
-Extract and export Vault entity data:
+Extract and export Vault entity data. Both dates are required:
 
 ```bash
-# Basic entity export
-python main.py entity-export
+python main.py entity-export --start-date 2026-01-01 --end-date 2026-01-31
 
 # See all options
 python main.py entity-export --help
+```
+
+A range with no client records is not an error: Vault answers `204 No Content`
+and the export reports that there is no data and exits successfully.
+
+### All
+
+Run all three subcommands in sequence, sharing one Vault connection:
+
+```bash
+python main.py all -s 2026-01-01 -e 2026-01-31
+
+# Via the task runner
+task run -- all -s 2026-01-01 -e 2026-01-31
 ```
 
 ## Configuration
@@ -152,6 +173,13 @@ export VAULT_TOOLS_OUTPUT_DIR="custom-outputs"  # Output directory
 export VAULT_TOOLS_WORKERS="8"                  # Worker threads (namespace audit)
 export VAULT_TOOLS_NAMESPACE="team-a/"          # Target namespace
 export VAULT_TOOLS_DEBUG="true"                 # Enable debug logging
+export VAULT_TOOLS_CLUSTER_NAME="my-cluster"    # Override the detected cluster name
+export VAULT_TOOLS_TIMEOUT="60"                 # Per-request timeout in seconds
+export VAULT_TOOLS_START_DATE="2026-01-01"      # Default start date for exports
+export VAULT_TOOLS_END_DATE="2026-01-31"        # Default end date for exports
+export VAULT_TOOLS_RATE_LIMIT_BATCH="100"       # Namespaces per rate-limit batch
+export VAULT_TOOLS_RATE_LIMIT_SLEEP="3"         # Seconds to sleep between batches
+export VAULT_TOOLS_NO_RATE_LIMIT="true"         # Disable rate limiting entirely
 ```
 
 See `python main.py <command> --help` for all options.
@@ -160,36 +188,44 @@ See `python main.py <command> --help` for all options.
 
 ```bash
 # Run all tests
-pytest tests/ -v
-
-# Run specific module
-pytest tests/namespace_audit/ -v
+task test
 
 # Run with coverage
-pytest tests/ --cov=src
+task test:all
 
-# Test GitHub Actions workflow locally (requires act)
-task test:gha
+# Run the same gate CI enforces (lint + 80% coverage)
+task test:ci
+
+# Run a specific module
+uv run pytest tests/namespace_audit/ -v
 ```
 
-**119 tests** with comprehensive coverage across all modules.
+**362 tests**, 94% coverage across all modules.
 
 ### Continuous Integration
 
 The project uses GitHub Actions for automated testing on all branches:
 
 - Python 3.12 with uv package manager
-- Pre-commit hooks (linting, security scanning)
-- Full test suite with coverage reporting
+- Pre-commit hooks (linting, formatting, secret scanning)
+- Full test suite, failing the build below 80% coverage
 
-Test locally with `act` before pushing:
+Run the workflow locally before pushing — this executes the real job in a
+container, not a dry run:
 
 ```bash
 # Install act: https://github.com/nektos/act
 brew install act  # macOS
 
-# Validate workflow structure (dry-run)
 task test:gha
+```
+
+`test:gha` validates the workflow schema first, then runs the `test` job with
+the container architecture matched to your host. Override it to reproduce
+CI's own architecture:
+
+```bash
+task test:gha ACT_ARCH=linux/amd64
 ```
 
 ## Architecture
@@ -207,7 +243,7 @@ task test:gha
 
 1. Fork and create feature branch
 2. Add tests for new functionality
-3. Run `pytest tests/ -v` and `task lint`
+3. Run `task test:ci` — the same lint and 80% coverage gate CI enforces
 4. Submit pull request
 
 ## License
