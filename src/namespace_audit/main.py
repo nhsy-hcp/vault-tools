@@ -23,7 +23,7 @@ from rich.table import Table
 
 from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import write_csv, write_json
-from src.common.utils import FILE_DATE_FORMAT
+from src.common.utils import FILE_DATE_FORMAT, normalise_namespace_path
 from src.common.vault_client import VaultClient, VaultConnectionError
 
 logger = logging.getLogger(__name__)
@@ -166,8 +166,10 @@ class NamespaceAuditor:
             # so a maxsize would let a worker block on put() waiting for itself.
             # Memory visibility comes from the depth warning instead.
             path_queue: queue.Queue[str] = queue.Queue()
-            # Handle None, "/" or empty namespace paths - all should default to root namespace
-            initial_namespace = "" if namespace_path is None or namespace_path == "/" or namespace_path == "" else namespace_path
+            # Canonicalise via the shared helper: None, "" and "/" all mean the
+            # root namespace, and anything else gains the trailing slash Vault's
+            # namespace API expects (C1).
+            initial_namespace = normalise_namespace_path(namespace_path)
             logger.debug(f"Initial namespace after processing: '{initial_namespace}'")
             with self.thread_lock:
                 self.visited = {initial_namespace.rstrip("/")}

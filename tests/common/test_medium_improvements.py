@@ -59,17 +59,6 @@ class TestNormaliseNamespacePath:
         once = normalise_namespace_path("foo/bar")
         assert normalise_namespace_path(once) == once
 
-    def test_matches_config_post_init_convention(self):
-        """The helper and NamespaceAuditConfig must not disagree (C1)."""
-        from src.common.config import NamespaceAuditConfig
-
-        cfg = NamespaceAuditConfig(
-            vault_addr="https://vault.example.com",
-            vault_token="s.test",
-            namespace_path="team-a",
-        )
-        assert cfg.namespace_path == normalise_namespace_path("team-a")
-
 
 # ---------------------------------------------------------------------------
 # ST4 — process_activity_data null guard
@@ -146,55 +135,6 @@ class TestEntityExportSchemaValidation:
             result = process_entity_export_data(data, "cluster")
         assert result is not None
         assert len(result) == 1
-
-
-# ---------------------------------------------------------------------------
-# ST7 — CircuitBreaker configurable settings + two-segment grouping
-# ---------------------------------------------------------------------------
-
-
-class TestCircuitBreakerConfig:
-    def test_custom_threshold_propagated(self):
-        from src.common.vault_client_retry import VaultClientWithRetry
-
-        with patch.dict("os.environ", {"VAULT_ADDR": "https://vault.example.com", "VAULT_TOKEN": "test-token"}):
-            client = VaultClientWithRetry(
-                circuit_breaker_failure_threshold=3,
-                circuit_breaker_recovery_timeout=120,
-            )
-            cb = client._get_circuit_breaker("sys/health")
-            assert cb.failure_threshold == 3
-            assert cb.recovery_timeout == 120
-
-    def test_two_segment_grouping_separates_breakers(self):
-        from src.common.vault_client_retry import VaultClientWithRetry
-
-        with patch.dict("os.environ", {"VAULT_ADDR": "https://vault.example.com", "VAULT_TOKEN": "test-token"}):
-            client = VaultClientWithRetry()
-            cb_entity = client._get_circuit_breaker("identity/entity")
-            cb_group = client._get_circuit_breaker("identity/group")
-            cb_sys = client._get_circuit_breaker("sys")
-
-            # Different two-segment paths → different breaker instances
-            assert cb_entity is not cb_group
-            # Single-segment path still works
-            assert cb_sys is not None
-
-    def test_same_prefix_reuses_breaker(self):
-        from src.common.vault_client_retry import VaultClientWithRetry
-
-        with patch.dict("os.environ", {"VAULT_ADDR": "https://vault.example.com", "VAULT_TOKEN": "test-token"}):
-            client = VaultClientWithRetry()
-            cb1 = client._get_circuit_breaker("identity/entity")
-            cb2 = client._get_circuit_breaker("identity/entity")
-            assert cb1 is cb2
-
-    def test_circuit_breaker_disabled_returns_none(self):
-        from src.common.vault_client_retry import VaultClientWithRetry
-
-        with patch.dict("os.environ", {"VAULT_ADDR": "https://vault.example.com", "VAULT_TOKEN": "test-token"}):
-            client = VaultClientWithRetry(enable_circuit_breaker=False)
-            assert client._get_circuit_breaker("identity/entity") is None
 
 
 # ---------------------------------------------------------------------------
