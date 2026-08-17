@@ -29,7 +29,6 @@ Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providin
 ├── src/
 │   ├── common/
 │   │   ├── vault_client.py         # Centralized Vault API client
-│   │   ├── vault_client_retry.py   # Retry logic for Vault operations
 │   │   ├── config.py               # Configuration management
 │   │   ├── file_utils.py           # File I/O utilities
 │   │   ├── utils.py                # Common utilities
@@ -156,14 +155,14 @@ export VAULT_SKIP_VERIFY="true"  # Optional, for dev environments
 
 ```bash
 export VAULT_TOOLS_OUTPUT_DIR="custom-outputs"  # Default: "outputs"
+export VAULT_TOOLS_AUDIT_DIR="custom/audit"     # Default: "outputs/audit"
 export VAULT_TOOLS_DEBUG="true"                 # Default: false
-export VAULT_TOOLS_WORKERS="8"                  # Default: 4 (namespace audit)
-export VAULT_TOOLS_NO_RATE_LIMIT="true"         # Default: false
-export VAULT_TOOLS_NAMESPACE="team-a/"          # Default: root namespace
-export VAULT_TOOLS_RATE_LIMIT_BATCH="50"        # Default: 100
-export VAULT_TOOLS_RATE_LIMIT_SLEEP="5"         # Default: 3 seconds
-export VAULT_TOOLS_TIMEOUT="60"                 # Default: 30 seconds
 ```
+
+These three are the complete set. Everything else is a CLI flag — `--workers`,
+`--output-dir`, `--start-date`/`--end-date`. Rate limiting uses
+`NamespaceAuditor`'s constructor defaults (batch 100, sleep 3s) and is not
+currently exposed on the CLI.
 
 ## Architecture & Design Patterns
 
@@ -296,8 +295,8 @@ All tools write to configurable output directory (default: `outputs/`) with cons
 
 1. **Vault Connection Failures**: Verify `VAULT_ADDR` and `VAULT_TOKEN` environment variables
 2. **Permission Errors**: Check token permissions and namespace access
-3. **Rate Limiting**: Adjust `VAULT_TOOLS_RATE_LIMIT_BATCH` and `VAULT_TOOLS_RATE_LIMIT_SLEEP`
-4. **Threading Issues**: Reduce `VAULT_TOOLS_WORKERS` if experiencing resource constraints
+3. **Rate Limiting**: Adjust `rate_limit_batch_size` / `rate_limit_sleep_seconds` on `NamespaceAuditor`
+4. **Threading Issues**: Reduce `--workers` if experiencing resource constraints
 5. **Test Failures**: Ensure all dependencies are installed with `task init`
 
 ### Debugging

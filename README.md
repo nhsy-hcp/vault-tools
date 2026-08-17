@@ -81,9 +81,6 @@ python main.py namespace-audit
 # Audit with custom worker count and output directory
 python main.py namespace-audit --workers 8 --output-dir custom-output
 
-# Audit a subtree rather than the whole cluster
-python main.py namespace-audit --namespace team-a/
-
 # See all options
 python main.py namespace-audit --help
 ```
@@ -185,7 +182,7 @@ descending there and reports the namespaces it did reach — check the
 
 - **Connection Pooling**: Reusable HTTP connections with 20-30% performance improvement
 - **Response Caching**: TTL-based cache (5min) for read-only endpoints, reducing API load
-- **Automatic Retry**: Exponential backoff with circuit breaker for transient failures
+- **Automatic Retry**: Transport-level retry with exponential backoff on transient HTTP failures (408/429/5xx)
 - **Rate Limiting**: Configurable batch processing to prevent API overload
 
 ### Security & Compliance
@@ -207,19 +204,13 @@ Customize behavior via environment variables:
 
 ```bash
 export VAULT_TOOLS_OUTPUT_DIR="custom-outputs"  # Output directory
-export VAULT_TOOLS_WORKERS="8"                  # Worker threads (namespace audit)
-export VAULT_TOOLS_NAMESPACE="team-a/"          # Target namespace
+export VAULT_TOOLS_AUDIT_DIR="custom/audit"     # Audit log directory
 export VAULT_TOOLS_DEBUG="true"                 # Enable debug logging
-export VAULT_TOOLS_CLUSTER_NAME="my-cluster"    # Override the detected cluster name
-export VAULT_TOOLS_TIMEOUT="60"                 # Per-request timeout in seconds
-export VAULT_TOOLS_START_DATE="2026-01-01"      # Default start date for exports
-export VAULT_TOOLS_END_DATE="2026-01-31"        # Default end date for exports
-export VAULT_TOOLS_RATE_LIMIT_BATCH="100"       # Namespaces per rate-limit batch
-export VAULT_TOOLS_RATE_LIMIT_SLEEP="3"         # Seconds to sleep between batches
-export VAULT_TOOLS_NO_RATE_LIMIT="true"         # Disable rate limiting entirely
 ```
 
-See `python main.py <command> --help` for all options.
+Everything else is a CLI flag — see `python main.py <command> --help`. Worker
+count is `--workers`, output directory is `--output-dir` (which overrides
+`VAULT_TOOLS_OUTPUT_DIR`), and the export window is `--start-date`/`--end-date`.
 
 ## Testing
 

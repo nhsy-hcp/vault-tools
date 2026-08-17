@@ -1,7 +1,8 @@
 # Vault ACL policy for the vault-tools audit CLI.
 #
-# Read-only: the tool never writes to Vault. Every path corresponds to an
-# endpoint the tool actually calls, so nothing here is speculative.
+# Read-only: the tool never writes to Vault. Every rule below corresponds to a
+# request the tool actually issues on some code path -- nothing is speculative,
+# and nothing is granted "just in case".
 #
 # NAMESPACE SCOPING (Vault Enterprise)
 # ------------------------------------
@@ -20,90 +21,39 @@
 #     +/+/+/+/sys/mounts      four levels down
 #     +/+/+/+/+/sys/mounts    five levels down
 #
-# Every rule below covers the root namespace plus five levels of nesting. A
-# deeper hierarchy needs a further "+/" rule per extra level; levels deeper
-# than the tree in use are harmless. Assign this policy to a token created in
-# the root namespace.
+# Only the three namespace-audit rules need this treatment; see the comments on
+# each section for why the rest are root-only. They cover the root namespace
+# plus five levels of nesting. A deeper hierarchy needs a further "+/" rule per
+# extra level; levels deeper than the tree in use are harmless.
+#
+# Assign this policy to a token created in the ROOT namespace.
+
+# --- Token self-inspection ---------------------------------------------------
+# validate_connection() calls hvac's is_authenticated(), which is a
+# GET auth/token/lookup-self. hvac swallows a 403 there and returns False, so
+# without this rule the tool aborts with "Vault client is not authenticated ...
+# check your VAULT_TOKEN", which points at entirely the wrong cause.
+#
+# Vault's built-in "default" policy already grants this, so a token created the
+# usual way inherits it. It is stated explicitly here so the policy is
+# self-sufficient and still works with -no-default-policy.
+path "auth/token/lookup-self" {
+  capabilities = ["read"]
+}
 
 # --- Connection validation ---------------------------------------------------
-# read_health_status() supplies the cluster name used in every output filename;
-# is_sealed() and is_initialized() gate the run. These are checked once, in the
-# namespace the tool starts from -- the root namespace unless VAULT_NAMESPACE
-# or --namespace says otherwise, hence the nested variants.
-path "sys/health" {
-  capabilities = ["read"]
-}
-
-path "+/sys/health" {
-  capabilities = ["read"]
-}
-
-path "+/+/sys/health" {
-  capabilities = ["read"]
-}
-
-path "+/+/+/sys/health" {
-  capabilities = ["read"]
-}
-
-path "+/+/+/+/sys/health" {
-  capabilities = ["read"]
-}
-
-path "+/+/+/+/+/sys/health" {
-  capabilities = ["read"]
-}
-
-path "sys/seal-status" {
-  capabilities = ["read"]
-}
-
-path "+/sys/seal-status" {
-  capabilities = ["read"]
-}
-
-path "+/+/sys/seal-status" {
-  capabilities = ["read"]
-}
-
-path "+/+/+/sys/seal-status" {
-  capabilities = ["read"]
-}
-
-path "+/+/+/+/sys/seal-status" {
-  capabilities = ["read"]
-}
-
-path "+/+/+/+/+/sys/seal-status" {
-  capabilities = ["read"]
-}
-
-path "sys/init" {
-  capabilities = ["read"]
-}
-
-path "+/sys/init" {
-  capabilities = ["read"]
-}
-
-path "+/+/sys/init" {
-  capabilities = ["read"]
-}
-
-path "+/+/+/sys/init" {
-  capabilities = ["read"]
-}
-
-path "+/+/+/+/sys/init" {
-  capabilities = ["read"]
-}
-
-path "+/+/+/+/+/sys/init" {
-  capabilities = ["read"]
-}
+# Deliberately absent: sys/health, sys/seal-status and sys/init.
+#
+# read_health_status(), is_sealed() and is_initialized() are the three checks
+# validate_connection() runs, and all three are UNAUTHENTICATED Vault endpoints
+# -- an ACL rule for them grants nothing. They are also always issued against
+# the root namespace, because validate_connection() uses the default
+# namespace="" client, so nested variants would be doubly dead.
 
 # --- namespace-audit: auth methods -------------------------------------------
-# list_auth_methods() -> GET sys/auth, once per namespace visited.
+# list_auth_methods() -> GET sys/auth, once per namespace visited. The traversal
+# scopes each request with get_client(namespace_path), so every nesting level is
+# genuinely reached.
 path "sys/auth" {
   capabilities = ["read"]
 }
@@ -184,56 +134,20 @@ path "+/+/+/+/+/sys/namespaces" {
 }
 
 # --- activity-export ---------------------------------------------------------
-# A single call already reports every namespace beneath the one queried; the
-# nested variants only matter when the tool is pointed at a child namespace.
+# Root-only, deliberately. get_activity_data() issues this without a namespace,
+# and a root-namespace query already reports every namespace beneath it, so
+# nested variants would grant access to client-count data across the tree
+# without the tool ever using it.
 path "sys/internal/counters/activity" {
   capabilities = ["read"]
 }
 
-path "+/sys/internal/counters/activity" {
-  capabilities = ["read"]
-}
-
-path "+/+/sys/internal/counters/activity" {
-  capabilities = ["read"]
-}
-
-path "+/+/+/sys/internal/counters/activity" {
-  capabilities = ["read"]
-}
-
-path "+/+/+/+/sys/internal/counters/activity" {
-  capabilities = ["read"]
-}
-
-path "+/+/+/+/+/sys/internal/counters/activity" {
-  capabilities = ["read"]
-}
-
 # --- entity-export -----------------------------------------------------------
-# This is the one endpoint the tool uses that Vault root-protects: "read" alone
-# returns 403, so "sudo" is required as well. It is also the only rule here that
-# needs it -- every other path above works with plain read/list.
+# Root-only for the same reason as activity-export above -- which matters more
+# here, because this is the one endpoint the tool uses that Vault root-protects:
+# "read" alone returns 403, so "sudo" is required as well. It is the only rule
+# in this policy that needs it. Granting sudo on this path across five levels of
+# namespaces would be real attack surface for no functional benefit.
 path "sys/internal/counters/activity/export" {
-  capabilities = ["read", "sudo"]
-}
-
-path "+/sys/internal/counters/activity/export" {
-  capabilities = ["read", "sudo"]
-}
-
-path "+/+/sys/internal/counters/activity/export" {
-  capabilities = ["read", "sudo"]
-}
-
-path "+/+/+/sys/internal/counters/activity/export" {
-  capabilities = ["read", "sudo"]
-}
-
-path "+/+/+/+/sys/internal/counters/activity/export" {
-  capabilities = ["read", "sudo"]
-}
-
-path "+/+/+/+/+/sys/internal/counters/activity/export" {
   capabilities = ["read", "sudo"]
 }
