@@ -50,6 +50,19 @@ path "auth/token/lookup-self" {
 # the root namespace, because validate_connection() uses the default
 # namespace="" client, so nested variants would be doubly dead.
 
+# --- namespace-audit: cluster lease defaults ---------------------------------
+# GET sys/config/state/sanitized, read once per run against the root namespace,
+# for the cluster's default_lease_ttl and max_lease_ttl. The markdown report uses
+# the max as the baseline for its lease findings, so it can flag mounts that
+# override the cluster ceiling rather than compare against Vault's stock 768h --
+# a cluster tuned down to 24h would otherwise never trip the check.
+#
+# Optional: the audit degrades to a fixed threshold if this rule is absent, and
+# no nested variants are needed because the setting is cluster-wide.
+path "sys/config/state/sanitized" {
+  capabilities = ["read"]
+}
+
 # --- namespace-audit: auth methods -------------------------------------------
 # list_auth_methods() -> GET sys/auth, once per namespace visited. The traversal
 # scopes each request with get_client(namespace_path), so every nesting level is

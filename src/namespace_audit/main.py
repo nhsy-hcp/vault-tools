@@ -22,9 +22,10 @@ from rich.progress import (
 from rich.table import Table
 
 from src.common.audit_logger import get_audit_logger
-from src.common.file_utils import write_csv, write_json
+from src.common.file_utils import write_csv, write_json, write_markdown
 from src.common.utils import FILE_DATE_FORMAT, normalise_namespace_path
 from src.common.vault_client import VaultClient, VaultConnectionError
+from src.namespace_audit.report import build_markdown_report
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,11 @@ class AuditStats:
     forbidden_count: int = 0
     start_time: datetime | None = None
     end_time: datetime | None = None
+    # The counters above say how much the audit missed; these say *what*. A
+    # denied subtree is a hole in the report, and a bare tally gives the reader
+    # no way to find it — so record the path alongside every increment.
+    forbidden_namespaces: list[tuple[str, str]] = field(default_factory=list)
+    errors: list[tuple[str, str]] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def start(self) -> None:
@@ -75,14 +81,28 @@ class AuditStats:
             self.discovered_count += count
             return self.discovered_count
 
-    def increment_errors(self) -> None:
+    def increment_errors(self, namespace: str | None = None, message: str = "") -> None:
+        """Record an error, optionally naming the namespace it occurred in.
+
+        The arguments are optional so existing bare calls keep working; supply
+        them wherever the namespace is known so the report can list it.
+        """
         with self._lock:
             self.error_count += 1
+            if namespace is not None:
+                self.errors.append((namespace, message))
 
-    def increment_forbidden(self) -> None:
-        """Increment the forbidden (permission-denied) counter atomically."""
+    def increment_forbidden(self, namespace: str | None = None, scope: str = "") -> None:
+        """Record a permission denial atomically.
+
+        ``scope`` describes what was refused — the whole namespace, or only the
+        listing of its children — because the two lose very different amounts of
+        data and the reader needs to tell them apart.
+        """
         with self._lock:
             self.forbidden_count += 1
+            if namespace is not None:
+                self.forbidden_namespaces.append((namespace, scope))
 
 
 @dataclass
@@ -127,10 +147,17 @@ class NamespaceAuditor:
         self.audit_logger = get_audit_logger()
         self.progress_task = None
         self.progress = None
+        # Recorded by audit_cluster so the report can state where the walk began;
+        # "the audit found no denials" only means something alongside its scope.
+        self.start_namespace = ""
+        # (default_lease_ttl, max_lease_ttl) for the cluster, or None if the
+        # token cannot read it. Calibrates the report's lease findings.
+        self.system_lease_ttls: tuple[int, int] | None = None
 
     def audit_cluster(self, namespace_path: str = ""):
         start_time = time.time()
         display_ns = namespace_path if namespace_path else "root"
+        self.start_namespace = namespace_path
 
         # Log audit start
         self.audit_logger.log_tool_execution(
@@ -160,6 +187,8 @@ class NamespaceAuditor:
         try:
             cluster_name = self.vault_client.validate_connection()
             self.console.print(f"[green]✓[/green] Connected to cluster: [bold]{cluster_name}[/bold]")
+
+            self.system_lease_ttls = self._fetch_system_lease_ttls()
 
             # The queue must stay unbounded: worker threads are also the
             # producers (they enqueue child namespaces from _traverse_namespace),
@@ -222,7 +251,7 @@ class NamespaceAuditor:
             self.console.print("\n[bold]Cache Performance:[/bold]")
             self.console.print(f"  Hits: [green]{cache_stats['hits']}[/green] | Misses: [yellow]{cache_stats['misses']}[/yellow] | Hit Rate: [cyan]{cache_stats['hit_rate']}[/cyan]")
 
-            self._write_reports(cluster_name)
+            self._write_reports(cluster_name, cache_stats=cache_stats)
             self._log_summary()
 
             # Log successful completion
@@ -272,6 +301,26 @@ class NamespaceAuditor:
                 duration_seconds=time.time() - start_time,
                 error=error_msg,
             )
+
+    def _fetch_system_lease_ttls(self) -> tuple[int, int] | None:
+        """Read the cluster's default and max lease TTLs.
+
+        Optional enrichment, never a failure: the endpoint needs a policy rule
+        the audit can otherwise do without, so any error here downgrades the
+        report's lease findings to a fixed threshold rather than sinking the run.
+        """
+        try:
+            response = self.vault_client.get("sys/config/state/sanitized")
+            payload = response.get("data", response) if isinstance(response, dict) else {}
+            default_ttl = payload.get("default_lease_ttl")
+            max_ttl = payload.get("max_lease_ttl")
+            if isinstance(default_ttl, int) and isinstance(max_ttl, int) and max_ttl > 0:
+                logger.debug(f"System lease TTLs: default={default_ttl}s max={max_ttl}s")
+                return default_ttl, max_ttl
+            logger.debug(f"Unexpected sys/config/state/sanitized payload; lease TTLs unavailable: {payload!r}")
+        except Exception as e:
+            logger.debug(f"Could not read sys/config/state/sanitized ({e}); lease findings will use the fixed threshold")
+        return None
 
     def _refresh_progress(self) -> None:
         """Push current discovered/processed counts to the progress bar.
@@ -329,7 +378,7 @@ class NamespaceAuditor:
                 self._traverse_namespace(namespace_path, path_queue)
             except Exception as e:
                 logger.exception(f"Error in worker thread: {e}")
-                self.stats.increment_errors()
+                self.stats.increment_errors(namespace_path if namespace_path else "root", str(e))
             finally:
                 path_queue.task_done()
 
@@ -414,16 +463,16 @@ class NamespaceAuditor:
                     # only the subtree below this namespace is lost, so record
                     # the gap without discarding what this namespace returned.
                     logger.warning(f"Permission denied listing child namespaces for: {display_path}")
-                    self.stats.increment_forbidden()
+                    self.stats.increment_forbidden(display_path, "child namespaces (subtree not audited)")
 
         except hvac.exceptions.Forbidden:
             logger.warning(f"Permission denied for namespace: {display_path}")
-            self.stats.increment_forbidden()
+            self.stats.increment_forbidden(display_path, "whole namespace (no data collected)")
         except Exception as e:
             logger.error(f"Error processing namespace {display_path}: {e}")
-            self.stats.increment_errors()
+            self.stats.increment_errors(display_path, str(e))
 
-    def _write_reports(self, cluster_name: str):
+    def _write_reports(self, cluster_name: str, cache_stats: dict[str, Any] | None = None):
         date_str = datetime.now().strftime(FILE_DATE_FORMAT)
 
         os.makedirs(self.output_dir, exist_ok=True)
@@ -437,29 +486,72 @@ class NamespaceAuditor:
                 converted[new_key] = value
             return converted
 
+        def path_for(kind: str, extension: str) -> str:
+            return f"{self.output_dir}/{cluster_name}-{kind}-{date_str}.{extension}"
+
         # Write JSON files
         logger.debug(f"Writing namespaces JSON with {len(self.data.namespaces)} namespaces")
-        write_json(
-            f"{self.output_dir}/{cluster_name}-namespaces-{date_str}.json",
-            convert_namespace_keys(self.data.namespaces),
-        )
+        write_json(path_for("namespaces", "json"), convert_namespace_keys(self.data.namespaces))
 
         logger.debug(f"Writing auth methods JSON with {len(self.data.auth_methods)} namespace entries")
-        write_json(
-            f"{self.output_dir}/{cluster_name}-auth-methods-{date_str}.json",
-            convert_namespace_keys(self.data.auth_methods),
-        )
+        write_json(path_for("auth-methods", "json"), convert_namespace_keys(self.data.auth_methods))
 
         logger.debug(f"Writing secrets engines JSON with {len(self.data.secret_engines)} namespace entries")
-        write_json(
-            f"{self.output_dir}/{cluster_name}-secrets-engines-{date_str}.json",
-            convert_namespace_keys(self.data.secret_engines),
-        )
+        write_json(path_for("secrets-engines", "json"), convert_namespace_keys(self.data.secret_engines))
 
         # Write CSV summaries
-        self._write_namespace_summary(f"{self.output_dir}/{cluster_name}-summary-namespaces-{date_str}.csv")
-        self._write_auth_methods_summary(f"{self.output_dir}/{cluster_name}-summary-auth-methods-{date_str}.csv")
-        self._write_secrets_engines_summary(f"{self.output_dir}/{cluster_name}-summary-secrets-engines-{date_str}.csv")
+        self._write_namespace_summary(path_for("summary-namespaces", "csv"))
+        self._write_auth_methods_summary(path_for("summary-auth-methods", "csv"))
+        self._write_secrets_engines_summary(path_for("summary-secrets-engines", "csv"))
+
+        # Write the human-readable report last so it can index the files above.
+        # Existence is checked rather than assumed: the CSV summary writers
+        # return early when they have no rows, so a root-only cluster produces
+        # fewer than six files and listing all six would send the reader after
+        # something that was never written.
+        candidates = [
+            path_for(kind, extension)
+            for kind, extension in (
+                ("namespaces", "json"),
+                ("auth-methods", "json"),
+                ("secrets-engines", "json"),
+                ("summary-namespaces", "csv"),
+                ("summary-auth-methods", "csv"),
+                ("summary-secrets-engines", "csv"),
+            )
+        ]
+        sibling_files = [os.path.basename(p) for p in candidates if os.path.exists(p)]
+        self._write_markdown_report(path_for("audit-report", "md"), cluster_name, cache_stats, sibling_files)
+
+    def _write_markdown_report(
+        self,
+        file_path: str,
+        cluster_name: str,
+        cache_stats: dict[str, Any] | None,
+        sibling_files: list[str],
+    ):
+        """Render and write the markdown audit report.
+
+        A rendering failure must not sink a completed audit — the JSON and CSV
+        files are already on disk at this point and carry the raw data, so the
+        error is reported and swallowed rather than propagated.
+        """
+        try:
+            content = build_markdown_report(
+                cluster_name,
+                self.data,
+                self.stats,
+                start_namespace=self.start_namespace,
+                worker_threads=self.worker_threads,
+                cache_stats=cache_stats,
+                output_files=sibling_files,
+                system_lease_ttls=self.system_lease_ttls,
+            )
+            write_markdown(file_path, content)
+            self.console.print(f"[green]✓[/green] Markdown report: [bold]{file_path}[/bold]")
+        except Exception as e:
+            logger.exception(f"Failed to write the markdown report: {e}")
+            self.console.print(f"[yellow]⚠[/yellow] Markdown report could not be written: {e}")
 
     def _write_namespace_summary(self, file_path: str):
         if not self.data.namespaces:

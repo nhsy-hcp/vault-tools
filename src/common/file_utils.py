@@ -81,6 +81,27 @@ def write_json(file_path: str, data: dict[str, Any]):
         raise FileProcessingError(f"Failed to write {file_path}: data contains a value that cannot be serialised to JSON ({e})") from e
 
 
+def write_markdown(file_path: str, content: str):
+    """Write a rendered markdown document to disk.
+
+    Sibling to write_json/write_csv, and shares their error contract: the caller
+    sees only FileProcessingError, never a bare OSError. Content is written
+    verbatim — rendering belongs to the caller, this only owns the file.
+
+    Raises:
+        FileProcessingError: If the file cannot be written.
+    """
+    try:
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        logger.debug(f"Writing markdown report to {file_path}")
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        logger.info(f"Markdown report written to {file_path}")
+    except OSError as e:
+        logger.error(f"Failed to write {file_path}: {e}")
+        raise FileProcessingError(f"Failed to write {file_path}: {e}") from e
+
+
 def read_json(file_path: str) -> dict[str, Any]:
     """Read data from a JSON file."""
     try:

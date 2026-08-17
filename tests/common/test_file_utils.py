@@ -5,7 +5,41 @@ import csv
 import pytest
 
 from src.common.exceptions import FileProcessingError
-from src.common.file_utils import read_csv, read_json, write_csv, write_csv_stream, write_json
+from src.common.file_utils import read_csv, read_json, write_csv, write_csv_stream, write_json, write_markdown
+
+
+class TestWriteMarkdown:
+    """write_markdown must share the error contract of its write_json sibling."""
+
+    def test_writes_content_verbatim(self, tmp_path):
+        target = tmp_path / "report.md"
+        content = "# Title\n\n| A | B |\n| --- | --- |\n"
+
+        write_markdown(str(target), content)
+
+        assert target.read_text(encoding="utf-8") == content
+
+    def test_creates_missing_parent_directories(self, tmp_path):
+        target = tmp_path / "nested" / "deeper" / "report.md"
+
+        write_markdown(str(target), "# Title")
+
+        assert target.read_text(encoding="utf-8") == "# Title"
+
+    def test_unwritable_path_raises_file_processing_error(self, tmp_path):
+        # A directory where the file should be makes open() fail with OSError.
+        target = tmp_path / "report.md"
+        target.mkdir()
+
+        with pytest.raises(FileProcessingError, match="report.md"):
+            write_markdown(str(target), "# Title")
+
+    def test_non_ascii_content_round_trips(self, tmp_path):
+        target = tmp_path / "report.md"
+
+        write_markdown(str(target), "— ✓ namespace")
+
+        assert target.read_text(encoding="utf-8") == "— ✓ namespace"
 
 
 class TestWriteJsonSerialisationErrors:

@@ -72,10 +72,21 @@ def populated_auditor(auditor, sample_audit_data):
 
 @contextmanager
 def mock_file_operations():
-    """Context manager to mock file operations."""
+    """Context manager to mock file operations.
+
+    write_markdown is patched too — without it _write_reports would put a real
+    report file on disk during unit tests. It is not yielded, so existing
+    two-value unpacking at the call sites keeps working; assert on it by
+    patching directly where a test needs to.
+    """
     from unittest.mock import patch
 
-    with patch("src.namespace_audit.main.write_json") as mock_write_json, patch("src.namespace_audit.main.write_csv") as mock_write_csv, patch("os.makedirs"):
+    with (
+        patch("src.namespace_audit.main.write_json") as mock_write_json,
+        patch("src.namespace_audit.main.write_csv") as mock_write_csv,
+        patch("src.namespace_audit.main.write_markdown"),
+        patch("os.makedirs"),
+    ):
         yield mock_write_json, mock_write_csv
 
 

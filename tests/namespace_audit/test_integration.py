@@ -23,7 +23,10 @@ class TestAuditClusterIntegration:
             auditor.audit_cluster()
 
             mock_vault_client.validate_connection.assert_called_once()
-            mock_write_reports.assert_called_once_with("test-cluster")
+            # Assert on the cluster name only; cache_stats is passed through as
+            # a keyword and its contents are the vault client's business.
+            mock_write_reports.assert_called_once()
+            assert mock_write_reports.call_args.args[0] == "test-cluster"
 
     def test_audit_cluster_connection_failure(self, mock_vault_client):
         """Test cluster audit with connection failure."""
@@ -57,7 +60,10 @@ class TestAuditClusterIntegration:
             auditor.audit_cluster("custom/namespace/")
 
             mock_vault_client.validate_connection.assert_called_once()
-            mock_write_reports.assert_called_once_with("test-cluster")
+            # Assert on the cluster name only; cache_stats is passed through as
+            # a keyword and its contents are the vault client's business.
+            mock_write_reports.assert_called_once()
+            assert mock_write_reports.call_args.args[0] == "test-cluster"
 
 
 class TestEndToEndWorkflow:

@@ -5,6 +5,7 @@ import queue
 import threading
 from unittest.mock import Mock, patch
 
+import hvac
 import pytest
 
 from src.common.vault_client import VaultConnectionError
@@ -176,6 +177,97 @@ class TestReportGeneration:
             # Verify files were written
             assert mock_write_json.call_count == 3
             assert mock_write_csv.call_count == 3
+
+    def test_write_reports_also_writes_the_markdown_report(self, auditor):
+        """The report is written on every run, alongside the JSON and CSV."""
+        auditor.data.auth_methods = {"": {"token/": {"type": "token"}}}
+        auditor.data.secret_engines = {"": {"kv/": {"type": "kv"}}}
+
+        with patch("src.namespace_audit.main.write_json"), patch("src.namespace_audit.main.write_csv"), patch("os.makedirs"), patch("src.namespace_audit.main.write_markdown") as mock_write_markdown:
+            auditor._write_reports("test-cluster")
+
+            mock_write_markdown.assert_called_once()
+            path, content = mock_write_markdown.call_args.args
+            assert path.endswith(".md")
+            assert "test-cluster-audit-report-" in path
+            assert content.startswith("# Vault Namespace Audit — test-cluster")
+
+    def test_markdown_report_indexes_its_sibling_files(self, auditor):
+        with (
+            patch("src.namespace_audit.main.write_json"),
+            patch("src.namespace_audit.main.write_csv"),
+            patch("os.makedirs"),
+            patch("os.path.exists", return_value=True),
+            patch("src.namespace_audit.main.write_markdown") as mock_write_markdown,
+        ):
+            auditor._write_reports("test-cluster")
+
+            content = mock_write_markdown.call_args.args[1]
+            assert "test-cluster-namespaces-" in content
+            assert "test-cluster-summary-auth-methods-" in content
+
+    def test_report_only_indexes_files_that_were_actually_written(self, auditor):
+        """The CSV writers return early when empty, so a root-only cluster
+        produces fewer than six files; the index must not invent the rest."""
+        with (
+            patch("src.namespace_audit.main.write_json"),
+            patch("src.namespace_audit.main.write_csv"),
+            patch("os.makedirs"),
+            patch("os.path.exists", return_value=False),
+            patch("src.namespace_audit.main.write_markdown") as mock_write_markdown,
+        ):
+            auditor._write_reports("test-cluster")
+
+            content = mock_write_markdown.call_args.args[1]
+            assert "test-cluster-namespaces-" not in content
+
+    def test_report_failure_does_not_sink_a_completed_audit(self, auditor):
+        """The JSON/CSV files are already on disk; a rendering bug must not raise."""
+        with (
+            patch("src.namespace_audit.main.write_json"),
+            patch("src.namespace_audit.main.write_csv"),
+            patch("os.makedirs"),
+            patch("src.namespace_audit.main.write_markdown", side_effect=OSError("disk full")),
+        ):
+            auditor._write_reports("test-cluster")  # must not raise
+
+
+class TestSystemLeaseTtlFetch:
+    """Optional enrichment: it must never be able to fail a run."""
+
+    def test_reads_the_ttls_from_the_sanitized_config(self, auditor):
+        auditor.vault_client.get = Mock(return_value={"data": {"default_lease_ttl": 3600, "max_lease_ttl": 86400}})
+
+        assert auditor._fetch_system_lease_ttls() == (3600, 86400)
+        auditor.vault_client.get.assert_called_once_with("sys/config/state/sanitized")
+
+    def test_accepts_an_unwrapped_payload(self, auditor):
+        """Some responses arrive already unwrapped by hvac."""
+        auditor.vault_client.get = Mock(return_value={"default_lease_ttl": 3600, "max_lease_ttl": 86400})
+
+        assert auditor._fetch_system_lease_ttls() == (3600, 86400)
+
+    def test_permission_denied_degrades_to_none(self, auditor):
+        """The policy rule is optional; a 403 must not sink the audit."""
+        auditor.vault_client.get = Mock(side_effect=hvac.exceptions.Forbidden("denied"))
+
+        assert auditor._fetch_system_lease_ttls() is None
+
+    def test_malformed_payload_degrades_to_none(self, auditor):
+        auditor.vault_client.get = Mock(return_value={"data": {"default_lease_ttl": "not-an-int"}})
+
+        assert auditor._fetch_system_lease_ttls() is None
+
+    def test_zero_max_ttl_degrades_to_none(self, auditor):
+        """0 means unset, and would otherwise make every mount an override."""
+        auditor.vault_client.get = Mock(return_value={"data": {"default_lease_ttl": 0, "max_lease_ttl": 0}})
+
+        assert auditor._fetch_system_lease_ttls() is None
+
+    def test_non_dict_response_degrades_to_none(self, auditor):
+        auditor.vault_client.get = Mock(return_value=[])
+
+        assert auditor._fetch_system_lease_ttls() is None
 
 
 class TestProgressTracking:

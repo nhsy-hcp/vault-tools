@@ -4,7 +4,7 @@
 
 Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providing three main capabilities:
 
-- **Namespace Audit**: Comprehensive auditing of Vault namespaces, auth methods, and secret engines
+- **Namespace Audit**: Comprehensive auditing of Vault namespaces, auth methods, and secret engines, with a markdown audit report
 - **Activity Export**: Export Vault activity logs and usage metrics
 - **Entity Export**: Export Vault entity data
 
@@ -30,13 +30,14 @@ Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providin
 │   ├── common/
 │   │   ├── vault_client.py         # Centralized Vault API client
 │   │   ├── config.py               # Configuration management
-│   │   ├── file_utils.py           # File I/O utilities
+│   │   ├── file_utils.py           # File I/O utilities (JSON/CSV/markdown)
 │   │   ├── utils.py                # Common utilities
 │   │   ├── audit_logger.py         # Audit logging functionality
 │   │   └── logging_config.py       # Logging configuration
 │   │
 │   ├── namespace_audit/
-│   │   └── main.py           # Multi-threaded namespace traversal
+│   │   ├── main.py           # Multi-threaded namespace traversal
+│   │   └── report.py         # Markdown audit report rendering (pure functions)
 │   │
 │   ├── activity_export/
 │   │   └── main.py           # Activity log processing
@@ -44,27 +45,30 @@ Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providin
 │   └── entity_export/
 │       └── main.py           # Entity data extraction
 │
-├── tests/                    # 119 comprehensive tests
-│   ├── common/               # Common test utilities
-│   ├── namespace_audit/      # 89+ tests with threading & mocking
+├── tests/                    # 391 comprehensive tests
+│   ├── common/               # 166 tests for shared utilities
+│   ├── namespace_audit/      # 166 tests with threading & mocking
 │   │   ├── conftest.py       # Pytest configuration
 │   │   ├── fixtures.py       # Test fixtures
+│   │   ├── report_fixtures.py # Realistic AuditData for report tests
 │   │   ├── test_auditor_core.py
 │   │   ├── test_data_classes.py
 │   │   ├── test_namespace_traversal.py
+│   │   ├── test_report.py
 │   │   ├── test_worker_threads.py
 │   │   ├── test_integration_simple.py
 │   │   ├── test_integration.py
 │   │   └── test_default.py
-│   ├── activity_export/      # 30+ tests for API & data processing
+│   ├── activity_export/      # 43 tests for API & data processing
 │   │   ├── conftest.py
 │   │   ├── fixtures.py
 │   │   ├── test_data_processing.py
 │   │   ├── test_vault_api.py
-│   │   ├── test_entity_export.py
+│   │   ├── test_entity_export.py   # entity_export is tested from here
 │   │   ├── test_integration.py
 │   │   └── test_default.py
-│   └── entity_export/        # Entity export tests
+│   ├── entity_export/        # Package marker only; tests live in activity_export/
+│   └── test_cli_parsing.py   # 16 argparse-level tests, no Vault required
 ├── inputs/                   # Input files for scripts
 └── outputs/                  # Generated reports (configurable)
     ├── _archive/             # Archived reports
@@ -172,7 +176,9 @@ currently exposed on the CLI.
 2. **Common Utilities (`src/common/`)**:
    - `vault_client.py`: Centralized Vault client with connection validation and enhanced error handling
    - `config.py`: Centralized configuration management with environment variable support
-   - `file_utils.py`: Shared file I/O utilities for JSON/CSV output
+   - `file_utils.py`: Shared file I/O utilities — `write_json`, `write_csv`,
+     `write_csv_stream`, `write_markdown`, `read_json`, `read_csv`. All wrap
+     failures in `FileProcessingError`; never let a bare `OSError` escape.
    - `utils.py`: Common utilities across modules
 
 3. **Module Structure**: Each tool is organized as a separate module under `src/`:
@@ -205,8 +211,59 @@ All tools write to configurable output directory (default: `outputs/`) with cons
 
 - JSON files: Raw API responses for programmatic access
 - CSV files: Processed summaries for analysis
+- Markdown file: Human-readable report (`namespace-audit` only)
 - Filename pattern: `{cluster-name}-{data-type}-{YYYYMMDD}.{ext}`
 - **Configurable**: Set `VAULT_TOOLS_OUTPUT_DIR` environment variable
+
+`namespace-audit` writes seven files per run: three JSON, three CSV, and
+`{cluster-name}-audit-report-{YYYYMMDD}.md`. The report is always written; there
+is no flag to enable or suppress it. Note that the two CSV summary writers return
+early when they have no rows, so a root-only cluster produces fewer files — the
+report's "Output files" index checks existence rather than assuming all six.
+
+### Markdown Report (`src/namespace_audit/report.py`)
+
+Rendering is deliberately separated from collection:
+
+- **Pure functions**: no Vault calls, no filesystem access. Takes `AuditData` /
+  `AuditStats`, returns a string. Testable without mock plumbing.
+- **No circular import**: `main.py` imports `report.py`, so `report.py` guards
+  its `AuditData`/`AuditStats` annotations behind `TYPE_CHECKING` and defers them
+  with `from __future__ import annotations`. Never add a runtime
+  `from .main import ...` here.
+- **No new dependencies**: `md_table()` is hand-rolled because
+  `DataFrame.to_markdown()` requires `tabulate`, which the project does not
+  depend on. The tool version comes from `importlib.metadata`, not from
+  `main.__version__`.
+- **Node set**: the namespace tree is built from the `auth_methods` keys, which
+  include the root as `""`. `data.namespaces` holds only *discovered children*
+  and omits the root, so it cannot be the sole source.
+- **Size caps**: `MAX_REPORT_NODES` (500) and `MAX_MATRIX_NAMESPACES` (25) bound
+  the tree, inventory and matrix; past them the report points at the CSV.
+- **Finding checks** are tuned against real cluster data to avoid noise. Built-in
+  mount types are excluded from the `local` check (cubbyhole is *always* local),
+  and both `token` and `ns_token` count as the built-in token backend (child
+  namespaces mount the `ns_`-prefixed variants). Deliberately not flagged:
+  `max_lease_ttl == 0` (means "inherit the system default", not "unlimited" —
+  measured at 99.7% of mounts on a real cluster) and `seal_wrap: false` (the
+  default for most mounts).
+- **Lease baseline**: `collect_findings(data, system_max_lease_ttl=...)` compares
+  against the cluster's own ceiling, read once per run by
+  `NamespaceAuditor._fetch_system_lease_ttls()` from
+  `sys/config/state/sanitized`. Do not hardcode Vault's stock 768h as the live
+  threshold — a cluster tuned to 24h makes it useless.
+  `LONG_MAX_LEASE_TTL_SECONDS` is the fallback for when the endpoint is
+  unreadable. A system max of `0` means "unset" and must be treated as unknown,
+  never as a baseline, or every mount becomes an override.
+
+Before adding a finding check, measure how many rows it produces against real
+cluster data. Two checks in the original draft fired on 134 and 1515 mounts
+respectively — both were the *default* state, not a deviation, and would have
+buried the ~15 genuine findings.
+
+When adding a writer to `_write_reports`, patch it in
+`tests/namespace_audit/fixtures.py::mock_file_operations` too, or unit tests will
+write real files to disk.
 
 ### Enhanced Error Handling
 
@@ -217,15 +274,23 @@ All tools write to configurable output directory (default: `outputs/`) with cons
   - `ConfigurationError`: Invalid configuration
 - **Enhanced Messages**: Actionable troubleshooting hints in error messages
 - **Graceful Permission Handling**: Logs warnings for forbidden namespaces
-- **Comprehensive Error Statistics**: Detailed error reporting and tracking
+- **Comprehensive Error Statistics**: `AuditStats` records both a count and the
+  identity of what failed — `forbidden_namespaces` holds `(path, scope)` and
+  `errors` holds `(path, message)`, which is what the report's "Access gaps"
+  section renders. The `increment_forbidden()` / `increment_errors()` arguments
+  are optional so bare calls still compile; pass the namespace wherever it is
+  known, or the failure becomes an unattributed number again.
 
 ## Test Suite Architecture
 
 ### Comprehensive Test Coverage
 
-- **119 total tests** across all modules with no hanging issues
-- **namespace_audit**: 89+ tests including threading, mocking, and integration
-- **activity_export**: 30+ tests covering API interaction and data processing
+- **391 total tests** across all modules with no hanging issues
+- **common**: 166 tests covering VaultClient, config, logging and file I/O
+- **namespace_audit**: 166 tests including threading, mocking, report rendering
+  and integration
+- **activity_export**: 43 tests covering API interaction and data processing
+  (this directory also holds the entity_export tests)
 - **Centralized fixtures**: Reusable mock configurations in `fixtures.py` files
 - **Modular structure**: Tests organized by functionality for maintainability
 
@@ -234,6 +299,10 @@ All tools write to configurable output directory (default: `outputs/`) with cons
 - `test_data_classes.py`: Statistics and data storage unit tests
 - `test_auditor_core.py`: Core functionality and configuration tests
 - `test_namespace_traversal.py`: API interaction and data fetching tests
+- `test_report.py`: Markdown rendering, tree building and finding checks
+- `report_fixtures.py`: Realistic mount objects (config, deprecation_status,
+  local) for the report tests — the minimal `{"type": ...}` stubs elsewhere are
+  not enough to exercise the finding checks
 - `test_worker_threads.py`: Threading and concurrency behavior tests
 - `test_integration_simple.py`: Component interaction and workflow tests
 - `test_integration.py`: Full end-to-end workflow tests

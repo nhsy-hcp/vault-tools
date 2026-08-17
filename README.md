@@ -8,7 +8,7 @@ A unified CLI tool for comprehensive HashiCorp Vault operations, providing defen
 
 ## Features
 
-- **Namespace Audit**: Multi-threaded namespace traversal with rate limiting and comprehensive reporting
+- **Namespace Audit**: Multi-threaded namespace traversal with rate limiting, JSON/CSV output and a markdown audit report
 - **Activity Export**: Vault activity log processing and export with flexible date ranges
 - **Entity Export**: Entity data extraction and CSV/JSON reporting
 
@@ -84,6 +84,50 @@ python main.py namespace-audit --workers 8 --output-dir custom-output
 # See all options
 python main.py namespace-audit --help
 ```
+
+Each run writes seven files to the output directory: three JSON dumps of the raw
+API responses, three CSV summaries, and a markdown report,
+`{cluster-name}-audit-report-{YYYYMMDD}.md`. The report is written on every run —
+there is no flag to enable or suppress it.
+
+The report is the human-readable view of the audit and contains:
+
+- **Summary** — total namespaces, maximum nesting depth, mount totals and
+  distinct type counts, duration, errors and denials.
+- **Access gaps** — every namespace the token was denied, by name, and whether
+  the whole namespace or only its child listing was refused. This is the section
+  to read first: it bounds how much of the cluster the rest of the report
+  actually covers.
+- **Namespace inventory** — the hierarchy as an indented tree with per-namespace
+  mount counts, then a table of namespace IDs, depth and custom metadata.
+- **Type distribution** — how many mounts of each auth method and secrets engine
+  type exist and in how many namespaces, plus a per-namespace matrix for smaller
+  clusters.
+- **Security observations** — prompts for review derived from mount metadata:
+  deprecated or pending-removal plugins, auth mounts enumerable by
+  unauthenticated callers (`listing_visibility: unauth`), mounts whose
+  `max_lease_ttl` overrides the cluster ceiling, non-replicated `local` mounts,
+  namespaces with no auth method beyond the built-in token backend, and leaf
+  namespaces holding nothing but Vault's own built-in engines.
+- **Output files** — an index of the sibling JSON and CSV files from the same run.
+
+These observations are review prompts, not a compliance verdict — informational
+rows are expected in a healthy cluster. Very large clusters are truncated in the
+tree and inventory tables, which then point at the corresponding CSV.
+
+Lease findings are calibrated against your cluster's own `max_lease_ttl`, read
+once per run from `sys/config/state/sanitized` and shown in the summary as
+**System lease TTL**. A mount is flagged only when it *overrides* that ceiling,
+reported with the multiple — so a 2160h lease on a cluster tuned down to 24h
+reads as "90x higher" rather than being compared against Vault's stock 768h and
+under-reported. If the token cannot read that endpoint the audit still succeeds:
+the row is omitted and the check falls back to a fixed 768h threshold, saying so
+in the finding.
+
+Mounts that leave `max_lease_ttl` at `0` are deliberately *not* flagged. Zero
+means "inherit the system default", not "unlimited" — on a typical cluster
+upwards of 99% of mounts sit at zero, so reporting them would bury every other
+finding.
 
 ### Activity Export
 
@@ -171,10 +215,16 @@ Two things to know about the policy:
 - **`sys/internal/counters/activity/export` needs `sudo`.** Vault root-protects
   that endpoint, so `read` alone returns 403 and `entity-export` fails. It is the
   only rule in the policy requiring `sudo`; everything else is plain `read`/`list`.
+- **`sys/config/state/sanitized` is optional.** It supplies the cluster's lease
+  TTLs, which calibrate the audit report's lease findings. Removing the rule
+  degrades those findings to a fixed threshold; it does not fail the run.
 
-If the token lacks `sys/namespaces` at some level, the audit silently stops
-descending there and reports the namespaces it did reach — check the
-**Permission Denied (skipped)** count in the summary table, which should be `0`.
+If the token lacks `sys/namespaces` at some level, the audit stops descending
+there and reports the namespaces it did reach. The **Permission Denied (skipped)**
+count in the console summary table should be `0`; when it is not, the **Access
+gaps** section of the markdown report names each denied namespace and says
+whether the whole namespace or only its child listing was refused, so you can see
+exactly which subtrees are missing and widen the policy accordingly.
 
 ## Key Features
 
@@ -258,12 +308,14 @@ task test:gha ACT_ARCH=linux/amd64
 
 **Modular design** with three main components:
 
-- `src/namespace_audit/` - Multi-threaded namespace traversal
+- `src/namespace_audit/` - Multi-threaded namespace traversal (`main.py`) and
+  markdown report rendering (`report.py`)
 - `src/activity_export/` - Activity log processing
 - `src/entity_export/` - Entity data extraction
 - `src/common/` - Shared utilities (VaultClient, Config, FileUtils)
 
-**Output:** Structured JSON/CSV files in `outputs/` directory.
+**Output:** Structured JSON/CSV files in the `outputs/` directory, plus a
+markdown audit report from `namespace-audit`.
 
 ## Contributing
 
