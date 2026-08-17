@@ -13,6 +13,7 @@
 # ]
 # ///
 import argparse
+import importlib.metadata
 import os
 import sys
 import uuid
@@ -29,6 +30,17 @@ from src.common.utils import normalise_namespace_path, validate_date_format
 from src.common.vault_client import VaultClient
 from src.entity_export.main import run_entity_export
 from src.namespace_audit.main import NamespaceAuditor
+
+# `uv run main.py` executes this file as a PEP 723 script, so the vault-tools
+# distribution is not installed and importlib.metadata cannot be the only
+# source. The literal is the fallback for that mode and is pinned to
+# pyproject.toml by a test, so the two cannot drift.
+_FALLBACK_VERSION = "2.0.1"
+
+try:
+    __version__ = importlib.metadata.version("vault-tools")
+except importlib.metadata.PackageNotFoundError:
+    __version__ = _FALLBACK_VERSION
 
 
 def create_vault_client(logger) -> VaultClient:
@@ -114,6 +126,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser = argparse.ArgumentParser(description="Vault Tools CLI", parents=[common])
+    # Terminal flag, so it stays on the top-level parser rather than the shared
+    # parent: the version action prints and exits while the option is consumed,
+    # which is what lets `main.py --version` succeed despite the required
+    # subcommand below.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"vault-tools {__version__}",
+        help="Show the version and exit.",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # Namespace Audit command

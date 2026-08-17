@@ -19,8 +19,6 @@ A unified CLI tool for comprehensive HashiCorp Vault operations, providing defen
 3. **Configure**: Set `VAULT_ADDR` and `VAULT_TOKEN` environment variables
 4. **Run**: `uv run vault-tools --help` or `python main.py --help` to see available commands
 
-**New in v2.0.0:** Connection pooling, response caching, audit logging, rich CLI output, and streamlined development tools!
-
 ## Installation
 
 ### Prerequisites
@@ -142,7 +140,46 @@ export VAULT_TOKEN="your-vault-token"
 export VAULT_SKIP_VERIFY="true"  # Optional, for dev environments
 ```
 
-## Key Features (v2.0.0)
+### Vault Token Permissions
+
+The tool is read-only and never writes to Vault. Rather than running it with a
+root token, use the supplied [`audit-policy.hcl`](audit-policy.hcl), which grants
+only the endpoints the tool actually calls.
+
+Write the policy and mint a short-lived token in the **root namespace**:
+
+```bash
+# Create the policy (root namespace)
+vault policy write vault-tools-audit audit-policy.hcl
+
+# Create a token with a 1 hour TTL
+vault token create -policy=vault-tools-audit -ttl=1h
+
+# Capture just the token and export it for the tool
+export VAULT_TOKEN=$(vault token create -policy=vault-tools-audit -ttl=1h -field=token)
+```
+
+An hour is ample headroom — a full audit typically completes in seconds. Add
+`-explicit-max-ttl=1h` if the token must not be renewable beyond that, or lower
+`-ttl` for CI use.
+
+Two things to know about the policy:
+
+- **It must live in the root namespace.** Vault ACL policies are namespace-local,
+  and a token does *not* inherit a same-named policy defined in a child
+  namespace. Child namespaces are therefore reached through namespace-prefixed
+  paths (`+/sys/mounts`, `+/+/sys/mounts`, ...), where `+` matches one namespace
+  segment. The policy covers the root namespace plus five levels of nesting; a
+  deeper hierarchy needs one more `+/` rule per extra level.
+- **`sys/internal/counters/activity/export` needs `sudo`.** Vault root-protects
+  that endpoint, so `read` alone returns 403 and `entity-export` fails. It is the
+  only rule in the policy requiring `sudo`; everything else is plain `read`/`list`.
+
+If the token lacks `sys/namespaces` at some level, the audit silently stops
+descending there and reports the namespaces it did reach — check the
+**Permission Denied (skipped)** count in the summary table, which should be `0`.
+
+## Key Features
 
 ### Performance & Reliability
 
@@ -199,8 +236,6 @@ task test:ci
 # Run a specific module
 uv run pytest tests/namespace_audit/ -v
 ```
-
-**362 tests**, 94% coverage across all modules.
 
 ### Continuous Integration
 

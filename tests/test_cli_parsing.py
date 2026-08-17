@@ -7,8 +7,12 @@ subparser parses last, so an ordinary default would overwrite a value supplied
 before the subcommand. These tests pin both positions.
 """
 
+import tomllib
+from pathlib import Path
+
 import pytest
 
+import main
 from main import build_parser as _build_parser
 
 
@@ -53,3 +57,18 @@ class TestAllSubcommandsAcceptGlobalFlags:
     def test_output_dir_accepted_after_every_subcommand(self, argv):
         args = _build_parser().parse_args([*argv, "--output-dir", "/tmp/x"])
         assert getattr(args, "output_dir", None) == "/tmp/x"
+
+
+class TestVersionFlag:
+    def test_version_prints_and_exits_cleanly(self, capsys):
+        """`--version` must win over the required subcommand, not error out."""
+        with pytest.raises(SystemExit) as exc:
+            _build_parser().parse_args(["--version"])
+        assert exc.value.code == 0
+        assert capsys.readouterr().out.strip() == f"vault-tools {main.__version__}"
+
+    def test_fallback_version_matches_pyproject(self):
+        """The PEP 723 script path uses the literal; keep it in step with the manifest."""
+        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        manifest = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        assert manifest["project"]["version"] == main._FALLBACK_VERSION
