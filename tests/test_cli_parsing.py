@@ -38,9 +38,14 @@ class TestGlobalFlagPositions:
         assert getattr(args, attr, False) is True
 
     def test_subcommand_options_still_parse(self):
-        args = _build_parser().parse_args(["namespace-audit", "-w", "8", "-n", "team-a/"])
+        args = _build_parser().parse_args(["namespace-audit", "-w", "8"])
         assert args.workers == 8
-        assert args.namespace == "team-a/"
+
+    @pytest.mark.parametrize("argv", [["namespace-audit", "-n", "team-a/"], ["all", "-s", "2026-01-01", "-e", "2026-01-31", "-n", "team-a/"]])
+    def test_namespace_flag_is_gone(self, argv):
+        """--namespace was removed: it only ever scoped the audit, never the exports."""
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(argv)
 
 
 class TestAllSubcommandsAcceptGlobalFlags:
@@ -59,16 +64,24 @@ class TestAllSubcommandsAcceptGlobalFlags:
         assert getattr(args, "output_dir", None) == "/tmp/x"
 
 
+def _manifest_version() -> str:
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    return tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+
+
 class TestVersionFlag:
     def test_version_prints_and_exits_cleanly(self, capsys):
-        """`--version` must win over the required subcommand, not error out."""
+        """`--version` must win over the required subcommand, not error out.
+
+        Asserted against pyproject.toml rather than main.__version__: the
+        parser's version string is interpolated from that same attribute, so
+        comparing the two only proves f-strings work.
+        """
         with pytest.raises(SystemExit) as exc:
             _build_parser().parse_args(["--version"])
         assert exc.value.code == 0
-        assert capsys.readouterr().out.strip() == f"vault-tools {main.__version__}"
+        assert capsys.readouterr().out.strip() == f"vault-tools {_manifest_version()}"
 
     def test_fallback_version_matches_pyproject(self):
         """The PEP 723 script path uses the literal; keep it in step with the manifest."""
-        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
-        manifest = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-        assert manifest["project"]["version"] == main._FALLBACK_VERSION
+        assert _manifest_version() == main._FALLBACK_VERSION

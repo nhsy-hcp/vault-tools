@@ -229,8 +229,10 @@ class VaultClient:
 
         try:
             with self.get_client(namespace, timeout=timeout) as client:
-                # Remove leading slash and v1 prefix if present
-                clean_path = path.lstrip("/").replace("v1/", "")
+                # Remove leading slash and v1 prefix if present. removeprefix,
+                # not replace: replace strips "v1/" from anywhere in the path,
+                # mangling any mount or namespace that happens to contain it.
+                clean_path = path.lstrip("/").removeprefix("v1/")
 
                 response = client.adapter.request("GET", f"v1/{clean_path}", params=params) if params else client.adapter.request("GET", f"v1/{clean_path}")
 
@@ -298,8 +300,8 @@ class VaultClient:
         """
         try:
             with self.get_client(namespace, timeout=timeout) as client:
-                # Remove leading slash and v1 prefix if present
-                clean_path = path.lstrip("/").replace("v1/", "")
+                # See the note in get(): removeprefix, not replace.
+                clean_path = path.lstrip("/").removeprefix("v1/")
 
                 response = client.adapter.request("POST", f"{client.url}/v1/{clean_path}", json=data)
 

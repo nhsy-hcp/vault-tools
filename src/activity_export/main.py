@@ -18,9 +18,18 @@ logger = logging.getLogger(__name__)
 
 def get_activity_data(client: VaultClient, start_date: str, end_date: str) -> dict[str, Any]:
     path = "sys/internal/counters/activity"
+    # end_time is inclusive of the whole end date, matching entity-export's
+    # T23:59:59Z. It previously stopped at midnight *starting* the end date, so
+    # the same -s/-e produced two different windows across the two exporters.
+    #
+    # In practice Vault normalises this endpoint's window to month boundaries
+    # (a request for 08-16..08-16 comes back as 2025-10-01..2026-08-31), so the
+    # old value rarely changed the result here. That normalisation is a server
+    # behaviour, not a contract, and the entity export endpoint does not apply
+    # it -- so the two exporters should agree on what they ask for.
     params = {
         "start_time": f"{start_date}T00:00:00Z",
-        "end_time": f"{end_date}T00:00:00Z",
+        "end_time": f"{end_date}T23:59:59Z",
     }
 
     logger.info(f"Fetching activity data from {start_date} to {end_date}")

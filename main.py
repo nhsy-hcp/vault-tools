@@ -20,13 +20,13 @@ import uuid
 
 from src.activity_export.main import run_activity_export
 from src.common.config import GlobalConfig
-from src.common.exceptions import ConfigurationError
+from src.common.exceptions import ConfigurationError, VaultToolsError
 from src.common.logging_config import (
     get_structured_logger,
     set_correlation_id,
     setup_logging,
 )
-from src.common.utils import normalise_namespace_path, validate_date_format
+from src.common.utils import validate_date_format
 from src.common.vault_client import VaultClient
 from src.entity_export.main import run_entity_export
 from src.namespace_audit.main import NamespaceAuditor
@@ -57,6 +57,10 @@ def create_vault_client(logger) -> VaultClient:
     """
     vault_addr = os.environ.get("VAULT_ADDR")
     vault_token = os.environ.get("VAULT_TOKEN")
+    # Read here rather than in VaultClient: the client treats it as a plain
+    # constructor argument and never consults the environment for it, so
+    # passing only addr and token silently left verification on.
+    vault_skip_verify = os.environ.get("VAULT_SKIP_VERIFY", "false").lower() == "true"
 
     if not vault_addr or not vault_token:
         missing_vars = []
@@ -73,7 +77,7 @@ def create_vault_client(logger) -> VaultClient:
         )
         sys.exit(1)
 
-    return VaultClient(vault_addr, vault_token)
+    return VaultClient(vault_addr, vault_token, vault_skip_verify=vault_skip_verify)
 
 
 def validate_dates(start_date: str, end_date: str, logger) -> None:
@@ -140,7 +144,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Namespace Audit command
     parser_audit = subparsers.add_parser("namespace-audit", help="Audit Vault namespaces.", parents=[common])
-    parser_audit.add_argument("-n", "--namespace", type=str, default="", help="Namespace path to audit.")
     parser_audit.add_argument("-w", "--workers", type=int, default=4, help="Number of worker threads.")
 
     # Activity Export command
@@ -170,13 +173,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="End date (YYYY-MM-DD) for activity and entity exports.",
     )
     parser_all.add_argument(
-        "-n",
-        "--namespace",
-        type=str,
-        default="",
-        help="Namespace path to audit (default: ) for namespace audit.",
-    )
-    parser_all.add_argument(
         "-w",
         "--workers",
         type=int,
@@ -200,15 +196,24 @@ def main() -> None:
 
     # Global flags use default=SUPPRESS (see above), so the attribute is absent
     # when the flag was not supplied in either position.
-    debug = getattr(args, "debug", False)
     json_logs = getattr(args, "json_logs", False)
     output_dir = getattr(args, "output_dir", None)
 
-    # Canonicalise the namespace once, here, so every downstream consumer sees
-    # the trailing-slash form Vault's namespace API expects (C1). Only the
-    # namespace-audit and all subcommands take one.
-    if hasattr(args, "namespace"):
-        args.namespace = normalise_namespace_path(args.namespace)
+    # Load global configuration before logging is configured: it carries
+    # VAULT_TOOLS_DEBUG, which has to be known to set the log level. Errors here
+    # are reported on stderr because the structured logger is not up yet.
+    # The CLI --output-dir flag takes precedence over the environment variable
+    # and is passed through the constructor so the directory is created and
+    # writability-checked up front. Assigning it afterwards skipped that check,
+    # deferring the failure until after a full namespace traversal had run.
+    try:
+        global_config = GlobalConfig.from_environment(output_dir=output_dir)
+    except ConfigurationError as e:
+        sys.stderr.write(f"Error: {e}\n")
+        sys.exit(1)
+
+    # Either source enables debug; the flag cannot switch it back off.
+    debug = getattr(args, "debug", False) or global_config.debug
 
     # Setup structured logging
     setup_logging(debug=debug, json_logs=json_logs)
@@ -230,18 +235,6 @@ def main() -> None:
     if debug:
         logger.debug("debug_logging_enabled", args=vars(args))
 
-    # Load global configuration and create vault client.
-    # The CLI --output-dir flag takes precedence over the environment variable
-    # and is passed through the constructor so the directory is created and
-    # writability-checked up front. Assigning it afterwards skipped that check,
-    # deferring the failure until after a full namespace traversal had run.
-    try:
-        global_config = GlobalConfig.from_environment(output_dir=output_dir)
-    except ConfigurationError as e:
-        logger.error("invalid_output_directory", error=str(e))
-        sys.stderr.write(f"Error: {e}\n")
-        sys.exit(1)
-
     vault_client = create_vault_client(logger)
 
     try:
@@ -249,7 +242,6 @@ def main() -> None:
             logger.info(
                 "command_execution_started",
                 command="namespace-audit",
-                namespace=args.namespace,
                 workers=args.workers,
             )
             auditor = NamespaceAuditor(
@@ -257,7 +249,7 @@ def main() -> None:
                 worker_threads=args.workers,
                 output_dir=global_config.output_dir,
             )
-            auditor.audit_cluster(args.namespace)
+            auditor.audit_cluster()
             logger.info("command_execution_completed", command="namespace-audit")
 
         elif args.command == "activity-export":
@@ -303,7 +295,6 @@ def main() -> None:
                 command="all",
                 start_date=args.start_date,
                 end_date=args.end_date,
-                namespace=args.namespace,
                 workers=args.workers,
             )
             # Validate connection once and reuse the cluster name for all sub-tools.
@@ -316,7 +307,7 @@ def main() -> None:
                 worker_threads=args.workers,
                 output_dir=global_config.output_dir,
             )
-            auditor.audit_cluster(args.namespace)
+            auditor.audit_cluster()
             logger.info("subcommand_completed", subcommand="namespace-audit")
 
             # Run activity-export (reuses cluster_name from above)
@@ -345,7 +336,29 @@ def main() -> None:
 
         logger.info("vault_tools_completed", command=args.command)
 
+    except KeyboardInterrupt:
+        # Ctrl-C during a threaded audit otherwise surfaces as stack traces from
+        # whichever worker happened to be mid-request.
+        logger.warning("vault_tools_interrupted", command=args.command)
+        sys.stderr.write("\nInterrupted.\n")
+        sys.exit(130)
+
+    except VaultToolsError as e:
+        # The project's own exception hierarchy covers the expected operational
+        # failures — bad token, sealed cluster, denied path, malformed response.
+        # These are not defects, so report the message and exit rather than
+        # printing a traceback the user can do nothing with.
+        logger.error(
+            "vault_tools_failed",
+            command=args.command,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
+        sys.stderr.write(f"Error: {e}\n")
+        sys.exit(1)
+
     except Exception as e:
+        # Anything else is unexpected; keep the traceback, it is a bug report.
         logger.exception(
             "vault_tools_failed",
             command=args.command,
