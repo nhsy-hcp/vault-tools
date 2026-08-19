@@ -164,7 +164,7 @@ export VAULT_TOOLS_DEBUG="true"                 # Default: false
 ```
 
 These three are the complete set. Everything else is a CLI flag — `--workers`,
-`--output-dir`, `--start-date`/`--end-date`. Rate limiting uses
+`--output-dir`, `--no-sentinel`, `--start-date`/`--end-date`. Rate limiting uses
 `NamespaceAuditor`'s constructor defaults (batch 100, sleep 3s) and is not
 currently exposed on the CLI.
 
@@ -215,11 +215,47 @@ All tools write to configurable output directory (default: `outputs/`) with cons
 - Filename pattern: `{cluster-name}-{data-type}-{YYYYMMDD}.{ext}`
 - **Configurable**: Set `VAULT_TOOLS_OUTPUT_DIR` environment variable
 
-`namespace-audit` writes seven files per run: three JSON, three CSV, and
-`{cluster-name}-audit-report-{YYYYMMDD}.md`. The report is always written; there
-is no flag to enable or suppress it. Note that the two CSV summary writers return
-early when they have no rows, so a root-only cluster produces fewer files — the
-report's "Output files" index checks existence rather than assuming all six.
+`namespace-audit` writes up to nine files per run: up to four JSON, up to four
+CSV, and `{cluster-name}-audit-report-{YYYYMMDD}.md`. The report is always
+written; there is no flag to enable or suppress it. The count is a maximum, not a
+guarantee: the CSV summary writers return early when they have no rows, and the
+Sentinel pair (`sentinel-policies.json`, `summary-sentinel-policies.csv`) is
+skipped entirely unless policies were collected — so a root-only Community
+cluster produces five. The report's "Output files" index checks existence rather
+than assuming the full set.
+
+### Sentinel EGP/RGP collection
+
+`NamespaceAuditor._fetch_sentinel_policies()` runs inside the same `get_client()`
+block as the auth and engine collectors, using hvac's native
+`list_egp_policies()` / `read_egp_policy()` (in
+`hvac/api/system_backend/policies.py`, *not* `policy.py`, which is ACL-only).
+
+- **`self.sentinel_supported` is tri-state and load-bearing.** `None` = never
+  probed, `True` = the endpoint answered, `False` = the cluster has no Sentinel.
+  The report renders all three differently, because "zero policies" and "no
+  Sentinel at all" are different findings. Mutated only under `thread_lock`, via
+  `_mark_sentinel_supported()`, which makes `False` sticky — the flag describes
+  the cluster, so a later success is not evidence against it, and letting `True`
+  win a race would restart the probing the flag exists to stop.
+- **The `"unsupported path"` string check is a deliberate heuristic.** Vault
+  returns 404 both for "this build has no Sentinel" and for "this namespace has
+  zero policies", and only the error body separates them. If Vault ever reworks
+  the message the short-circuit stops firing and every namespace re-probes to an
+  empty result — benign, which is why the heuristic is acceptable. Do not
+  "harden" it into something that fails closed.
+- **Cost on a non-Sentinel cluster is one API call for the whole run**: the EGP
+  probe fails, `sentinel_supported` goes `False`, the RGP probe in the same call
+  is skipped, and every later namespace short-circuits before the request.
+- **Per-policy read failures store a placeholder** `{"name", "read_error"}` so
+  the name still reaches the report, and `increment_forbidden` fires only on the
+  first denial per `(namespace, kind)`. A namespace with 40 unreadable policies
+  must produce one access-gap row, not 40.
+- **Namespaces with no policies get no dict entry at all**, or every table would
+  carry a blank row per namespace.
+- `examples/sentinel/` plus `task seed:sentinel` write five no-op policies
+  covering each finding branch, including a hard-mandatory control that must
+  produce *no* finding. Every body evaluates to `true` unconditionally.
 
 ### Markdown Report (`src/namespace_audit/report.py`)
 
@@ -264,6 +300,12 @@ buried the ~15 genuine findings.
 When adding a writer to `_write_reports`, patch it in
 `tests/namespace_audit/fixtures.py::mock_file_operations` too, or unit tests will
 write real files to disk.
+
+When adding a per-namespace collector, add its endpoint to
+`tests/namespace_audit/fixtures.py::make_hvac_client` as well. The mock hvac
+client is a bare `Mock`, which has no `__getitem__`, so an unstubbed call makes
+the collector's subscript raise `TypeError` and every traversal test records a
+spurious error rather than failing where the gap is.
 
 ### Enhanced Error Handling
 

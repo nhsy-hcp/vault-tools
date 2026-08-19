@@ -1,0 +1,10 @@
+# No-op EGP: the condition is always satisfied, so nothing is ever blocked.
+#
+# Seeded at enforcement_level=hard-mandatory over paths="*", the combination the
+# report flags for blast radius rather than for weakness. Safe only because the
+# rule below cannot evaluate false -- a hard-mandatory wildcard EGP that could
+# would lock the namespace against everyone, including you.
+
+import "time"
+
+main = rule { time.now.unix > 0 }

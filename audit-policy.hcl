@@ -21,7 +21,7 @@
 #     +/+/+/+/sys/mounts      four levels down
 #     +/+/+/+/+/sys/mounts    five levels down
 #
-# Only the three namespace-audit rules need this treatment; see the comments on
+# Only the namespace-audit rules need this treatment; see the comments on
 # each section for why the rest are root-only. They cover the root namespace
 # plus five levels of nesting. A deeper hierarchy needs a further "+/" rule per
 # extra level; levels deeper than the tree in use are harmless.
@@ -144,6 +144,116 @@ path "+/+/+/+/sys/namespaces" {
 
 path "+/+/+/+/+/sys/namespaces" {
   capabilities = ["list"]
+}
+
+# --- namespace-audit: Sentinel governing policies ----------------------------
+# list_egp_policies()/list_rgp_policies() -> LIST sys/policies/{egp,rgp}, then
+# read_egp_policy()/read_rgp_policy() -> GET sys/policies/{egp,rgp}/:name for
+# each result. Sentinel policies are namespace-local, so these need the same
+# per-level treatment as the three rules above.
+#
+# Vault Enterprise with the Governance & Policy module only. Everywhere else the
+# endpoints 404 with "unsupported path", the tool records that once and stops
+# probing, and the report says Sentinel is unavailable rather than reporting
+# zero policies -- so omitting these rules costs nothing on a Community cluster.
+#
+# The read rules are scoped to the whole subtree because policy names are
+# arbitrary. Note "+" matches exactly one segment anywhere in the path, while
+# "*" is only legal as the final character -- both hold here.
+path "sys/policies/egp" {
+  capabilities = ["list"]
+}
+
+path "+/sys/policies/egp" {
+  capabilities = ["list"]
+}
+
+path "+/+/sys/policies/egp" {
+  capabilities = ["list"]
+}
+
+path "+/+/+/sys/policies/egp" {
+  capabilities = ["list"]
+}
+
+path "+/+/+/+/sys/policies/egp" {
+  capabilities = ["list"]
+}
+
+path "+/+/+/+/+/sys/policies/egp" {
+  capabilities = ["list"]
+}
+
+path "sys/policies/egp/*" {
+  capabilities = ["read"]
+}
+
+path "+/sys/policies/egp/*" {
+  capabilities = ["read"]
+}
+
+path "+/+/sys/policies/egp/*" {
+  capabilities = ["read"]
+}
+
+path "+/+/+/sys/policies/egp/*" {
+  capabilities = ["read"]
+}
+
+path "+/+/+/+/sys/policies/egp/*" {
+  capabilities = ["read"]
+}
+
+path "+/+/+/+/+/sys/policies/egp/*" {
+  capabilities = ["read"]
+}
+
+path "sys/policies/rgp" {
+  capabilities = ["list"]
+}
+
+path "+/sys/policies/rgp" {
+  capabilities = ["list"]
+}
+
+path "+/+/sys/policies/rgp" {
+  capabilities = ["list"]
+}
+
+path "+/+/+/sys/policies/rgp" {
+  capabilities = ["list"]
+}
+
+path "+/+/+/+/sys/policies/rgp" {
+  capabilities = ["list"]
+}
+
+path "+/+/+/+/+/sys/policies/rgp" {
+  capabilities = ["list"]
+}
+
+path "sys/policies/rgp/*" {
+  capabilities = ["read"]
+}
+
+path "+/sys/policies/rgp/*" {
+  capabilities = ["read"]
+}
+
+path "+/+/sys/policies/rgp/*" {
+  capabilities = ["read"]
+}
+
+path "+/+/+/sys/policies/rgp/*" {
+  capabilities = ["read"]
+}
+
+path "+/+/+/+/sys/policies/rgp/*" {
+  capabilities = ["read"]
+}
+
+path "+/+/+/+/+/sys/policies/rgp/*" {
+  capabilities = ["read"]
 }
 
 # --- activity-export ---------------------------------------------------------

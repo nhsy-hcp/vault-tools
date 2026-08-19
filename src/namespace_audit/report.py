@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -28,6 +29,13 @@ logger = logging.getLogger(__name__)
 # slow to render. Past these caps the report points at the CSV instead.
 MAX_REPORT_NODES = 500
 MAX_MATRIX_NAMESPACES = 25
+
+# Above this many namespaces sharing one denial reason, the access-gaps table
+# collapses them into a single row. A denial repeated across the whole tree is
+# a missing policy rule, not a targeted restriction, and listing it per
+# namespace buries the handful of gaps that are genuinely specific: a token
+# without the Sentinel rules produces 268 rows on a 134-namespace cluster.
+MAX_ACCESS_GAP_ROWS = 10
 
 # Fallback threshold, used only when the cluster's own system max is unavailable
 # (the token cannot read sys/config/state/sanitized). 768h (32 days) is Vault's
@@ -61,10 +69,30 @@ DEPRECATED_STATUSES = frozenset({"deprecated", "pending-removal", "removed"})
 
 SEVERITY_ORDER = ("Medium", "Low", "Info")
 
+# Sentinel's three enforcement levels, ordered strongest first. Only
+# hard-mandatory actually stops a request outright: soft-mandatory can be
+# overridden by a caller holding a sudo-capable token, and advisory merely logs.
+SENTINEL_ENFORCEMENT_LEVELS = ("hard-mandatory", "soft-mandatory", "advisory")
+
+# A main rule that is the literal `true` passes every request unconditionally.
+# Vault will not store a policy with no main rule at all, so this — not an empty
+# body — is what a do-nothing Sentinel policy looks like on a real cluster.
+ALWAYS_TRUE_MAIN = re.compile(r"^main\s*=\s*rule\s*\{\s*true\s*\}$")
+
+# EGP paths that cover every endpoint in the namespace. Worth surfacing not
+# because it is wrong — a catch-all EGP is a legitimate pattern — but because
+# the blast radius should be a deliberate choice.
+BROAD_EGP_PATHS = frozenset({"*", "/*"})
+
 
 @dataclass(frozen=True)
 class Finding:
-    """One security observation about a single mount or namespace."""
+    """One security observation about a single mount, namespace or Sentinel policy.
+
+    ``mount``/``mount_type`` carry the policy name and its kind (``egp``/``rgp``)
+    for the Sentinel checks, which is why the rendered column is headed "Object"
+    rather than "Mount".
+    """
 
     severity: str
     namespace: str
@@ -296,6 +324,145 @@ def render_type_matrix(collection: dict[str, Any], label: str, max_namespaces: i
     return md_table(["Namespace", *types], rows)
 
 
+def _policy_line_count(body: Any) -> int:
+    """Number of lines in a Sentinel policy body; 0 for anything unreadable."""
+    return len(body.splitlines()) if isinstance(body, str) else 0
+
+
+def _is_trivial_policy(body: Any) -> bool:
+    """True when the policy body has no executable content.
+
+    Two cases. An empty body cannot actually be written through Vault's own
+    endpoint — it refuses at write time with "every policy must have a main
+    rule" — but it is cheap to recognise and can still reach the report from a
+    hand-assembled JSON dump. The case that occurs in practice is
+    ``main = rule { true }``: it compiles, it appears in the policy list looking
+    like a control, and it permits every request.
+
+    Sentinel takes both ``#`` and ``//`` comments, so both are stripped first: a
+    comment sitting above the rule must not hide it.
+    """
+    if not isinstance(body, str):
+        return False
+    meaningful = [stripped for line in body.splitlines() if (stripped := line.strip()) and not stripped.startswith(("#", "//"))]
+    if not meaningful:
+        return True
+    # Joined rather than matched line by line — the rule is often wrapped.
+    return ALWAYS_TRUE_MAIN.match(" ".join(meaningful)) is not None
+
+
+def _sentinel_rows(collection: dict[str, Any], kind: str) -> list[list[Any]]:
+    """Flatten a Sentinel collection into sorted table rows."""
+    rows: list[list[Any]] = []
+    for namespace in sorted(collection):
+        for name in sorted(collection[namespace]):
+            policy = collection[namespace][name]
+            if not isinstance(policy, dict):
+                continue
+            row: list[Any] = [display_namespace(namespace), name, policy.get("enforcement_level", "—")]
+            if kind == "egp":
+                paths = policy.get("paths")
+                row.append(", ".join(paths) if isinstance(paths, list) and paths else "—")
+            row.append(_policy_line_count(policy.get("policy")))
+            rows.append(row)
+    return rows
+
+
+def render_sentinel_policies(collection: dict[str, Any], kind: str, max_rows: int = MAX_REPORT_NODES) -> str:
+    """Table of Sentinel policies of one kind, across every namespace.
+
+    The body itself is deliberately not rendered — a Sentinel policy runs to
+    dozens of lines and there can be one per namespace, so the report reports a
+    line count and the JSON dump carries the source for diffing.
+    """
+    rows = _sentinel_rows(collection, kind)
+    headers = ["Namespace", "Policy", "Enforcement"] + (["Paths"] if kind == "egp" else []) + ["Lines"]
+    table = md_table(headers, rows[:max_rows])
+    if len(rows) > max_rows:
+        table += f"\n\n_Showing {max_rows} of {len(rows)} policies — see the sentinel policies summary CSV for the full list._"
+    return table
+
+
+def render_enforcement_distribution(egp: dict[str, Any], rgp: dict[str, Any]) -> str:
+    """How many policies of each kind sit at each enforcement level."""
+    counts: dict[str, dict[str, int]] = {level: {"egp": 0, "rgp": 0} for level in SENTINEL_ENFORCEMENT_LEVELS}
+    other: dict[str, int] = {"egp": 0, "rgp": 0}
+    for kind, collection in (("egp", egp), ("rgp", rgp)):
+        for policies in collection.values():
+            for policy in policies.values():
+                if not isinstance(policy, dict):
+                    continue
+                level = policy.get("enforcement_level")
+                if level in counts:
+                    counts[level][kind] += 1
+                else:
+                    # Unreadable bodies and any level Vault adds later still get
+                    # counted, so the totals here reconcile with the tables below.
+                    other[kind] += 1
+
+    rows: list[list[Any]] = [[level, counts[level]["egp"], counts[level]["rgp"]] for level in SENTINEL_ENFORCEMENT_LEVELS]
+    if other["egp"] or other["rgp"]:
+        rows.append(["unknown", other["egp"], other["rgp"]])
+    if not any(row[1] or row[2] for row in rows):
+        return "_No entries._"
+    return md_table(["Enforcement level", "EGP", "RGP"], rows)
+
+
+def _collect_sentinel_findings(data: AuditData) -> list[Finding]:
+    """Security observations derived from the Sentinel policies collected."""
+    findings: list[Finding] = []
+    for kind, collection in (("egp", data.egp_policies), ("rgp", data.rgp_policies)):
+        for namespace, policies in collection.items():
+            for name, policy in policies.items():
+                if not isinstance(policy, dict):
+                    continue
+                level = policy.get("enforcement_level")
+                if level == "advisory":
+                    findings.append(
+                        Finding(
+                            "Low",
+                            namespace,
+                            name,
+                            kind,
+                            "Enforcement level is `advisory` — the policy logs violations but never blocks a request.",
+                        )
+                    )
+                elif level == "soft-mandatory":
+                    findings.append(
+                        Finding(
+                            "Info",
+                            namespace,
+                            name,
+                            kind,
+                            "Enforcement level is `soft-mandatory` — a caller with a `sudo`-capable token can override it.",
+                        )
+                    )
+
+                paths = policy.get("paths")
+                if kind == "egp" and isinstance(paths, list) and any(p in BROAD_EGP_PATHS for p in paths):
+                    findings.append(
+                        Finding(
+                            "Info",
+                            namespace,
+                            name,
+                            kind,
+                            "Endpoint path is a wildcard — the policy applies to every request in this namespace.",
+                        )
+                    )
+
+                if _is_trivial_policy(policy.get("policy")):
+                    findings.append(
+                        Finding(
+                            "Low",
+                            namespace,
+                            name,
+                            kind,
+                            "Policy body always evaluates to true — it enforces nothing despite appearing in the policy list.",
+                        )
+                    )
+    return findings
+
+
 def collect_findings(data: AuditData, system_max_lease_ttl: int | None = None) -> list[Finding]:
     """Derive security observations from the mount metadata already collected.
 
@@ -403,6 +570,8 @@ def collect_findings(data: AuditData, system_max_lease_ttl: int | None = None) -
                 )
             )
 
+    findings.extend(_collect_sentinel_findings(data))
+
     findings.sort(key=lambda f: (SEVERITY_ORDER.index(f.severity), f.namespace, f.mount))
     return findings
 
@@ -410,7 +579,7 @@ def collect_findings(data: AuditData, system_max_lease_ttl: int | None = None) -
 def render_findings(findings: list[Finding]) -> str:
     """Findings grouped by severity, most severe first."""
     if not findings:
-        return "_No observations — no deprecated plugins, publicly listed auth mounts, long leases or empty namespaces were found._"
+        return "_No observations — no deprecated plugins, publicly listed auth mounts, long leases, empty namespaces or non-blocking Sentinel policies were found._"
 
     sections: list[str] = []
     for severity in SEVERITY_ORDER:
@@ -418,8 +587,32 @@ def render_findings(findings: list[Finding]) -> str:
         if not group:
             continue
         rows = [[display_namespace(f.namespace), f.mount, f.mount_type, f.detail] for f in group]
-        sections.append(f"#### {severity} ({len(group)})\n\n" + md_table(["Namespace", "Mount", "Type", "Observation"], rows))
+        # "Object", not "Mount": the Sentinel checks put a policy name in this
+        # column, and findings that name a whole namespace put a dash in it.
+        sections.append(f"#### {severity} ({len(group)})\n\n" + md_table(["Namespace", "Object", "Type", "Observation"], rows))
     return "\n\n".join(sections)
+
+
+def _access_gap_rows(forbidden: list[tuple[str, str]]) -> list[list[Any]]:
+    """Denial rows, collapsing any reason that applies across the whole tree.
+
+    A handful of denied namespaces is the interesting case and stays listed by
+    name. The same denial repeated across every namespace is one missing policy
+    rule wearing 134 hats, and spelling it out drowns the specific gaps.
+    """
+    by_scope: dict[str, list[str]] = {}
+    for namespace, scope in forbidden:
+        by_scope.setdefault(scope, []).append(namespace)
+
+    rows: list[list[Any]] = []
+    for scope in sorted(by_scope):
+        namespaces = sorted(by_scope[scope])
+        if len(namespaces) <= MAX_ACCESS_GAP_ROWS:
+            rows.extend([namespace, scope] for namespace in namespaces)
+        else:
+            examples = ", ".join(namespaces[:3])
+            rows.append([f"{len(namespaces)} namespaces ({examples}, …)", scope])
+    return rows
 
 
 def render_access_gaps(stats: AuditStats, start_namespace: str) -> str:
@@ -427,7 +620,7 @@ def render_access_gaps(stats: AuditStats, start_namespace: str) -> str:
     parts: list[str] = []
 
     if stats.forbidden_namespaces:
-        rows = [[namespace, scope] for namespace, scope in sorted(stats.forbidden_namespaces)]
+        rows = _access_gap_rows(stats.forbidden_namespaces)
         parts.append(
             "The token was denied access to the following namespaces, so this report is incomplete below these paths:\n\n" + md_table(["Namespace", "What was denied"], rows),
         )
@@ -453,6 +646,7 @@ def _summary_rows(
     worker_threads: int,
     cache_stats: dict[str, Any] | None,
     system_lease_ttls: tuple[int, int] | None = None,
+    sentinel_supported: bool | None = None,
 ) -> list[list[Any]]:
     nodes = _namespace_nodes(data)
     total_auth = sum(len(m) for m in data.auth_methods.values())
@@ -482,6 +676,11 @@ def _summary_rows(
         ["Errors", stats.error_count],
         ["Permission denied (skipped)", stats.forbidden_count],
     ]
+    if sentinel_supported:
+        # Only on a cluster that answered: a pair of zero rows on every
+        # Community report would imply Sentinel was checked and found wanting.
+        rows.append(["Sentinel EGP policies", sum(len(p) for p in data.egp_policies.values())])
+        rows.append(["Sentinel RGP policies", sum(len(p) for p in data.rgp_policies.values())])
     if system_lease_ttls:
         # The ceiling almost every mount inherits, so the reader can judge the
         # override findings below against it rather than against Vault's stock
@@ -504,12 +703,19 @@ def build_markdown_report(
     output_files: list[str] | None = None,
     generated_at: datetime | None = None,
     system_lease_ttls: tuple[int, int] | None = None,
+    sentinel_supported: bool | None = None,
 ) -> str:
     """Render the complete namespace audit report as a markdown document.
 
     ``system_lease_ttls`` is the cluster's ``(default_lease_ttl, max_lease_ttl)``
     in seconds, used to calibrate the lease findings against the cluster's own
     ceiling. None when the token cannot read sys/config/state/sanitized.
+
+    ``sentinel_supported`` is tri-state and the three cases read differently:
+    True means the Sentinel endpoints answered, False means the cluster has none
+    (Community, or Enterprise without Governance & Policy), and None means the
+    collection never ran. "Zero policies" and "no Sentinel at all" are very
+    different findings, so the section never collapses them into one.
     """
     generated = generated_at or datetime.now(UTC)
     system_max = system_lease_ttls[1] if system_lease_ttls else None
@@ -522,6 +728,44 @@ def build_markdown_report(
         ["Starting namespace", display_namespace(start_namespace)],
     ]
 
+    sentinel_sections: list[str] = ["## Sentinel policies", ""]
+    if sentinel_supported is False:
+        sentinel_sections.append(
+            "Sentinel EGP/RGP endpoints are unavailable on this cluster — Vault Community, or an Enterprise licence without the Governance & Policy module. No policies were collected."
+        )
+    elif sentinel_supported is None:
+        # None means no endpoint ever answered, which has two very different
+        # causes. If the token was denied every time, saying "skipped" reads as
+        # "you turned this off" and sends the reader looking for a flag they
+        # never set — so distinguish them from what the denials recorded.
+        if any(scope.startswith("sentinel") for _, scope in stats.forbidden_namespaces):
+            sentinel_sections.append(
+                "The token was denied access to the Sentinel policy endpoints in every namespace, so none were collected. See **Access gaps** above, and grant the `sys/policies/egp` and `sys/policies/rgp` rules from `audit-policy.hcl`."
+            )
+        else:
+            sentinel_sections.append("Sentinel collection was skipped, so this run says nothing about the governing policies in place.")
+    else:
+        egp_total = sum(len(p) for p in data.egp_policies.values())
+        rgp_total = sum(len(p) for p in data.rgp_policies.values())
+        sentinel_sections.extend(
+            [
+                f"{egp_total} endpoint governing polic{'y' if egp_total == 1 else 'ies'} and {rgp_total} role governing polic{'y' if rgp_total == 1 else 'ies'} across the namespaces audited. "
+                "Only `hard-mandatory` policies actually block a request.",
+                "",
+                "### Enforcement levels",
+                "",
+                render_enforcement_distribution(data.egp_policies, data.rgp_policies),
+                "",
+                "### Endpoint governing policies (EGP)",
+                "",
+                render_sentinel_policies(data.egp_policies, "egp"),
+                "",
+                "### Role governing policies (RGP)",
+                "",
+                render_sentinel_policies(data.rgp_policies, "rgp"),
+            ]
+        )
+
     sections = [
         f"# Vault Namespace Audit — {cluster_name}",
         "",
@@ -529,7 +773,7 @@ def build_markdown_report(
         "",
         "## Summary",
         "",
-        md_table(["Metric", "Value"], _summary_rows(data, stats, worker_threads, cache_stats, system_lease_ttls)),
+        md_table(["Metric", "Value"], _summary_rows(data, stats, worker_threads, cache_stats, system_lease_ttls, sentinel_supported)),
         "",
         "## Access gaps",
         "",
@@ -558,6 +802,8 @@ def build_markdown_report(
         render_type_distribution(data.secret_engines, "Secrets engine type"),
         "",
         render_type_matrix(data.secret_engines, "Secrets engines"),
+        "",
+        *sentinel_sections,
         "",
         "## Security observations",
         "",

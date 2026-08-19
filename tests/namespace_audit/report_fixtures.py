@@ -83,6 +83,53 @@ def flagged_data():
     return data
 
 
+def sentinel_policy(name, **overrides):
+    """Build a Sentinel policy the shape Vault returns from a read.
+
+    Defaults to the innocuous case — hard-mandatory with a real rule body — so a
+    test only has to state the one attribute it is exercising.
+    """
+    data = {
+        "name": name,
+        "enforcement_level": "hard-mandatory",
+        "policy": 'import "time"\n\nmain = rule { time.now.unix > 0 }\n',
+    }
+    data.update(overrides)
+    return data
+
+
+@pytest.fixture
+def sentinel_data():
+    """A cluster with one Sentinel policy per finding branch.
+
+    Deliberately separate from clean_data/flagged_data: those two carry
+    finding-count assertions that would silently absorb a regression here.
+    """
+    data = AuditData()
+    data.namespaces = {"team-a": {"id": "abc12", "path": "team-a/", "custom_metadata": {}}}
+    data.auth_methods = {
+        "": {"token/": mount("token"), "oidc/": mount("oidc")},
+        "team-a": {"token/": mount("token"), "approle/": mount("approle")},
+    }
+    data.secret_engines = {
+        "": {"kv/": mount("kv")},
+        "team-a": {"pki/": mount("pki")},
+    }
+    data.egp_policies = {
+        # The control: hard-mandatory, real body, narrow path — no finding.
+        "": {"require-cidr": sentinel_policy("require-cidr", paths=["auth/approle/login"])},
+        "team-a": {
+            "audit-only": sentinel_policy("audit-only", enforcement_level="advisory", paths=["secret/data/*"]),
+            "catch-all": sentinel_policy("catch-all", paths=["*"]),
+            "placeholder": sentinel_policy("placeholder", policy="# TODO: write this properly\nmain = rule { true }\n", paths=["sys/mounts"]),
+        },
+    }
+    data.rgp_policies = {
+        "team-a": {"overridable": sentinel_policy("overridable", enforcement_level="soft-mandatory")},
+    }
+    return data
+
+
 @pytest.fixture
 def finished_stats():
     """Stats from a completed, fully successful run."""

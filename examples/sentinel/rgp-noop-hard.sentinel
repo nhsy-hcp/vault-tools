@@ -1,0 +1,9 @@
+# No-op RGP: the condition is always satisfied, so nothing is ever blocked.
+#
+# Seeded at enforcement_level=hard-mandatory with a genuine rule body, so this
+# is the control case -- the audit report must produce NO finding for it. If one
+# ever appears here, a check has grown too broad.
+
+import "time"
+
+main = rule { time.now.unix > 0 }

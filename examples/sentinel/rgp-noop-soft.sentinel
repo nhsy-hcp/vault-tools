@@ -1,0 +1,8 @@
+# No-op RGP: the condition is always satisfied, so nothing is ever blocked.
+#
+# Seeded at enforcement_level=soft-mandatory, which the report treats as
+# informational: a caller holding a sudo-capable token can override it.
+
+import "time"
+
+main = rule { time.now.unix > 0 }

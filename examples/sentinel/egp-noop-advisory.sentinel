@@ -1,0 +1,12 @@
+# No-op EGP: the condition is always satisfied, so nothing is ever blocked.
+#
+# Seeded at enforcement_level=advisory over a narrow path, so the report's
+# "advisory" finding has something to fire on.
+#
+# The rule is written as a real condition rather than `main = rule { true }` on
+# purpose -- the literal form is what the "always evaluates to true" check
+# looks for, and this policy is meant to exercise one finding, not two.
+
+import "time"
+
+main = rule { time.now.unix > 0 }

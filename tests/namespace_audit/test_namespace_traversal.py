@@ -1,9 +1,16 @@
 """Tests for namespace traversal functionality."""
 
 import queue
-from unittest.mock import MagicMock, Mock
 
 import hvac
+
+from tests.namespace_audit.fixtures import as_context_manager, make_hvac_client
+
+
+def attach(auditor, hvac_client):
+    """Point the auditor's get_client at this mock and hand the mock back."""
+    auditor.vault_client.get_client.return_value = as_context_manager(hvac_client)
+    return hvac_client
 
 
 class TestNamespaceDataFetching:
@@ -11,17 +18,14 @@ class TestNamespaceDataFetching:
 
     def test_fetch_namespace_data_success(self, auditor):
         """Test successful namespace data fetch from non-root namespace."""
-        # Create a proper context manager mock
-        mock_hvac_client = Mock()
-        mock_hvac_client.sys.list_auth_methods.return_value = {"data": {"userpass/": {"type": "userpass"}}}
-        mock_hvac_client.sys.list_mounted_secrets_engines.return_value = {"data": {"secret/": {"type": "kv"}}}
-        mock_hvac_client.sys.list_namespaces.return_value = {"data": {"key_info": {"team-a/": {"id": "123"}}}}
-
-        # Mock the context manager properly using MagicMock to support magic methods
-        mock_context_manager = MagicMock()
-        mock_context_manager.__enter__.return_value = mock_hvac_client
-        mock_context_manager.__exit__.return_value = None
-        auditor.vault_client.get_client.return_value = mock_context_manager
+        attach(
+            auditor,
+            make_hvac_client(
+                list_auth_methods={"data": {"userpass/": {"type": "userpass"}}},
+                list_mounted_secrets_engines={"data": {"secret/": {"type": "kv"}}},
+                list_namespaces={"data": {"key_info": {"team-a/": {"id": "123"}}}},
+            ),
+        )
 
         path_queue = queue.Queue()
         auditor._traverse_namespace("test/", path_queue)
@@ -36,16 +40,8 @@ class TestNamespaceDataFetching:
 
     def test_fetch_namespace_data_invalid_path(self, auditor):
         """Test namespace data fetch with invalid path."""
-        mock_hvac_client = Mock()
-        mock_hvac_client.sys.list_auth_methods.return_value = {"data": {}}
-        mock_hvac_client.sys.list_mounted_secrets_engines.return_value = {"data": {}}
-        mock_hvac_client.sys.list_namespaces.side_effect = hvac.exceptions.InvalidPath()
-
-        # Mock the context manager properly using MagicMock to support magic methods
-        mock_context_manager = MagicMock()
-        mock_context_manager.__enter__.return_value = mock_hvac_client
-        mock_context_manager.__exit__.return_value = None
-        auditor.vault_client.get_client.return_value = mock_context_manager
+        client = attach(auditor, make_hvac_client())
+        client.sys.list_namespaces.side_effect = hvac.exceptions.InvalidPath()
 
         path_queue = queue.Queue()
         auditor._traverse_namespace("test/", path_queue)
@@ -56,14 +52,8 @@ class TestNamespaceDataFetching:
 
     def test_fetch_namespace_data_forbidden(self, auditor):
         """Test namespace data fetch with forbidden access."""
-        mock_hvac_client = Mock()
-        mock_hvac_client.sys.list_auth_methods.side_effect = hvac.exceptions.Forbidden()
-
-        # Mock the context manager properly using MagicMock to support magic methods
-        mock_context_manager = MagicMock()
-        mock_context_manager.__enter__.return_value = mock_hvac_client
-        mock_context_manager.__exit__.return_value = None
-        auditor.vault_client.get_client.return_value = mock_context_manager
+        client = attach(auditor, make_hvac_client())
+        client.sys.list_auth_methods.side_effect = hvac.exceptions.Forbidden()
 
         path_queue = queue.Queue()
         auditor._traverse_namespace("test/", path_queue)
@@ -76,14 +66,8 @@ class TestNamespaceDataFetching:
 
     def test_traverse_namespace_error_handling(self, auditor):
         """Test error handling during namespace traversal."""
-        # Mock an unexpected exception
-        mock_hvac_client = Mock()
-        mock_hvac_client.sys.list_auth_methods.side_effect = Exception("Unexpected error")
-
-        mock_context_manager = MagicMock()
-        mock_context_manager.__enter__.return_value = mock_hvac_client
-        mock_context_manager.__exit__.return_value = None
-        auditor.vault_client.get_client.return_value = mock_context_manager
+        client = attach(auditor, make_hvac_client())
+        client.sys.list_auth_methods.side_effect = Exception("Unexpected error")
 
         path_queue = queue.Queue()
         auditor._traverse_namespace("test/", path_queue)
@@ -98,15 +82,14 @@ class TestNamespacePathProcessing:
 
     def test_root_namespace_processing(self, auditor):
         """Test processing the root namespace."""
-        mock_hvac_client = Mock()
-        mock_hvac_client.sys.list_auth_methods.return_value = {"data": {"token/": {"type": "token"}}}
-        mock_hvac_client.sys.list_mounted_secrets_engines.return_value = {"data": {"sys/": {"type": "system"}}}
-        mock_hvac_client.sys.list_namespaces.return_value = {"data": {"key_info": {"prod/": {"id": "456"}}}}
-
-        mock_context_manager = MagicMock()
-        mock_context_manager.__enter__.return_value = mock_hvac_client
-        mock_context_manager.__exit__.return_value = None
-        auditor.vault_client.get_client.return_value = mock_context_manager
+        attach(
+            auditor,
+            make_hvac_client(
+                list_auth_methods={"data": {"token/": {"type": "token"}}},
+                list_mounted_secrets_engines={"data": {"sys/": {"type": "system"}}},
+                list_namespaces={"data": {"key_info": {"prod/": {"id": "456"}}}},
+            ),
+        )
 
         path_queue = queue.Queue()
         # Root namespace is represented as empty string ""
@@ -122,15 +105,14 @@ class TestNamespacePathProcessing:
 
     def test_nested_namespace_processing(self, auditor):
         """Test that deeply nested namespaces still discover their own children."""
-        mock_hvac_client = Mock()
-        mock_hvac_client.sys.list_auth_methods.return_value = {"data": {"ldap/": {"type": "ldap"}}}
-        mock_hvac_client.sys.list_mounted_secrets_engines.return_value = {"data": {"database/": {"type": "database"}}}
-        mock_hvac_client.sys.list_namespaces.return_value = {"data": {"key_info": {"dev/": {"id": "789"}}}}
-
-        mock_context_manager = MagicMock()
-        mock_context_manager.__enter__.return_value = mock_hvac_client
-        mock_context_manager.__exit__.return_value = None
-        auditor.vault_client.get_client.return_value = mock_context_manager
+        attach(
+            auditor,
+            make_hvac_client(
+                list_auth_methods={"data": {"ldap/": {"type": "ldap"}}},
+                list_mounted_secrets_engines={"data": {"database/": {"type": "database"}}},
+                list_namespaces={"data": {"key_info": {"dev/": {"id": "789"}}}},
+            ),
+        )
 
         path_queue = queue.Queue()
         auditor._traverse_namespace("prod/team-a/", path_queue)
@@ -144,15 +126,7 @@ class TestNamespacePathProcessing:
 
     def test_already_visited_child_is_not_requeued(self, auditor):
         """A namespace reported twice is only enqueued once."""
-        mock_hvac_client = Mock()
-        mock_hvac_client.sys.list_auth_methods.return_value = {"data": {}}
-        mock_hvac_client.sys.list_mounted_secrets_engines.return_value = {"data": {}}
-        mock_hvac_client.sys.list_namespaces.return_value = {"data": {"key_info": {"dev/": {"id": "789"}}}}
-
-        mock_context_manager = MagicMock()
-        mock_context_manager.__enter__.return_value = mock_hvac_client
-        mock_context_manager.__exit__.return_value = None
-        auditor.vault_client.get_client.return_value = mock_context_manager
+        attach(auditor, make_hvac_client(list_namespaces={"data": {"key_info": {"dev/": {"id": "789"}}}}))
 
         path_queue = queue.Queue()
         auditor._traverse_namespace("prod/", path_queue)
@@ -168,15 +142,8 @@ class TestNamespacePathProcessing:
 
     def test_empty_namespace_processing(self, auditor):
         """Test processing namespace with no auth methods or secret engines."""
-        mock_hvac_client = Mock()
-        mock_hvac_client.sys.list_auth_methods.return_value = {"data": {}}
-        mock_hvac_client.sys.list_mounted_secrets_engines.return_value = {"data": {}}
-        mock_hvac_client.sys.list_namespaces.side_effect = hvac.exceptions.InvalidPath()
-
-        mock_context_manager = MagicMock()
-        mock_context_manager.__enter__.return_value = mock_hvac_client
-        mock_context_manager.__exit__.return_value = None
-        auditor.vault_client.get_client.return_value = mock_context_manager
+        client = attach(auditor, make_hvac_client())
+        client.sys.list_namespaces.side_effect = hvac.exceptions.InvalidPath()
 
         path_queue = queue.Queue()
         auditor._traverse_namespace("empty/", path_queue)
@@ -185,3 +152,105 @@ class TestNamespacePathProcessing:
         assert "empty" in auditor.data.secret_engines
         assert auditor.data.auth_methods["empty"] == {}
         assert auditor.data.secret_engines["empty"] == {}
+
+
+class TestSentinelPolicyCollection:
+    """EGP/RGP collection, and the Enterprise-vs-Community degradation."""
+
+    def _with_policies(self, auditor):
+        client = attach(
+            auditor,
+            make_hvac_client(
+                list_egp_policies={"data": {"keys": ["deny-root"]}},
+                list_rgp_policies={"data": {"keys": ["require-mfa"]}},
+                read_egp_policy={"data": {"name": "deny-root", "enforcement_level": "advisory", "paths": ["*"], "policy": "main = rule { true }"}},
+                read_rgp_policy={"data": {"name": "require-mfa", "enforcement_level": "hard-mandatory", "policy": "main = rule { true }"}},
+            ),
+        )
+        return client
+
+    def test_policies_are_stored_per_namespace(self, auditor):
+        self._with_policies(auditor)
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert auditor.data.egp_policies["team-a"]["deny-root"]["enforcement_level"] == "advisory"
+        assert auditor.data.rgp_policies["team-a"]["require-mfa"]["enforcement_level"] == "hard-mandatory"
+        assert auditor.sentinel_supported is True
+
+    def test_unsupported_path_marks_the_cluster_and_is_not_an_error(self, auditor):
+        """Community and unlicensed Enterprise 404 with 'unsupported path'."""
+        client = attach(auditor, make_hvac_client())
+        client.sys.list_egp_policies.side_effect = hvac.exceptions.InvalidPath("1 error occurred:\n\t* unsupported path\n\n")
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert auditor.sentinel_supported is False
+        assert auditor.stats.error_count == 0
+        assert auditor.stats.forbidden_count == 0
+        assert auditor.data.egp_policies == {}
+
+    def test_unsupported_cluster_is_probed_only_once(self, auditor):
+        """The short-circuit caps a Community run at two extra API calls."""
+        client = attach(auditor, make_hvac_client())
+        client.sys.list_egp_policies.side_effect = hvac.exceptions.InvalidPath("unsupported path")
+
+        auditor._traverse_namespace("a/", queue.Queue())
+        auditor._traverse_namespace("b/", queue.Queue())
+        auditor._traverse_namespace("c/", queue.Queue())
+
+        assert client.sys.list_egp_policies.call_count == 1
+        assert client.sys.list_rgp_policies.call_count == 0
+
+    def test_plain_invalid_path_means_no_policies_not_no_sentinel(self, auditor):
+        """Vault 404s an empty LIST too — that must not disable collection."""
+        client = attach(auditor, make_hvac_client())
+        client.sys.list_egp_policies.side_effect = hvac.exceptions.InvalidPath()
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert auditor.sentinel_supported is True
+        assert auditor.data.egp_policies == {}
+        assert auditor.stats.error_count == 0
+
+    def test_forbidden_list_is_recorded_as_an_access_gap(self, auditor):
+        client = attach(auditor, make_hvac_client())
+        client.sys.list_egp_policies.side_effect = hvac.exceptions.Forbidden()
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert ("team-a/", "sentinel EGP policies") in auditor.stats.forbidden_namespaces
+        assert auditor.stats.error_count == 0
+        # The rest of the namespace was still collected.
+        assert "team-a" in auditor.data.auth_methods
+
+    def test_unreadable_policy_keeps_the_name_and_records_one_gap(self, auditor):
+        """40 denied reads in a namespace must not become 40 access-gap rows."""
+        client = attach(auditor, make_hvac_client(list_egp_policies={"data": {"keys": ["a", "b", "c"]}}))
+        client.sys.read_egp_policy.side_effect = hvac.exceptions.Forbidden()
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert set(auditor.data.egp_policies["team-a"]) == {"a", "b", "c"}
+        assert "read_error" in auditor.data.egp_policies["team-a"]["a"]
+        gaps = [g for g in auditor.stats.forbidden_namespaces if "policy bodies" in g[1]]
+        assert len(gaps) == 1
+
+    def test_collection_can_be_disabled(self, auditor):
+        auditor.collect_sentinel = False
+        client = self._with_policies(auditor)
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert client.sys.list_egp_policies.call_count == 0
+        assert auditor.data.egp_policies == {}
+        assert auditor.sentinel_supported is None
+
+    def test_namespaces_without_policies_get_no_entry(self, auditor):
+        """An empty dict per namespace would put a blank row in every table."""
+        attach(auditor, make_hvac_client())
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert "team-a" not in auditor.data.egp_policies
+        assert "team-a" not in auditor.data.rgp_policies

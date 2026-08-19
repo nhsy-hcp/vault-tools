@@ -85,10 +85,12 @@ python main.py namespace-audit --workers 8 --output-dir custom-output
 python main.py namespace-audit --help
 ```
 
-Each run writes seven files to the output directory: three JSON dumps of the raw
-API responses, three CSV summaries, and a markdown report,
+Each run writes up to nine files to the output directory: up to four JSON dumps
+of the raw API responses, up to four CSV summaries, and a markdown report,
 `{cluster-name}-audit-report-{YYYYMMDD}.md`. The report is written on every run —
-there is no flag to enable or suppress it.
+there is no flag to enable or suppress it. The two Sentinel files are written
+only on a cluster that has Sentinel policies, and the CSV summaries are skipped
+when they would be empty, so a small cluster produces fewer files.
 
 The report is the human-readable view of the audit and contains:
 
@@ -103,12 +105,18 @@ The report is the human-readable view of the audit and contains:
 - **Type distribution** — how many mounts of each auth method and secrets engine
   type exist and in how many namespaces, plus a per-namespace matrix for smaller
   clusters.
+- **Sentinel policies** — the endpoint- and role-governing policies in force per
+  namespace, with their enforcement levels, the endpoints an EGP covers and the
+  size of each policy body. Vault Enterprise with the Governance & Policy module
+  only; see below.
 - **Security observations** — prompts for review derived from mount metadata:
   deprecated or pending-removal plugins, auth mounts enumerable by
   unauthenticated callers (`listing_visibility: unauth`), mounts whose
   `max_lease_ttl` overrides the cluster ceiling, non-replicated `local` mounts,
-  namespaces with no auth method beyond the built-in token backend, and leaf
-  namespaces holding nothing but Vault's own built-in engines.
+  namespaces with no auth method beyond the built-in token backend, leaf
+  namespaces holding nothing but Vault's own built-in engines, and Sentinel
+  policies that do not actually block anything (`advisory` or `soft-mandatory`
+  enforcement, a wildcard EGP path, or a body that is empty or comments only).
 - **Output files** — an index of the sibling JSON and CSV files from the same run.
 
 These observations are review prompts, not a compliance verdict — informational
@@ -128,6 +136,28 @@ Mounts that leave `max_lease_ttl` at `0` are deliberately *not* flagged. Zero
 means "inherit the system default", not "unlimited" — on a typical cluster
 upwards of 99% of mounts sit at zero, so reporting them would bury every other
 finding.
+
+#### Sentinel policies
+
+`sys/policies/egp` and `sys/policies/rgp` exist only on Vault Enterprise with the
+Governance & Policy module. Everywhere else they return 404, which the audit
+detects once and then stops probing — a Community run costs a single extra API
+call and reports **Sentinel EGP/RGP endpoints are unavailable on this cluster**
+rather than "zero policies found". The two readings mean very different things,
+so the report never collapses them. Pass `--no-sentinel` to skip the collection
+entirely; the section then says so explicitly.
+
+Policy bodies are not rendered into the report — a Sentinel policy runs to dozens
+of lines and there can be one per namespace. The report gives a line count, and
+the full source goes to `{cluster-name}-sentinel-policies-{YYYYMMDD}.json` for
+diffing between runs.
+
+To exercise this against a local cluster, `task seed:sentinel` writes five no-op
+policies from [`examples/sentinel/`](examples/sentinel) — one per enforcement
+level, a wildcard EGP path, a comments-only body, and a hard-mandatory control
+that must produce no finding. Every one of them evaluates to `true`
+unconditionally, so nothing is ever blocked. `task unseed:sentinel` removes them.
+Both accept namespaces: `task seed:sentinel -- team-a/ team-b/`.
 
 ### Activity Export
 
@@ -218,6 +248,11 @@ Two things to know about the policy:
 - **`sys/config/state/sanitized` is optional.** It supplies the cluster's lease
   TTLs, which calibrate the audit report's lease findings. Removing the rule
   degrades those findings to a fixed threshold; it does not fail the run.
+- **The `sys/policies/egp` and `sys/policies/rgp` rules are optional too.** They
+  cover the Sentinel section and are Enterprise-Premium-only, so on any other
+  cluster they grant nothing. Removing them leaves that section empty; denying
+  them mid-run puts the affected namespaces in **Access gaps** rather than
+  failing the audit.
 
 If the token lacks `sys/namespaces` at some level, the audit stops descending
 there and reports the namespaces it did reach. The **Permission Denied (skipped)**

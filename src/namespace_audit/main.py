@@ -112,6 +112,12 @@ class AuditData:
     namespaces: dict[str, Any] = field(default_factory=dict)
     auth_methods: dict[str, Any] = field(default_factory=dict)
     secret_engines: dict[str, Any] = field(default_factory=dict)
+    # Sentinel governing policies, keyed the same way as the two collections
+    # above: namespace -> {policy name: {enforcement_level, paths, policy}}.
+    # EGP entries carry "paths"; RGP entries do not. Both stay empty on any
+    # cluster without the Enterprise Governance & Policy module.
+    egp_policies: dict[str, Any] = field(default_factory=dict)
+    rgp_policies: dict[str, Any] = field(default_factory=dict)
 
 
 class NamespaceAuditor:
@@ -125,6 +131,7 @@ class NamespaceAuditor:
         output_dir: str = "outputs",
         worker_queue_timeout: int = 300,
         queue_depth_warn_threshold: int = 10_000,
+        collect_sentinel: bool = True,
     ):
         self.vault_client = vault_client
         self.worker_threads = worker_threads
@@ -134,6 +141,7 @@ class NamespaceAuditor:
         self.output_dir = output_dir
         self.worker_queue_timeout = worker_queue_timeout
         self.queue_depth_warn_threshold = queue_depth_warn_threshold
+        self.collect_sentinel = collect_sentinel
         self._queue_depth_warned = False
         self.stats = AuditStats()
         self.data = AuditData()
@@ -153,6 +161,16 @@ class NamespaceAuditor:
         # (default_lease_ttl, max_lease_ttl) for the cluster, or None if the
         # token cannot read it. Calibrates the report's lease findings.
         self.system_lease_ttls: tuple[int, int] | None = None
+        # Tri-state, mutated by worker threads under thread_lock. None = never
+        # probed (collection disabled, or no namespace reached); True = the
+        # endpoint answered at least once; False = the cluster has no Sentinel,
+        # which short-circuits every later probe. The report distinguishes all
+        # three, because "no policies" and "no Sentinel" are different answers.
+        self.sentinel_supported: bool | None = None
+        # First-denial-per-namespace guard for the per-policy reads, so a
+        # namespace holding 40 unreadable policies contributes one access-gap
+        # row rather than 40. Keyed by (namespace, kind); guarded by thread_lock.
+        self._sentinel_read_denied: set[tuple[str, str]] = set()
 
     def audit_cluster(self, namespace_path: str = ""):
         start_time = time.time()
@@ -322,6 +340,91 @@ class NamespaceAuditor:
             logger.debug(f"Could not read sys/config/state/sanitized ({e}); lease findings will use the fixed threshold")
         return None
 
+    def _fetch_sentinel_policies(self, client: Any, display_path: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Collect this namespace's Sentinel EGP and RGP policies.
+
+        Returns ``(egp, rgp)``, each mapping policy name to its full definition.
+        Both are empty when Sentinel is unavailable — the endpoints exist only on
+        Vault Enterprise with the Governance & Policy module, and the audit must
+        run unchanged on Community.
+        """
+        if not self.collect_sentinel or self.sentinel_supported is False:
+            return {}, {}
+        egp = self._list_and_read(client, "egp", display_path)
+        # Re-check between the two: if the EGP probe just discovered the cluster
+        # has no Sentinel, the RGP probe would only 404 the same way. A whole
+        # Community run therefore costs a single wasted API call.
+        if self.sentinel_supported is False:
+            return {}, {}
+        return egp, self._list_and_read(client, "rgp", display_path)
+
+    def _mark_sentinel_supported(self) -> None:
+        """Record that a Sentinel endpoint answered.
+
+        False is sticky: "unsupported path" is a property of the cluster, not of
+        one namespace, so a later success cannot be evidence against it — and
+        letting True win a race would restart the probing this flag exists to
+        stop.
+        """
+        with self.thread_lock:
+            if self.sentinel_supported is None:
+                self.sentinel_supported = True
+
+    def _list_and_read(self, client: Any, kind: str, display_path: str) -> dict[str, Any]:
+        """List one Sentinel policy kind in the current namespace and read each body.
+
+        The LIST is where the cluster's capability is decided, and Vault makes
+        that awkward: it answers 404 both for "this build has no Sentinel" and
+        for "this namespace has zero policies", so only the error body tells them
+        apart. Hence the string check below — a heuristic, but one whose failure
+        mode is benign: if Vault ever reworks the message the short-circuit stops
+        firing and every namespace simply re-probes to an empty result.
+        """
+        try:
+            lister = client.sys.list_egp_policies if kind == "egp" else client.sys.list_rgp_policies
+            names = lister()["data"]["keys"] or []
+        except hvac.exceptions.InvalidPath as e:
+            if "unsupported path" in str(e).lower():
+                with self.thread_lock:
+                    first = self.sentinel_supported is None
+                    self.sentinel_supported = False
+                if first:
+                    logger.info("Sentinel policy endpoints are unavailable on this cluster; skipping EGP/RGP collection")
+                return {}
+            # An empty LIST also 404s. Nothing to collect, but the endpoint is there.
+            logger.debug(f"No sentinel {kind.upper()} policies in {display_path}")
+            self._mark_sentinel_supported()
+            return {}
+        except hvac.exceptions.Forbidden:
+            logger.warning(f"Permission denied listing sentinel {kind.upper()} policies for: {display_path}")
+            self.stats.increment_forbidden(display_path, f"sentinel {kind.upper()} policies")
+            return {}
+        except Exception as e:
+            logger.error(f"Error listing sentinel {kind.upper()} policies for {display_path}: {e}")
+            self.stats.increment_errors(display_path, f"sentinel {kind.upper()} policies: {e}")
+            return {}
+
+        self._mark_sentinel_supported()
+
+        reader = client.sys.read_egp_policy if kind == "egp" else client.sys.read_rgp_policy
+        policies: dict[str, Any] = {}
+        for name in names:
+            try:
+                policies[name] = reader(name)["data"]
+            except Exception as e:
+                # Keep the name: that a policy exists is worth reporting even when
+                # its body is unreadable. One access-gap row per namespace and
+                # kind, not one per policy — a namespace with 40 denied reads
+                # would otherwise swamp the whole section.
+                logger.warning(f"Could not read sentinel {kind.upper()} policy '{name}' in {display_path}: {e}")
+                policies[name] = {"name": name, "read_error": str(e)}
+                with self.thread_lock:
+                    already_recorded = (display_path, kind) in self._sentinel_read_denied
+                    self._sentinel_read_denied.add((display_path, kind))
+                if not already_recorded:
+                    self.stats.increment_forbidden(display_path, f"sentinel {kind.upper()} policy bodies")
+        return policies
+
     def _refresh_progress(self) -> None:
         """Push current discovered/processed counts to the progress bar.
 
@@ -407,6 +510,8 @@ class NamespaceAuditor:
                 secret_engines = client.sys.list_mounted_secrets_engines()["data"]
                 logger.debug(f"Found {len(secret_engines)} secret engines for namespace: {display_path}")
 
+                egp_policies, rgp_policies = self._fetch_sentinel_policies(client, display_path)
+
                 with self.thread_lock:
                     # Store namespace_path without trailing slash if not root
                     stored_namespace_path = namespace_path.rstrip("/") if namespace_path != "" else ""
@@ -414,6 +519,12 @@ class NamespaceAuditor:
                     self.data.auth_methods[stored_namespace_path] = auth_methods
                     logger.debug(f"Storing secrets engines for namespace '{stored_namespace_path}': {len(secret_engines)} entries")
                     self.data.secret_engines[stored_namespace_path] = secret_engines
+                    # Only recorded where present: an entry per namespace on a
+                    # Community cluster would put an empty row in every table.
+                    if egp_policies:
+                        self.data.egp_policies[stored_namespace_path] = egp_policies
+                    if rgp_policies:
+                        self.data.rgp_policies[stored_namespace_path] = rgp_policies
 
                 # Every namespace is asked for its children, so the queue walks
                 # the whole tree rather than stopping one level below the
@@ -499,15 +610,30 @@ class NamespaceAuditor:
         logger.debug(f"Writing secrets engines JSON with {len(self.data.secret_engines)} namespace entries")
         write_json(path_for("secrets-engines", "json"), convert_namespace_keys(self.data.secret_engines))
 
+        # Sentinel is Enterprise-only, so this file is written only when there is
+        # something in it — an empty dump on a Community cluster reads as a
+        # collection failure rather than as "this cluster has no Sentinel".
+        if self.data.egp_policies or self.data.rgp_policies:
+            logger.debug(f"Writing sentinel policies JSON with {len(self.data.egp_policies)} EGP and {len(self.data.rgp_policies)} RGP namespace entries")
+            write_json(
+                path_for("sentinel-policies", "json"),
+                {
+                    "egp": convert_namespace_keys(self.data.egp_policies),
+                    "rgp": convert_namespace_keys(self.data.rgp_policies),
+                },
+            )
+
         # Write CSV summaries
         self._write_namespace_summary(path_for("summary-namespaces", "csv"))
         self._write_auth_methods_summary(path_for("summary-auth-methods", "csv"))
         self._write_secrets_engines_summary(path_for("summary-secrets-engines", "csv"))
+        self._write_sentinel_summary(path_for("summary-sentinel-policies", "csv"))
 
         # Write the human-readable report last so it can index the files above.
         # Existence is checked rather than assumed: the CSV summary writers
-        # return early when they have no rows, so a root-only cluster produces
-        # fewer than six files and listing all six would send the reader after
+        # return early when they have no rows and the Sentinel pair is skipped
+        # entirely off Enterprise, so a root-only Community cluster produces five
+        # of the eight and listing all eight would send the reader after
         # something that was never written.
         candidates = [
             path_for(kind, extension)
@@ -515,9 +641,11 @@ class NamespaceAuditor:
                 ("namespaces", "json"),
                 ("auth-methods", "json"),
                 ("secrets-engines", "json"),
+                ("sentinel-policies", "json"),
                 ("summary-namespaces", "csv"),
                 ("summary-auth-methods", "csv"),
                 ("summary-secrets-engines", "csv"),
+                ("summary-sentinel-policies", "csv"),
             )
         ]
         sibling_files = [os.path.basename(p) for p in candidates if os.path.exists(p)]
@@ -546,6 +674,7 @@ class NamespaceAuditor:
                 cache_stats=cache_stats,
                 output_files=sibling_files,
                 system_lease_ttls=self.system_lease_ttls,
+                sentinel_supported=self.sentinel_supported,
             )
             write_markdown(file_path, content)
             self.console.print(f"[green]✓[/green] Markdown report: [bold]{file_path}[/bold]")
@@ -560,6 +689,35 @@ class NamespaceAuditor:
         df["path"] = df.index
         df = df[["path", "id", "custom_metadata"]]
         write_csv(file_path, df.to_dict("records"), df.columns.tolist())
+
+    def _write_sentinel_summary(self, file_path: str):
+        """One row per Sentinel policy across both kinds.
+
+        Written with write_csv directly rather than through pandas: the rows are
+        already uniform, so there is no matrix to reshape the way the auth and
+        engine summaries need.
+        """
+        rows = []
+        for kind, collection in (("egp", self.data.egp_policies), ("rgp", self.data.rgp_policies)):
+            for namespace, policies in collection.items():
+                for name, policy in policies.items():
+                    body = policy.get("policy", "") if isinstance(policy, dict) else ""
+                    paths = policy.get("paths") if isinstance(policy, dict) else None
+                    rows.append(
+                        {
+                            "namespace": namespace,
+                            "kind": kind,
+                            "name": name,
+                            "enforcement_level": policy.get("enforcement_level", "") if isinstance(policy, dict) else "",
+                            "paths": ",".join(paths) if isinstance(paths, list) else "",
+                            "policy_lines": len(body.splitlines()) if isinstance(body, str) else 0,
+                        }
+                    )
+
+        if not rows:
+            return
+
+        write_csv(file_path, rows, ["namespace", "kind", "name", "enforcement_level", "paths", "policy_lines"])
 
     def _write_auth_methods_summary(self, file_path: str):
         self._write_item_summary(file_path, self.data.auth_methods, "auth_methods")

@@ -1,0 +1,11 @@
+# A policy that does nothing at all.
+#
+# It compiles, Vault stores it, and it shows up in the policy list looking like
+# a control -- but the rule is the literal `true`, so every request passes. That
+# is what the audit report's "always evaluates to true" finding exists to catch,
+# so do not add a real condition here.
+//
+// Both comment syntaxes appear on purpose: the check strips "#" and "//" before
+// looking at the rule, and a comment above it must not hide it.
+
+main = rule { true }

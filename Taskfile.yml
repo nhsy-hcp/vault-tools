@@ -43,6 +43,16 @@ tasks:
       - echo ""
       - vault server -dev -dev-root-token-id=root
 
+  seed:sentinel:
+    desc: "Write no-op Sentinel EGP/RGP policies for testing (usage: task seed:sentinel -- [namespace ...])"
+    cmds:
+      - ./scripts/seed-sentinel-policies.sh {{.CLI_ARGS}}
+
+  unseed:sentinel:
+    desc: "Remove the no-op Sentinel policies written by seed:sentinel"
+    cmds:
+      - ./scripts/seed-sentinel-policies.sh --delete {{.CLI_ARGS}}
+
   clean:
     desc: "Remove build artifacts, temporary files, and cache"
     cmds:

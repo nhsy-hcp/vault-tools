@@ -9,6 +9,41 @@ from src.common.vault_client import VaultClient
 from src.namespace_audit.main import NamespaceAuditor
 
 
+def make_hvac_client(**overrides):
+    """Build a mock hvac client with every endpoint the traversal calls stubbed.
+
+    Use this rather than a bare ``Mock()``: an unstubbed ``list_egp_policies()``
+    returns a Mock, and ``Mock`` has no ``__getitem__``, so the collector's
+    ``[...]["keys"]`` raises TypeError and the traversal records a spurious
+    error. Stubbing centrally means adding a collector does not break every test
+    in this package.
+
+    Pass ``sys.``-prefixed names as keyword arguments to override one endpoint,
+    e.g. ``make_hvac_client(list_namespaces={"data": {"key_info": {}}})``.
+    """
+    client = Mock()
+    defaults = {
+        "list_auth_methods": {"data": {}},
+        "list_mounted_secrets_engines": {"data": {}},
+        "list_namespaces": {"data": {"key_info": {}}},
+        "list_egp_policies": {"data": {"keys": []}},
+        "list_rgp_policies": {"data": {"keys": []}},
+        "read_egp_policy": {"data": {}},
+        "read_rgp_policy": {"data": {}},
+    }
+    for name, value in {**defaults, **overrides}.items():
+        getattr(client.sys, name).return_value = value
+    return client
+
+
+def as_context_manager(hvac_client):
+    """Wrap a mock hvac client the way VaultClient.get_client yields it."""
+    manager = MagicMock()
+    manager.__enter__.return_value = hvac_client
+    manager.__exit__.return_value = None
+    return manager
+
+
 @pytest.fixture
 def mock_vault_client():
     """Create a properly configured mock VaultClient."""
@@ -37,6 +72,14 @@ def mock_vault_client():
     mock_hvac_client.sys.list_auth_methods.return_value = {"data": {"userpass/": {"type": "userpass"}}}
     mock_hvac_client.sys.list_mounted_secrets_engines.return_value = {"data": {"secret/": {"type": "kv"}}}
     mock_hvac_client.sys.list_namespaces.return_value = {"data": {"key_info": {"team-a/": {"id": "123"}}}}
+    # Sentinel defaults are not optional: mock_hvac_client is a bare Mock, so an
+    # unstubbed list_egp_policies() returns a Mock whose ["data"]["keys"] is
+    # another Mock, which then fails to iterate — breaking every traversal test
+    # rather than just the Sentinel ones. Empty keys is the common case anyway.
+    mock_hvac_client.sys.list_egp_policies.return_value = {"data": {"keys": []}}
+    mock_hvac_client.sys.list_rgp_policies.return_value = {"data": {"keys": []}}
+    mock_hvac_client.sys.read_egp_policy.return_value = {"data": {}}
+    mock_hvac_client.sys.read_rgp_policy.return_value = {"data": {}}
 
     mock_context_manager.__enter__.return_value = mock_hvac_client
     mock_context_manager.__exit__.return_value = None

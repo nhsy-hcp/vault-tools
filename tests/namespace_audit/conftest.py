@@ -22,6 +22,7 @@ from tests.namespace_audit.report_fixtures import (
     denied_stats,
     finished_stats,
     flagged_data,
+    sentinel_data,
 )
 
 
@@ -65,5 +66,6 @@ __all__ = [
     "mock_vault_responses",
     "populated_auditor",
     "sample_audit_data",
+    "sentinel_data",
     "temp_dir",
 ]

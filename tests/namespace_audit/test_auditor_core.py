@@ -221,6 +221,68 @@ class TestReportGeneration:
             content = mock_write_markdown.call_args.args[1]
             assert "test-cluster-namespaces-" not in content
 
+    def test_no_sentinel_files_when_the_cluster_has_none(self, auditor):
+        """An empty dump on Community reads as a collection failure, not as
+        'this cluster has no Sentinel' — so it is not written at all."""
+        auditor.data.auth_methods = {"": {"token/": {"type": "token"}}}
+        auditor.data.secret_engines = {"": {"kv/": {"type": "kv"}}}
+
+        with mock_file_operations() as (mock_write_json, mock_write_csv):
+            auditor._write_reports("test-cluster")
+
+            assert not [c for c in mock_write_json.call_args_list if "sentinel" in c.args[0]]
+            assert not [c for c in mock_write_csv.call_args_list if "sentinel" in c.args[0]]
+
+    def test_sentinel_json_carries_both_kinds_and_the_policy_bodies(self, auditor):
+        auditor.data.auth_methods = {"": {"token/": {"type": "token"}}}
+        auditor.data.egp_policies = {"": {"deny-root": {"enforcement_level": "advisory", "paths": ["*"], "policy": "main = rule { true }"}}}
+        auditor.data.rgp_policies = {"team-a": {"require-mfa": {"enforcement_level": "hard-mandatory", "policy": "main = rule { true }"}}}
+
+        with mock_file_operations() as (mock_write_json, _):
+            auditor._write_reports("test-cluster")
+
+            call = next(c for c in mock_write_json.call_args_list if "sentinel-policies" in c.args[0])
+            payload = call.args[1]
+            # The root key is normalised to "/" the same way the other dumps do it.
+            assert payload["egp"]["/"]["deny-root"]["policy"] == "main = rule { true }"
+            assert payload["rgp"]["team-a"]["require-mfa"]["enforcement_level"] == "hard-mandatory"
+
+    def test_sentinel_csv_has_one_row_per_policy(self, auditor):
+        auditor.data.auth_methods = {"": {"token/": {"type": "token"}}}
+        auditor.data.egp_policies = {"": {"deny-root": {"enforcement_level": "advisory", "paths": ["sys/*", "auth/*"], "policy": "a\nb\nc\n"}}}
+        auditor.data.rgp_policies = {"team-a": {"require-mfa": {"enforcement_level": "hard-mandatory", "policy": "x\n"}}}
+
+        with mock_file_operations() as (_, mock_write_csv):
+            auditor._write_reports("test-cluster")
+
+            rows = next(c for c in mock_write_csv.call_args_list if "summary-sentinel-policies" in c.args[0]).args[1]
+
+            assert len(rows) == 2
+            egp_row = next(r for r in rows if r["kind"] == "egp")
+            assert egp_row == {
+                "namespace": "",
+                "kind": "egp",
+                "name": "deny-root",
+                "enforcement_level": "advisory",
+                "paths": "sys/*,auth/*",
+                "policy_lines": 3,
+            }
+            # RGP has no paths field at all; the column stays present but empty.
+            assert next(r for r in rows if r["kind"] == "rgp")["paths"] == ""
+
+    def test_sentinel_csv_tolerates_an_unreadable_policy(self, auditor):
+        """A denied read stores a placeholder; the summary must still write."""
+        auditor.data.auth_methods = {"": {"token/": {"type": "token"}}}
+        auditor.data.egp_policies = {"": {"denied": {"name": "denied", "read_error": "permission denied"}}}
+
+        with mock_file_operations() as (_, mock_write_csv):
+            auditor._write_reports("test-cluster")
+
+            rows = next(c for c in mock_write_csv.call_args_list if "summary-sentinel-policies" in c.args[0]).args[1]
+
+            assert rows[0]["enforcement_level"] == ""
+            assert rows[0]["policy_lines"] == 0
+
     def test_report_failure_does_not_sink_a_completed_audit(self, auditor):
         """The JSON/CSV files are already on disk; a rendering bug must not raise."""
         with (

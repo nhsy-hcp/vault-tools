@@ -145,6 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
     # Namespace Audit command
     parser_audit = subparsers.add_parser("namespace-audit", help="Audit Vault namespaces.", parents=[common])
     parser_audit.add_argument("-w", "--workers", type=int, default=4, help="Number of worker threads.")
+    parser_audit.add_argument(
+        "--no-sentinel",
+        action="store_true",
+        help="Skip Sentinel EGP/RGP policy collection. Costs one LIST plus one read per policy per namespace on Vault Enterprise; a no-op elsewhere.",
+    )
 
     # Activity Export command
     parser_activity = subparsers.add_parser("activity-export", help="Export activity data.", parents=[common])
@@ -178,6 +183,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=4,
         help="Number of worker threads for namespace audit.",
+    )
+    parser_all.add_argument(
+        "--no-sentinel",
+        action="store_true",
+        help="Skip Sentinel EGP/RGP policy collection during the namespace audit.",
     )
 
     return parser
@@ -248,6 +258,7 @@ def main() -> None:
                 vault_client,
                 worker_threads=args.workers,
                 output_dir=global_config.output_dir,
+                collect_sentinel=not args.no_sentinel,
             )
             auditor.audit_cluster()
             logger.info("command_execution_completed", command="namespace-audit")
@@ -306,6 +317,7 @@ def main() -> None:
                 vault_client,
                 worker_threads=args.workers,
                 output_dir=global_config.output_dir,
+                collect_sentinel=not args.no_sentinel,
             )
             auditor.audit_cluster()
             logger.info("subcommand_completed", subcommand="namespace-audit")

@@ -3,6 +3,7 @@
 from src.namespace_audit.main import AuditData, AuditStats
 from src.namespace_audit.report import (
     LONG_MAX_LEASE_TTL_SECONDS,
+    _is_trivial_policy,
     build_markdown_report,
     build_namespace_tree,
     collect_findings,
@@ -11,9 +12,11 @@ from src.namespace_audit.report import (
     md_escape,
     md_table,
     render_access_gaps,
+    render_enforcement_distribution,
     render_findings,
     render_namespace_inventory,
     render_namespace_tree,
+    render_sentinel_policies,
     render_type_distribution,
     render_type_matrix,
 )
@@ -22,7 +25,7 @@ from src.namespace_audit.report import (
 # finished_stats/denied_stats fixtures are registered in conftest.py — importing
 # them into this module too would shadow the fixture in every test signature
 # that requests one (ruff F811).
-from .report_fixtures import mount
+from .report_fixtures import mount, sentinel_policy
 
 
 class TestMarkdownPrimitives:
@@ -342,6 +345,127 @@ class TestFormatTtl:
         assert collect_findings(data)  # the token-only finding still fires
 
 
+class TestTrivialPolicyDetection:
+    """What a do-nothing Sentinel policy actually looks like on a real cluster.
+
+    Not an empty body: Vault refuses those at write time with "every policy must
+    have a main rule". The reachable case is a main rule of literal `true`.
+    """
+
+    def test_always_true_rule_is_trivial(self):
+        assert _is_trivial_policy("main = rule { true }")
+
+    def test_comments_do_not_hide_the_rule(self):
+        assert _is_trivial_policy("# placeholder\n// for now\nmain = rule { true }\n")
+
+    def test_wrapped_rule_is_still_recognised(self):
+        assert _is_trivial_policy("main = rule {\n    true\n}\n")
+
+    def test_empty_body_is_trivial(self):
+        """Unreachable through Vault's own endpoint, but cheap to catch."""
+        assert _is_trivial_policy("")
+
+    def test_comments_only_body_is_trivial(self):
+        assert _is_trivial_policy("# nothing yet\n\n// still nothing\n")
+
+    def test_real_condition_is_not_trivial(self):
+        assert not _is_trivial_policy('import "time"\n\nmain = rule { time.now.unix > 0 }\n')
+
+    def test_rule_returning_a_named_value_is_not_trivial(self):
+        """Only the literal `true` counts — `truthy` must not match."""
+        assert not _is_trivial_policy("main = rule { truthy }")
+
+    def test_extra_rules_alongside_the_true_main_are_not_trivial(self):
+        assert not _is_trivial_policy('allowed = rule { request.operation is "read" }\nmain = rule { true }')
+
+    def test_unreadable_body_is_not_trivial(self):
+        """A denied read leaves no body at all — absence is not emptiness."""
+        assert not _is_trivial_policy(None)
+
+
+class TestSentinelRendering:
+    def test_egp_table_lists_paths_and_line_count(self, sentinel_data):
+        rendered = render_sentinel_policies(sentinel_data.egp_policies, "egp")
+
+        assert "| Namespace | Policy | Enforcement | Paths | Lines |" in rendered
+        assert "| team-a/ | audit-only | advisory | secret/data/* | 3 |" in rendered
+
+    def test_rgp_table_omits_the_paths_column(self, sentinel_data):
+        """RGP policies bind to roles, not endpoints — there is no paths field."""
+        rendered = render_sentinel_policies(sentinel_data.rgp_policies, "rgp")
+
+        assert "| Namespace | Policy | Enforcement | Lines |" in rendered
+        assert "Paths" not in rendered
+
+    def test_empty_collection_renders_a_placeholder(self):
+        assert render_sentinel_policies({}, "egp") == "_No entries._"
+
+    def test_truncates_past_the_cap(self):
+        collection = {"": {f"p{i:03d}": sentinel_policy(f"p{i:03d}") for i in range(50)}}
+
+        rendered = render_sentinel_policies(collection, "rgp", max_rows=10)
+
+        assert "Showing 10 of 50 policies" in rendered
+
+    def test_enforcement_distribution_counts_both_kinds(self, sentinel_data):
+        rendered = render_enforcement_distribution(sentinel_data.egp_policies, sentinel_data.rgp_policies)
+
+        assert "| hard-mandatory | 3 | 0 |" in rendered
+        assert "| soft-mandatory | 0 | 1 |" in rendered
+        assert "| advisory | 1 | 0 |" in rendered
+
+    def test_unreadable_policies_are_counted_as_unknown(self):
+        """A denied read still means a policy exists; the totals must reconcile."""
+        collection = {"": {"denied": {"name": "denied", "read_error": "permission denied"}}}
+
+        rendered = render_enforcement_distribution(collection, {})
+
+        assert "| unknown | 1 | 0 |" in rendered
+
+    def test_distribution_is_empty_when_there_are_no_policies(self):
+        assert render_enforcement_distribution({}, {}) == "_No entries._"
+
+
+class TestSentinelFindings:
+    def test_flags_advisory_enforcement(self, sentinel_data):
+        matches = [f for f in collect_findings(sentinel_data) if "`advisory`" in f.detail]
+
+        assert len(matches) == 1
+        assert matches[0].severity == "Low"
+        assert matches[0].mount == "audit-only"
+        assert matches[0].mount_type == "egp"
+
+    def test_flags_soft_mandatory_as_informational(self, sentinel_data):
+        matches = [f for f in collect_findings(sentinel_data) if "`soft-mandatory`" in f.detail]
+
+        assert len(matches) == 1
+        assert matches[0].severity == "Info"
+        assert matches[0].mount_type == "rgp"
+
+    def test_flags_wildcard_egp_paths(self, sentinel_data):
+        matches = [f for f in collect_findings(sentinel_data) if "every request" in f.detail]
+
+        assert [f.mount for f in matches] == ["catch-all"]
+
+    def test_flags_comments_only_body(self, sentinel_data):
+        matches = [f for f in collect_findings(sentinel_data) if "enforces nothing" in f.detail]
+
+        assert [f.mount for f in matches] == ["placeholder"]
+
+    def test_hard_mandatory_policy_with_a_real_body_is_not_flagged(self, sentinel_data):
+        """The control case: if this ever fires, a check has grown too broad."""
+        assert not [f for f in collect_findings(sentinel_data) if f.mount == "require-cidr"]
+
+    def test_cluster_without_sentinel_produces_no_sentinel_findings(self, clean_data):
+        assert collect_findings(clean_data) == []
+
+    def test_findings_column_is_headed_object_not_mount(self, sentinel_data):
+        """Policy names share the column with mount paths."""
+        rendered = render_findings(collect_findings(sentinel_data))
+
+        assert "| Namespace | Object | Type | Observation |" in rendered
+
+
 class TestAccessGaps:
     def test_reports_none_when_nothing_was_denied(self, finished_stats):
         rendered = render_access_gaps(finished_stats, "")
@@ -363,6 +487,32 @@ class TestAccessGaps:
 
         assert "broken/" in rendered
         assert "connection reset" in rendered
+
+    def test_a_cluster_wide_denial_collapses_to_one_row(self):
+        """A missing policy rule denies every namespace; 134 rows would bury the
+        specific gaps this section exists to surface."""
+        stats = AuditStats()
+        for i in range(40):
+            stats.increment_forbidden(f"ns{i:03d}/", "sentinel EGP policies")
+        stats.increment_forbidden("restricted/", "whole namespace (no data collected)")
+
+        rendered = render_access_gaps(stats, "")
+
+        assert "| 40 namespaces (ns000/, ns001/, ns002/, …) | sentinel EGP policies |" in rendered
+        # The one-off denial is still named individually.
+        assert "| restricted/ | whole namespace (no data collected) |" in rendered
+
+    def test_a_handful_of_denials_are_still_listed_by_name(self):
+        """Below the cap nothing is collapsed — naming them is the whole point."""
+        stats = AuditStats()
+        for name in ("alpha/", "beta/", "gamma/"):
+            stats.increment_forbidden(name, "sentinel RGP policies")
+
+        rendered = render_access_gaps(stats, "")
+
+        for name in ("alpha/", "beta/", "gamma/"):
+            assert f"| {name} | sentinel RGP policies |" in rendered
+        assert "namespaces (" not in rendered
 
     def test_unattributed_denials_are_still_reported(self):
         """Bare increment_forbidden() calls record a count but no path."""
@@ -502,3 +652,53 @@ class TestFullReport:
 
         assert "# Vault Namespace Audit — prod" in report
         assert "_No namespaces recorded._" in report
+
+
+class TestSentinelSection:
+    """The tri-state: answered, absent from the cluster, or never asked."""
+
+    def test_supported_cluster_renders_the_tables(self, sentinel_data, finished_stats):
+        report = build_markdown_report("prod", sentinel_data, finished_stats, sentinel_supported=True)
+
+        assert "## Sentinel policies" in report
+        assert "### Enforcement levels" in report
+        assert "### Endpoint governing policies (EGP)" in report
+        assert "### Role governing policies (RGP)" in report
+        assert "4 endpoint governing policies and 1 role governing policy" in report
+
+    def test_supported_cluster_gets_summary_totals(self, sentinel_data, finished_stats):
+        report = build_markdown_report("prod", sentinel_data, finished_stats, sentinel_supported=True)
+
+        assert "| Sentinel EGP policies | 4 |" in report
+        assert "| Sentinel RGP policies | 1 |" in report
+
+    def test_unsupported_cluster_says_so_and_renders_no_tables(self, clean_data, finished_stats):
+        """Community must not read as 'Sentinel checked, zero policies found'."""
+        report = build_markdown_report("prod", clean_data, finished_stats, sentinel_supported=False)
+
+        assert "## Sentinel policies" in report
+        assert "endpoints are unavailable on this cluster" in report
+        assert "### Enforcement levels" not in report
+        # And no zero-valued summary rows implying a check that did not happen.
+        assert "Sentinel EGP policies" not in report
+
+    def test_skipped_collection_is_distinct_from_unavailable(self, clean_data, finished_stats):
+        report = build_markdown_report("prod", clean_data, finished_stats, sentinel_supported=None)
+
+        assert "Sentinel collection was skipped" in report
+        assert "### Enforcement levels" not in report
+
+    def test_denied_everywhere_does_not_read_as_skipped(self, clean_data):
+        """Otherwise the reader hunts for a --no-sentinel they never passed."""
+        stats = AuditStats()
+        stats.increment_forbidden("team-a/", "sentinel EGP policies")
+
+        report = build_markdown_report("prod", clean_data, stats, sentinel_supported=None)
+
+        assert "denied access to the Sentinel policy endpoints" in report
+        assert "Sentinel collection was skipped" not in report
+
+    def test_section_sits_between_type_distribution_and_observations(self, sentinel_data, finished_stats):
+        report = build_markdown_report("prod", sentinel_data, finished_stats, sentinel_supported=True)
+
+        assert report.index("## Type distribution") < report.index("## Sentinel policies") < report.index("## Security observations")

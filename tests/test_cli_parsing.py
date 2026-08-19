@@ -41,6 +41,23 @@ class TestGlobalFlagPositions:
         args = _build_parser().parse_args(["namespace-audit", "-w", "8"])
         assert args.workers == 8
 
+    @pytest.mark.parametrize(
+        "argv",
+        [["namespace-audit"], ["all", "-s", "2026-01-01", "-e", "2026-01-31"]],
+        ids=["namespace-audit", "all"],
+    )
+    def test_no_sentinel_defaults_to_collecting(self, argv):
+        assert _build_parser().parse_args(argv).no_sentinel is False
+
+    @pytest.mark.parametrize(
+        "argv",
+        [["namespace-audit"], ["all", "-s", "2026-01-01", "-e", "2026-01-31"]],
+        ids=["namespace-audit", "all"],
+    )
+    def test_no_sentinel_parses_on_both_subcommands(self, argv):
+        """Both constructions of NamespaceAuditor read this flag."""
+        assert _build_parser().parse_args([*argv, "--no-sentinel"]).no_sentinel is True
+
     @pytest.mark.parametrize("argv", [["namespace-audit", "-n", "team-a/"], ["all", "-s", "2026-01-01", "-e", "2026-01-31", "-n", "team-a/"]])
     def test_namespace_flag_is_gone(self, argv):
         """--namespace was removed: it only ever scoped the audit, never the exports."""
