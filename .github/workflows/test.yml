@@ -16,11 +16,22 @@ jobs:
       with:
         python-version: '3.12'
 
+    # The official action rather than `curl | sh`: it puts uv on PATH itself,
+    # which the hand-rolled version got wrong. It exported $HOME/.cargo/bin
+    # while the installer writes to $HOME/.local/bin, so the PATH step was dead
+    # and uv resolved only because .local/bin happens to be on the runner's
+    # default PATH -- working by accident, and silently, until it didn't.
+    #
+    # enable-cache keys uv's download cache on uv.lock, so a run that does not
+    # change dependencies stops re-fetching every wheel.
+    #
+    # Pinned to an exact patch tag, unlike the actions/* steps above: this repo
+    # publishes floating major tags only up to v7, so there is no @v10 to track.
+    # Bump it by hand.
     - name: Install uv
-      run: curl -LsSf https://astral.sh/uv/install.sh | sh
-
-    - name: Add uv to PATH
-      run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      uses: astral-sh/setup-uv@v10.0.1
+      with:
+        enable-cache: true
 
     - name: Install dependencies
       run: uv sync --extra dev
