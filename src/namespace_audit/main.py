@@ -34,6 +34,20 @@ logger = logging.getLogger(__name__)
 # out and has to put it back — printing the pause instead would corrupt the bar.
 PROGRESS_DESCRIPTION = "[cyan]Processing namespaces..."
 
+# ACL policies Vault provisions in every namespace. Excluded from the inventory
+# because they are present everywhere and so say nothing about how a particular
+# namespace is configured -- 266 of the 1,499 policies on the reference cluster.
+#
+# "default-ceiling" is the non-obvious one. It is not documented as a built-in,
+# but it appears in every namespace with a byte-identical body granting self-read
+# on agent-registry/registration/entity_id/{{identity.entity.id}} -- and
+# agent_registry is already treated as a Vault-managed mount in report.py's
+# BUILTIN_ENGINE_TYPES.
+#
+# Matched exactly, never by prefix: a user-defined "default-admin" or
+# "default-ceiling-override" is real configuration and must still be listed.
+BUILTIN_ACL_POLICIES = frozenset({"default", "root", "default-ceiling"})
+
 
 class Constants:
     DEFAULT_WORKER_THREADS = 4
@@ -123,6 +137,11 @@ class AuditData:
     # cluster without the Enterprise Governance & Policy module.
     egp_policies: dict[str, Any] = field(default_factory=dict)
     rgp_policies: dict[str, Any] = field(default_factory=dict)
+    # ACL policy names per namespace, sorted, with the Vault built-ins removed.
+    # Unlike the Sentinel dicts this keeps the key even when the list is empty:
+    # "this namespace defines no policies of its own" is a real answer, and on
+    # the reference cluster 12 namespaces are in exactly that state.
+    acl_policies: dict[str, list[str]] = field(default_factory=dict)
 
 
 class NamespaceAuditor:
@@ -346,6 +365,36 @@ class NamespaceAuditor:
             logger.debug(f"Could not read sys/config/state/sanitized ({e}); lease findings will use the fixed threshold")
         return None
 
+    def _fetch_acl_policies(self, client: Any, display_path: str) -> list[str]:
+        """List this namespace's own ACL policy names.
+
+        Names only -- the bodies are deliberately not read. That would need
+        `read` on sys/policies/acl/*, which lets the audit token reconstruct the
+        cluster's entire access model; listing needs only `list`.
+
+        Simpler than the Sentinel collector: sys/policies/acl exists on every
+        Vault edition, so there is no capability to probe for and no tri-state.
+        """
+        try:
+            names = client.sys.list_acl_policies()["data"]["keys"] or []
+        except hvac.exceptions.InvalidPath:
+            # Vault 404s an empty LIST. Every namespace has at least "default",
+            # so this is unlikely in practice, but it is not an error.
+            logger.debug(f"No ACL policies in {display_path}")
+            return []
+        except hvac.exceptions.Forbidden:
+            # Debug, not warning -- see the note in _list_and_read: one line per
+            # namespace would print straight through the live progress bar.
+            logger.debug(f"Permission denied listing ACL policies for: {display_path}")
+            self.stats.increment_forbidden(display_path, "ACL policies")
+            return []
+        except Exception as e:
+            logger.error(f"Error listing ACL policies for {display_path}: {e}")
+            self.stats.increment_errors(display_path, f"ACL policies: {e}")
+            return []
+
+        return sorted(n for n in names if n not in BUILTIN_ACL_POLICIES)
+
     def _fetch_sentinel_policies(self, client: Any, display_path: str) -> tuple[dict[str, Any], dict[str, Any]]:
         """Collect this namespace's Sentinel EGP and RGP policies.
 
@@ -538,6 +587,7 @@ class NamespaceAuditor:
                 secret_engines = client.sys.list_mounted_secrets_engines()["data"]
                 logger.debug(f"Found {len(secret_engines)} secret engines for namespace: {display_path}")
 
+                acl_policies = self._fetch_acl_policies(client, display_path)
                 egp_policies, rgp_policies = self._fetch_sentinel_policies(client, display_path)
 
                 with self.thread_lock:
@@ -547,6 +597,9 @@ class NamespaceAuditor:
                     self.data.auth_methods[stored_namespace_path] = auth_methods
                     logger.debug(f"Storing secrets engines for namespace '{stored_namespace_path}': {len(secret_engines)} entries")
                     self.data.secret_engines[stored_namespace_path] = secret_engines
+                    # Stored unconditionally, empty list included: a namespace
+                    # defining no policies of its own is a real answer.
+                    self.data.acl_policies[stored_namespace_path] = acl_policies
                     # Only recorded where present: an entry per namespace on a
                     # Community cluster would put an empty row in every table.
                     if egp_policies:
@@ -639,6 +692,13 @@ class NamespaceAuditor:
         logger.debug(f"Writing secrets engines JSON with {len(self.data.secret_engines)} namespace entries")
         write_json(path_for("secrets-engines", "json"), convert_namespace_keys(self.data.secret_engines))
 
+        # Unlike the Sentinel dump this is written whenever a namespace was
+        # reached: ACL policies exist on every Vault edition, so an empty file
+        # means "nothing defined", not "unsupported".
+        if self.data.acl_policies:
+            logger.debug(f"Writing ACL policies JSON with {len(self.data.acl_policies)} namespace entries")
+            write_json(path_for("acl-policies", "json"), convert_namespace_keys(self.data.acl_policies))
+
         # Sentinel is Enterprise-only, so this file is written only when there is
         # something in it — an empty dump on a Community cluster reads as a
         # collection failure rather than as "this cluster has no Sentinel".
@@ -656,6 +716,7 @@ class NamespaceAuditor:
         self._write_namespace_summary(path_for("summary-namespaces", "csv"))
         self._write_auth_methods_summary(path_for("summary-auth-methods", "csv"))
         self._write_secrets_engines_summary(path_for("summary-secrets-engines", "csv"))
+        self._write_acl_summary(path_for("summary-acl-policies", "csv"))
         self._write_sentinel_summary(path_for("summary-sentinel-policies", "csv"))
 
         # Write the human-readable report last so it can index the files above.
@@ -670,10 +731,12 @@ class NamespaceAuditor:
                 ("namespaces", "json"),
                 ("auth-methods", "json"),
                 ("secrets-engines", "json"),
+                ("acl-policies", "json"),
                 ("sentinel-policies", "json"),
                 ("summary-namespaces", "csv"),
                 ("summary-auth-methods", "csv"),
                 ("summary-secrets-engines", "csv"),
+                ("summary-acl-policies", "csv"),
                 ("summary-sentinel-policies", "csv"),
             )
         ]
@@ -734,6 +797,21 @@ class NamespaceAuditor:
         df["path"] = df.index
         df = df[["path", "id", "custom_metadata"]]
         write_csv(file_path, df.to_dict("records"), df.columns.tolist())
+
+    def _write_acl_summary(self, file_path: str):
+        """One row per ACL policy.
+
+        The markdown table groups by namespace for readability; this keeps the
+        flat grain so the file can be grepped and pivoted. Namespaces with no
+        policies of their own contribute no row -- the report already shows them
+        as zero, and a row with an empty policy column would not survive a grep.
+        """
+        rows = [{"namespace": namespace, "policy": name} for namespace, names in self.data.acl_policies.items() for name in names]
+
+        if not rows:
+            return
+
+        write_csv(file_path, rows, ["namespace", "policy"])
 
     def _write_sentinel_summary(self, file_path: str):
         """One row per Sentinel policy across both kinds.

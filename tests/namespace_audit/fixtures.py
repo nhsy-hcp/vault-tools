@@ -26,6 +26,7 @@ def make_hvac_client(**overrides):
         "list_auth_methods": {"data": {}},
         "list_mounted_secrets_engines": {"data": {}},
         "list_namespaces": {"data": {"key_info": {}}},
+        "list_acl_policies": {"data": {"keys": []}},
         "list_egp_policies": {"data": {"keys": []}},
         "list_rgp_policies": {"data": {"keys": []}},
         "read_egp_policy": {"data": {}},
@@ -60,6 +61,7 @@ def mock_vault_client():
     mock_hvac_client.sys.list_auth_methods.return_value = {"data": {"userpass/": {"type": "userpass"}}}
     mock_hvac_client.sys.list_mounted_secrets_engines.return_value = {"data": {"secret/": {"type": "kv"}}}
     mock_hvac_client.sys.list_namespaces.return_value = {"data": {"key_info": {"team-a/": {"id": "123"}}}}
+    mock_hvac_client.sys.list_acl_policies.return_value = {"data": {"keys": []}}
     # Sentinel defaults are not optional: mock_hvac_client is a bare Mock, so an
     # unstubbed list_egp_policies() returns a Mock whose ["data"]["keys"] is
     # another Mock, which then fails to iterate — breaking every traversal test

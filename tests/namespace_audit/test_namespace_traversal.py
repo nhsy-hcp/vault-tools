@@ -154,6 +154,72 @@ class TestNamespacePathProcessing:
         assert auditor.data.secret_engines["empty"] == {}
 
 
+class TestAclPolicyCollection:
+    """Names only, with Vault's own everywhere-policies filtered out."""
+
+    def test_names_are_stored_sorted(self, auditor):
+        attach(auditor, make_hvac_client(list_acl_policies={"data": {"keys": ["kv-writer", "admin", "auditor"]}}))
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert auditor.data.acl_policies["team-a"] == ["admin", "auditor", "kv-writer"]
+
+    def test_builtin_policies_are_excluded(self, auditor):
+        attach(auditor, make_hvac_client(list_acl_policies={"data": {"keys": ["default", "root", "default-ceiling", "admin"]}}))
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert auditor.data.acl_policies["team-a"] == ["admin"]
+
+    def test_exclusion_is_exact_not_a_prefix(self, auditor):
+        """`default-ceiling` is excluded, but a user policy that merely starts
+        with `default` is real configuration and must survive."""
+        keys = ["default", "default-admin", "default-ceiling", "default-ceiling-override", "rooted"]
+        attach(auditor, make_hvac_client(list_acl_policies={"data": {"keys": keys}}))
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert auditor.data.acl_policies["team-a"] == ["default-admin", "default-ceiling-override", "rooted"]
+
+    def test_namespace_with_only_builtins_still_gets_a_key(self, auditor):
+        """Twelve namespaces on the reference cluster are in this state. An
+        absent key would read as 'not audited' rather than 'nothing defined'."""
+        attach(auditor, make_hvac_client(list_acl_policies={"data": {"keys": ["default", "default-ceiling"]}}))
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert auditor.data.acl_policies["team-a"] == []
+
+    def test_forbidden_is_recorded_as_an_access_gap(self, auditor):
+        client = attach(auditor, make_hvac_client())
+        client.sys.list_acl_policies.side_effect = hvac.exceptions.Forbidden()
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert ("team-a/", "ACL policies") in auditor.stats.forbidden_namespaces
+        assert auditor.stats.error_count == 0
+        # The rest of the namespace was still collected.
+        assert "team-a" in auditor.data.auth_methods
+
+    def test_invalid_path_yields_an_empty_list(self, auditor):
+        client = attach(auditor, make_hvac_client())
+        client.sys.list_acl_policies.side_effect = hvac.exceptions.InvalidPath()
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert auditor.data.acl_policies["team-a"] == []
+        assert auditor.stats.error_count == 0
+
+    def test_unexpected_error_is_counted_not_swallowed(self, auditor):
+        client = attach(auditor, make_hvac_client())
+        client.sys.list_acl_policies.side_effect = RuntimeError("boom")
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert auditor.stats.error_count == 1
+        assert auditor.data.acl_policies["team-a"] == []
+
+
 class TestSentinelPolicyCollection:
     """EGP/RGP collection, and the Enterprise-vs-Community degradation."""
 

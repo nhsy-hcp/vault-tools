@@ -12,6 +12,7 @@ from src.namespace_audit.report import (
     md_escape,
     md_table,
     render_access_gaps,
+    render_acl_policies,
     render_enforcement_distribution,
     render_findings,
     render_namespace_inventory,
@@ -345,6 +346,43 @@ class TestFormatTtl:
         assert collect_findings(data)  # the token-only finding still fires
 
 
+class TestAclPolicyRendering:
+    def test_lists_policies_per_namespace(self):
+        rendered = render_acl_policies({"": ["dex-admin", "vault-tools-audit"], "team-a": ["admin", "kv-writer"]})
+
+        assert "| Namespace | Count | Policies |" in rendered
+        assert "| / | 2 | dex-admin, vault-tools-audit |" in rendered
+        assert "| team-a/ | 2 | admin, kv-writer |" in rendered
+
+    def test_namespace_with_none_renders_zero_and_a_dash(self):
+        """Twelve namespaces on the reference cluster hold only built-ins.
+        Dropping the row would read as 'not audited', not 'nothing defined'."""
+        rendered = render_acl_policies({"admin": []})
+
+        assert "| admin/ | 0 | — |" in rendered
+
+    def test_long_name_lists_are_capped(self):
+        names = [f"policy-{i:02d}" for i in range(25)]
+
+        rendered = render_acl_policies({"team-a": names}, max_names=15)
+
+        assert "policy-14" in rendered
+        assert "policy-15" not in rendered
+        assert "… (+10 more)" in rendered
+        # The count column still reports the true total.
+        assert "| team-a/ | 25 |" in rendered
+
+    def test_truncates_past_the_row_cap(self):
+        collection = {f"ns{i:03d}": ["admin"] for i in range(50)}
+
+        rendered = render_acl_policies(collection, max_rows=10)
+
+        assert "Showing 10 of 50 namespaces" in rendered
+
+    def test_empty_collection(self):
+        assert render_acl_policies({}) == "_No entries._"
+
+
 class TestTrivialPolicyDetection:
     """What a do-nothing Sentinel policy actually looks like on a real cluster.
 
@@ -644,6 +682,36 @@ class TestFullReport:
 
         assert "# Vault Namespace Audit — prod" in report
         assert "_No namespaces recorded._" in report
+
+
+class TestAclSection:
+    def test_section_sits_before_sentinel_policies(self, clean_data, finished_stats):
+        clean_data.acl_policies = {"": ["dex-admin"], "team-a": ["admin"]}
+
+        report = build_markdown_report("prod", clean_data, finished_stats)
+
+        assert "## ACL policies" in report
+        assert report.index("## Type distribution") < report.index("## ACL policies") < report.index("## Sentinel policies")
+
+    def test_preamble_names_the_excluded_builtins(self, clean_data, finished_stats):
+        """Otherwise a reader wonders why `default` is missing everywhere."""
+        report = build_markdown_report("prod", clean_data, finished_stats)
+
+        assert "`default`, `root` and `default-ceiling`" in report
+
+    def test_summary_reports_the_total(self, clean_data, finished_stats):
+        clean_data.acl_policies = {"": ["a", "b"], "team-a": ["c"]}
+
+        report = build_markdown_report("prod", clean_data, finished_stats)
+
+        assert "| ACL policies | 3 |" in report
+
+    def test_total_is_reported_even_when_zero(self, clean_data, finished_stats):
+        """Unlike the Sentinel rows: ACL exists on every edition, so zero is a
+        real measurement rather than a check that never ran."""
+        report = build_markdown_report("prod", clean_data, finished_stats)
+
+        assert "| ACL policies | 0 |" in report
 
 
 class TestSentinelSection:

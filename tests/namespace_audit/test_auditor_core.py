@@ -258,6 +258,43 @@ class TestReportGeneration:
             content = mock_write_markdown.call_args.args[1]
             assert "test-cluster-namespaces-" not in content
 
+    def test_acl_json_is_keyed_by_namespace(self, auditor):
+        auditor.data.auth_methods = {"": {"token/": {"type": "token"}}}
+        auditor.data.acl_policies = {"": ["dex-admin"], "team-a": ["admin", "kv-writer"]}
+
+        with mock_file_operations() as (mock_write_json, _):
+            auditor._write_reports("test-cluster")
+
+            payload = next(c for c in mock_write_json.call_args_list if "acl-policies" in c.args[0]).args[1]
+
+            # Root normalised to "/" the same way the other dumps do it.
+            assert payload == {"/": ["dex-admin"], "team-a": ["admin", "kv-writer"]}
+
+    def test_acl_csv_has_one_row_per_policy(self, auditor):
+        """Flat grain here; the markdown table is the grouped view."""
+        auditor.data.auth_methods = {"": {"token/": {"type": "token"}}}
+        auditor.data.acl_policies = {"": ["dex-admin"], "team-a": ["admin", "kv-writer"], "empty": []}
+
+        with mock_file_operations() as (_, mock_write_csv):
+            auditor._write_reports("test-cluster")
+
+            rows = next(c for c in mock_write_csv.call_args_list if "summary-acl-policies" in c.args[0]).args[1]
+
+            assert rows == [
+                {"namespace": "", "policy": "dex-admin"},
+                {"namespace": "team-a", "policy": "admin"},
+                {"namespace": "team-a", "policy": "kv-writer"},
+            ]
+
+    def test_no_acl_files_when_nothing_was_collected(self, auditor):
+        auditor.data.auth_methods = {"": {"token/": {"type": "token"}}}
+
+        with mock_file_operations() as (mock_write_json, mock_write_csv):
+            auditor._write_reports("test-cluster")
+
+            assert not [c for c in mock_write_json.call_args_list if "acl-policies" in c.args[0]]
+            assert not [c for c in mock_write_csv.call_args_list if "summary-acl-policies" in c.args[0]]
+
     def test_no_sentinel_files_when_the_cluster_has_none(self, auditor):
         """An empty dump on Community reads as a collection failure, not as
         'this cluster has no Sentinel' — so it is not written at all."""

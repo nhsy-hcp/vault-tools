@@ -215,14 +215,22 @@ All tools write to configurable output directory (default: `outputs/`) with cons
 - Filename pattern: `{cluster-name}-{data-type}-{YYYYMMDD}.{ext}`
 - **Configurable**: Set `VAULT_TOOLS_OUTPUT_DIR` environment variable
 
-`namespace-audit` writes up to nine files per run: up to four JSON, up to four
+`namespace-audit` writes up to eleven files per run: up to five JSON, up to five
 CSV, and `{cluster-name}-audit-report-{YYYYMMDD}.md`. The report is always
 written; there is no flag to enable or suppress it. The count is a maximum, not a
 guarantee: the CSV summary writers return early when they have no rows, and the
 Sentinel pair (`sentinel-policies.json`, `summary-sentinel-policies.csv`) is
 skipped entirely unless policies were collected — so a root-only Community
-cluster produces five. The report's "Output files" index checks existence rather
+cluster produces six. The report's "Output files" index checks existence rather
 than assuming the full set.
+
+The two ACL files differ from each other on purpose. `acl-policies.json` is
+written whenever a namespace was reached, even if every list is empty: ACL
+policies exist on every Vault edition, so "nothing defined" is a real result
+worth recording per namespace. `summary-acl-policies.csv` is skipped when there
+are no rows, because a CSV of nothing but a header is not useful to grep. On a
+run where the token is denied `sys/policies/acl` everywhere you therefore get
+the JSON with 134 empty lists, no CSV, and the reason in **Access gaps**.
 
 ### Console output vs logging
 
@@ -253,6 +261,30 @@ could not fire; the only paths that do reach `get()` are not in that prefix list
 It reported `Hits: 0 | Misses: 1` on every run. Reinstating one only makes sense
 alongside a call path that actually re-reads something — note the `visited` set
 already guarantees each namespace is walked once.
+
+### ACL policy collection
+
+`NamespaceAuditor._fetch_acl_policies()` lists `sys/policies/acl` once per
+namespace via hvac's `list_acl_policies()` and stores the sorted names on
+`AuditData.acl_policies`.
+
+- **Names only, and the ACL rule grants `list` not `read`.** Bodies would need
+  `read` on `sys/policies/acl/*`, which lets the audit token reconstruct the
+  cluster's entire access model. Do not add that grant to widen a report.
+- **No tri-state.** Unlike Sentinel, `sys/policies/acl` exists on every Vault
+  edition, so there is nothing to probe for and no `"unsupported path"`
+  heuristic. `Forbidden` still logs at debug for the reason given below.
+- **`BUILTIN_ACL_POLICIES` is matched exactly, never by prefix.** It holds
+  `default`, `root` and `default-ceiling` — all present in every namespace, 266
+  of the 1,499 policies on the reference cluster. `default-ceiling` is included
+  because it grants self-read on `agent-registry/...` and `agent_registry` is
+  already a built-in mount type here. A `startswith("default")` would wrongly
+  swallow a user-defined `default-admin`.
+- **The key is stored even when the list is empty**, unlike the Sentinel dicts.
+  Twelve namespaces on the reference cluster define nothing of their own, and an
+  absent key would render as "not audited" rather than "nothing here".
+- The markdown table groups by namespace (133 rows); the CSV keeps one row per
+  policy (1,233 rows) as the greppable grain.
 
 ### Sentinel EGP/RGP collection
 

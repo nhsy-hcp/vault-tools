@@ -85,8 +85,8 @@ python main.py namespace-audit --workers 8 --output-dir custom-output
 python main.py namespace-audit --help
 ```
 
-Each run writes up to nine files to the output directory: up to four JSON dumps
-of the raw API responses, up to four CSV summaries, and a markdown report,
+Each run writes up to eleven files to the output directory: up to five JSON
+dumps of the raw API responses, up to five CSV summaries, and a markdown report,
 `{cluster-name}-audit-report-{YYYYMMDD}.md`. The report is written on every run —
 there is no flag to enable or suppress it. The two Sentinel files are written
 only on a cluster that has Sentinel policies, and the CSV summaries are skipped
@@ -112,6 +112,10 @@ The report is the human-readable view of the audit and contains:
 - **Type distribution** — how many mounts of each auth method and secrets engine
   type exist and in how many namespaces, plus a per-namespace matrix for smaller
   clusters.
+- **ACL policies** — the policies each namespace defines, one row per
+  namespace. Vault's own `default`, `root` and `default-ceiling` exist in every
+  namespace and are excluded, so a namespace showing `0` genuinely defines
+  none of its own. Names only — the tool never reads policy bodies.
 - **Sentinel policies** — the endpoint- and role-governing policies in force per
   namespace, with their enforcement levels, the endpoints an EGP covers and the
   size of each policy body. Vault Enterprise with the Governance & Policy module
@@ -256,6 +260,12 @@ Two things to know about the policy:
 - **`sys/config/state/sanitized` is optional.** It supplies the cluster's lease
   TTLs, which calibrate the audit report's lease findings. Removing the rule
   degrades those findings to a fixed threshold; it does not fail the run.
+- **`sys/policies/acl` is granted `list`, never `read`.** Listing yields policy
+  names, which is all the ACL inventory needs. `read` would yield the HCL
+  bodies, and a token able to read every policy in the tree can reconstruct
+  the cluster's whole access model — a large privilege increase for a
+  read-only audit. Removing the rule drops that report section and records
+  the denials; it does not fail the run.
 - **The `sys/policies/egp` and `sys/policies/rgp` rules are optional too.** They
   cover the Sentinel section and are Enterprise-Premium-only, so on any other
   cluster they grant nothing. Removing them leaves that section empty; denying

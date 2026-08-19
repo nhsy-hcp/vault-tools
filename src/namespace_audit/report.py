@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 MAX_REPORT_NODES = 500
 MAX_MATRIX_NAMESPACES = 25
 
+# Policy names joined into one table cell. The reference cluster peaks at 11
+# per namespace, but nothing stops a namespace holding hundreds, and a 4 KB
+# cell would wreck the table for every other row.
+MAX_ACL_NAMES_PER_CELL = 15
+
 # Above this many namespaces sharing one denial reason, the access-gaps table
 # collapses them into a single row. A denial repeated across the whole tree is
 # a missing policy rule, not a targeted restriction, and listing it per
@@ -368,6 +373,38 @@ def _sentinel_rows(collection: dict[str, Any], kind: str) -> list[list[Any]]:
     return rows
 
 
+def render_acl_policies(acl_policies: dict[str, list[str]], max_rows: int = MAX_REPORT_NODES, max_names: int = MAX_ACL_NAMES_PER_CELL) -> str:
+    """One row per namespace listing the ACL policies defined in it.
+
+    Grouped by namespace rather than one row per policy: a real cluster is
+    heavily templated, and the flat form ran to 1,233 rows against 133
+    namespaces while repeating the same handful of names throughout. The
+    per-policy grain lives in the CSV.
+
+    Namespaces with none render ``0`` and a dash. Dropping the row instead would
+    read as "not audited" rather than "nothing defined here", and the two are
+    very different answers.
+    """
+    if not acl_policies:
+        return "_No entries._"
+
+    rows: list[list[Any]] = []
+    for namespace in sorted(acl_policies)[:max_rows]:
+        names = acl_policies[namespace]
+        if not names:
+            listed = "—"
+        elif len(names) > max_names:
+            listed = ", ".join(names[:max_names]) + f", … (+{len(names) - max_names} more)"
+        else:
+            listed = ", ".join(names)
+        rows.append([display_namespace(namespace), len(names), listed])
+
+    table = md_table(["Namespace", "Count", "Policies"], rows)
+    if len(acl_policies) > max_rows:
+        table += f"\n\n_Showing {max_rows} of {len(acl_policies)} namespaces — see the ACL policies summary CSV for the full list._"
+    return table
+
+
 def render_sentinel_policies(collection: dict[str, Any], kind: str, max_rows: int = MAX_REPORT_NODES) -> str:
     """Table of Sentinel policies of one kind, across every namespace.
 
@@ -675,6 +712,9 @@ def _summary_rows(
         ["Errors", stats.error_count],
         ["Permission denied (skipped)", stats.forbidden_count],
     ]
+    # Unconditional, unlike the Sentinel rows: ACL policies exist on every
+    # edition, so zero is a real measurement rather than an untested check.
+    rows.append(["ACL policies", sum(len(n) for n in data.acl_policies.values())])
     if sentinel_supported:
         # Only on a cluster that answered: a pair of zero rows on every
         # Community report would imply Sentinel was checked and found wanting.
@@ -798,6 +838,12 @@ def build_markdown_report(
         render_type_distribution(data.secret_engines, "Secrets engine type"),
         "",
         render_type_matrix(data.secret_engines, "Secrets engines"),
+        "",
+        "## ACL policies",
+        "",
+        "Policies defined in each namespace. Vault's own `default`, `root` and `default-ceiling` are present everywhere and are excluded.",
+        "",
+        render_acl_policies(data.acl_policies),
         "",
         *sentinel_sections,
         "",

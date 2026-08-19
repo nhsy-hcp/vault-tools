@@ -146,6 +146,41 @@ path "+/+/+/+/+/sys/namespaces" {
   capabilities = ["list"]
 }
 
+# --- namespace-audit: ACL policies -------------------------------------------
+# list_acl_policies() -> LIST sys/policies/acl, once per namespace visited. The
+# report lists which policies each namespace defines, minus Vault's own
+# "default", "root" and "default-ceiling", which exist everywhere.
+#
+# "list" and NOT "read", deliberately. Listing yields policy names; reading
+# yields the HCL bodies, and a token that can read every ACL policy in the tree
+# can reconstruct the cluster's entire access model. The audit does not need
+# that, so the grant stops at names.
+#
+# Available on every Vault edition, unlike the Sentinel rules below.
+path "sys/policies/acl" {
+  capabilities = ["list"]
+}
+
+path "+/sys/policies/acl" {
+  capabilities = ["list"]
+}
+
+path "+/+/sys/policies/acl" {
+  capabilities = ["list"]
+}
+
+path "+/+/+/sys/policies/acl" {
+  capabilities = ["list"]
+}
+
+path "+/+/+/+/sys/policies/acl" {
+  capabilities = ["list"]
+}
+
+path "+/+/+/+/+/sys/policies/acl" {
+  capabilities = ["list"]
+}
+
 # --- namespace-audit: Sentinel governing policies ----------------------------
 # list_egp_policies()/list_rgp_policies() -> LIST sys/policies/{egp,rgp}, then
 # read_egp_policy()/read_rgp_policy() -> GET sys/policies/{egp,rgp}/:name for
