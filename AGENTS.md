@@ -45,9 +45,9 @@ Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providin
 │   └── entity_export/
 │       └── main.py           # Entity data extraction
 │
-├── tests/                    # 391 comprehensive tests
-│   ├── common/               # 166 tests for shared utilities
-│   ├── namespace_audit/      # 166 tests with threading & mocking
+├── tests/                    # 489 comprehensive tests
+│   ├── common/               # 159 tests for shared utilities
+│   ├── namespace_audit/      # 267 tests with threading & mocking
 │   │   ├── conftest.py       # Pytest configuration
 │   │   ├── fixtures.py       # Test fixtures
 │   │   ├── report_fixtures.py # Realistic AuditData for report tests
@@ -68,7 +68,7 @@ Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providin
 │   │   ├── test_integration.py
 │   │   └── test_default.py
 │   ├── entity_export/        # Package marker only; tests live in activity_export/
-│   └── test_cli_parsing.py   # 16 argparse-level tests, no Vault required
+│   └── test_cli_parsing.py   # 20 argparse-level tests, no Vault required
 ├── inputs/                   # Input files for scripts
 └── outputs/                  # Generated reports (configurable)
     ├── _archive/             # Archived reports
@@ -126,6 +126,20 @@ pytest tests/ -m "unit" -v
 pytest tests/ -m "not slow" -v
 pytest tests/ -m "integration" -v
 ```
+
+The dev extra floors pytest at **9.0.3** (`pyproject.toml`), the release that
+fixed the predictable `/tmp/pytest-of-{user}` handling reported as
+GHSA-6w46-j5rx-g56g. Do not lower that floor to unblock a plugin — check the
+plugin supports pytest 9 first. `pytest-cov` requires only `pytest>=7`, so it is
+not the constraint.
+
+Two things about pytest 9 worth knowing before debugging a script against it:
+
+- `--collect-only -q` prints an indented tree, not one node ID per line. Parse
+  the trailing `N tests collected` summary instead of counting `::` matches.
+- Test configuration lives in **`pytest.ini`**, which wins outright over the
+  `[tool.pytest.ini_options]` block duplicated in `pyproject.toml`. Edit
+  `pytest.ini`; a change to the `pyproject.toml` copy is silently ignored.
 
 ### Code Quality
 
@@ -389,12 +403,13 @@ spurious error rather than failing where the gap is.
 
 ### Comprehensive Test Coverage
 
-- **391 total tests** across all modules with no hanging issues
-- **common**: 166 tests covering VaultClient, config, logging and file I/O
-- **namespace_audit**: 166 tests including threading, mocking, report rendering
+- **489 total tests** across all modules with no hanging issues
+- **common**: 159 tests covering VaultClient, config, logging and file I/O
+- **namespace_audit**: 267 tests including threading, mocking, report rendering
   and integration
 - **activity_export**: 43 tests covering API interaction and data processing
   (this directory also holds the entity_export tests)
+- **test_cli_parsing.py**: 20 argparse-level tests, no Vault required
 - **Centralized fixtures**: Reusable mock configurations in `fixtures.py` files
 - **Modular structure**: Tests organized by functionality for maintainability
 

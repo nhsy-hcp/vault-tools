@@ -31,9 +31,6 @@ A unified CLI tool for comprehensive HashiCorp Vault operations, providing defen
 ### Setup and Run
 
 ```bash
-# Install uv if not already installed
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
 # Clone the repository
 git clone https://github.com/nhsy-hcp/vault-tools.git
 cd vault-tools
