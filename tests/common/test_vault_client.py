@@ -68,74 +68,6 @@ class TestVaultClientInit:
             )
             mock_dw.assert_called_once()
 
-    def test_cache_initialised(self, client):
-        assert client.cache_hits == 0
-        assert client.cache_misses == 0
-        assert len(client.cache) == 0
-
-
-# ---------------------------------------------------------------------------
-# Cache helpers
-# ---------------------------------------------------------------------------
-
-
-class TestCacheHelpers:
-    def test_cache_key_includes_token_fingerprint(self, client):
-        import hashlib
-
-        key = client._cache_key("sys/auth", "ns1", {"k": "v"})
-        expected = hashlib.sha256(client.vault_token.encode()).hexdigest()[:16]
-        assert key.startswith(f"{expected}:")
-
-    def test_cache_key_does_not_leak_token_material(self, client):
-        """A raw prefix put real token characters into the key."""
-        key = client._cache_key("sys/auth", "ns1", None)
-        assert client.vault_token not in key
-        assert client.vault_token[:8] not in key
-
-    def test_cache_key_distinguishes_similar_tokens(self, client):
-        """Tokens sharing a scheme prefix must not collide.
-
-        'hvs.' batch tokens leave only a few distinguishing characters in the
-        first 8, so a raw prefix was not a fingerprint at all.
-        """
-        from src.common.vault_client import VaultClient
-
-        a = VaultClient(vault_addr="https://vault.example.com", vault_token=fake_token("hvs", "A" * 16))
-        b = VaultClient(vault_addr="https://vault.example.com", vault_token=fake_token("hvs", "A" * 15 + "B"))
-        assert a._cache_key("sys/auth") != b._cache_key("sys/auth")
-
-    def test_cache_key_includes_namespace_and_path(self, client):
-        key = client._cache_key("sys/auth", "team-a", None)
-        assert "team-a" in key
-        assert "sys/auth" in key
-
-    def test_cache_key_no_token(self):
-        c = VaultClient.__new__(VaultClient)
-        c.vault_token = None
-        key = c._cache_key("path", "ns", None)
-        assert key.startswith(":")
-
-    def test_is_cacheable_true(self, client):
-        for path in ["sys/health", "sys/auth", "sys/mounts", "sys/policy", "sys/policies", "identity/entity", "identity/group"]:
-            assert client._is_cacheable(path)
-
-    def test_is_cacheable_false(self, client):
-        assert not client._is_cacheable("sys/internal/counters/activity")
-        assert not client._is_cacheable("secret/data/foo")
-
-    def test_get_cache_stats_zero(self, client):
-        stats = client.get_cache_stats()
-        assert stats["hits"] == 0
-        assert stats["misses"] == 0
-        assert stats["hit_rate"] == "0.00%"
-
-    def test_get_cache_stats_with_hits(self, client):
-        client.cache_hits = 3
-        client.cache_misses = 1
-        stats = client.get_cache_stats()
-        assert stats["hit_rate"] == "75.00%"
-
 
 # ---------------------------------------------------------------------------
 # get_client context manager
@@ -271,15 +203,6 @@ class TestVaultClientGet:
         with self._patched_get(client, resp):
             result = client.get("sys/internal/counters/activity")
         assert result == {"data": {"key": "val"}}
-
-    def test_get_uses_cache_on_second_call(self, client):
-        resp = self._mock_response(json_data={"data": {}})
-        with self._patched_get(client, resp) as mock_gc:
-            client.get("sys/auth")
-            client.get("sys/auth")
-            # adapter.request called only once — second call served from cache
-            assert mock_gc.return_value.__enter__.return_value.adapter.request.call_count == 1
-        assert client.cache_hits == 1
 
     def test_non_200_raises_api_error(self, client):
         resp = self._mock_response(status=404, text="not found")

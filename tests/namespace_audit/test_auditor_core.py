@@ -9,7 +9,7 @@ import hvac
 import pytest
 
 from src.common.vault_client import VaultConnectionError
-from src.namespace_audit.main import AuditData, AuditStats, NamespaceAuditor
+from src.namespace_audit.main import PROGRESS_DESCRIPTION, AuditData, AuditStats, NamespaceAuditor
 
 from .fixtures import mock_file_operations
 
@@ -111,6 +111,43 @@ class TestRateLimiting:
         auditor._traverse_namespace("/test/", queue.Queue())
 
         mock_sleep.assert_called_with(2)
+
+    @patch("time.sleep")
+    def test_rate_limit_shows_on_the_progress_bar(self, mock_sleep, auditor):
+        """A stalled spinner with no explanation reads as a hang — but printing
+        during a live progress bar is what tore it apart in the first place, so
+        the pause relabels the bar and puts the label back."""
+        auditor.rate_limit_disable = False
+        auditor.rate_limit_batch_size = 1
+        auditor.rate_limit_sleep_seconds = 3
+        auditor.progress = Mock()
+        auditor.progress_task = 1
+
+        auditor._traverse_namespace("/test/", queue.Queue())
+
+        descriptions = [c.kwargs["description"] for c in auditor.progress.update.call_args_list if "description" in c.kwargs]
+        assert any("Rate limiting" in d for d in descriptions)
+        assert descriptions[-1] == PROGRESS_DESCRIPTION
+
+    @patch("time.sleep", side_effect=KeyboardInterrupt)
+    def test_progress_label_is_restored_even_if_the_sleep_is_interrupted(self, mock_sleep, auditor):
+        auditor.rate_limit_disable = False
+        auditor.rate_limit_batch_size = 1
+        auditor.progress = Mock()
+        auditor.progress_task = 1
+
+        with pytest.raises(KeyboardInterrupt):
+            auditor._traverse_namespace("/test/", queue.Queue())
+
+        descriptions = [c.kwargs["description"] for c in auditor.progress.update.call_args_list if "description" in c.kwargs]
+        assert descriptions[-1] == PROGRESS_DESCRIPTION
+
+    def test_progress_relabel_is_a_noop_without_a_bar(self, auditor):
+        """The auditor is driven directly by tests and by callers that never
+        enter the Progress context."""
+        auditor.progress = None
+
+        auditor._set_progress_description("anything")  # must not raise
 
     @patch("time.sleep")
     def test_rate_limit_uses_incremented_count(self, mock_sleep, auditor):
@@ -282,6 +319,57 @@ class TestReportGeneration:
 
             assert rows[0]["enforcement_level"] == ""
             assert rows[0]["policy_lines"] == 0
+
+    def test_write_reports_records_what_it_wrote(self, auditor):
+        """The console list is driven by this attribute, not by a return value:
+        the integration tests patch _write_reports wholesale, and an empty list
+        prints nothing where a Mock would blow up on iteration."""
+        auditor.data.auth_methods = {"": {"token/": {"type": "token"}}}
+
+        with mock_file_operations(), patch("os.path.exists", return_value=True):
+            auditor._write_reports("test-cluster")
+
+        assert any(name.endswith(".json") for name in auditor.output_files)
+        # The report indexes its siblings, so it is absent from that list — but
+        # it is the path most readers want, so the console list carries it.
+        assert any("audit-report-" in name and name.endswith(".md") for name in auditor.output_files)
+        # Basenames, not full paths: the directory is printed once as a header.
+        assert not any("/" in name for name in auditor.output_files)
+
+    def test_markdown_writer_no_longer_prints_its_own_tick(self, auditor):
+        """It used to print one immediately after write_markdown logged the same
+        fact at INFO — the same line twice, in two styles."""
+        with patch.object(auditor.console, "print") as mock_print, patch("src.namespace_audit.main.write_markdown"):
+            auditor._write_markdown_report("out/report.md", "test-cluster", [])
+
+        mock_print.assert_not_called()
+
+    def test_markdown_failure_still_warns_on_the_console(self, auditor):
+        with (
+            patch.object(auditor.console, "print") as mock_print,
+            patch("src.namespace_audit.main.write_markdown", side_effect=OSError("disk full")),
+        ):
+            auditor._write_markdown_report("out/report.md", "test-cluster", [])
+
+        assert "could not be written" in str(mock_print.call_args)
+
+    def test_print_output_files_lists_each_file(self, auditor):
+        auditor.output_dir = "outputs"
+        auditor.output_files = ["a-namespaces.json", "a-audit-report.md"]
+
+        with patch.object(auditor.console, "print") as mock_print:
+            auditor._print_output_files()
+
+        rendered = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "outputs/" in rendered
+        assert "a-namespaces.json" in rendered
+        assert "a-audit-report.md" in rendered
+
+    def test_print_output_files_is_silent_when_nothing_was_written(self, auditor):
+        with patch.object(auditor.console, "print") as mock_print:
+            auditor._print_output_files()
+
+        mock_print.assert_not_called()
 
     def test_report_failure_does_not_sink_a_completed_audit(self, auditor):
         """The JSON/CSV files are already on disk; a rendering bug must not raise."""

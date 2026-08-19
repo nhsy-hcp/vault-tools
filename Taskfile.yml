@@ -12,7 +12,11 @@ tasks:
       - echo "Installing uv package manager..."
       - command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
       - echo "Syncing dependencies with uv..."
-      - uv sync
+      # --extra dev, matching .github/workflows/test.yml: pytest and pre-commit
+      # live in [project.optional-dependencies], which a bare `uv sync` skips —
+      # and then prunes if they were already installed, so `task test` and the
+      # `pre-commit install` below both break on a fresh clone.
+      - uv sync --extra dev
       - echo "Installing pre-commit hooks..."
       - uv run pre-commit install
       - echo "✅ Environment setup complete!"

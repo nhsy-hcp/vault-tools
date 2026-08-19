@@ -162,14 +162,9 @@ def run_entity_export(
 
             table.add_row("Duration", f"{duration:.2f} seconds")
 
-            console.print("\n")
+            console.print()
             console.print(table)
             console.print(f"\n[green]✓[/green] Reports written to [cyan]{output_dir}/[/cyan]")
-
-            # Display cache statistics
-            cache_stats = client.get_cache_stats()
-            console.print("\n[bold]Cache Performance:[/bold]")
-            console.print(f"  Hits: [green]{cache_stats['hits']}[/green] | Misses: [yellow]{cache_stats['misses']}[/yellow] | Hit Rate: [cyan]{cache_stats['hit_rate']}[/cyan]")
 
             # Log successful completion
             audit_logger.log_tool_execution(
@@ -184,7 +179,6 @@ def run_entity_export(
                 duration_seconds=duration,
                 metadata={
                     "entities_exported": len(df),
-                    "cache_stats": cache_stats,
                 },
             )
 

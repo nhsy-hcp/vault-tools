@@ -92,6 +92,13 @@ there is no flag to enable or suppress it. The two Sentinel files are written
 only on a cluster that has Sentinel policies, and the CSV summaries are skipped
 when they would be empty, so a small cluster produces fewer files.
 
+The console shows the run itself — a progress bar, the summary table and the
+list of files written — and nothing else. Per-namespace detail, file-write
+confirmations and connection setup are logged at INFO and hidden by default,
+because printing them alongside a live progress bar corrupts it. Pass `--debug`
+to see them, or `--json-logs` for the full event stream in a form a log
+aggregator can consume.
+
 The report is the human-readable view of the audit and contains:
 
 - **Summary** — total namespaces, maximum nesting depth, mount totals and
@@ -116,7 +123,8 @@ The report is the human-readable view of the audit and contains:
   namespaces with no auth method beyond the built-in token backend, leaf
   namespaces holding nothing but Vault's own built-in engines, and Sentinel
   policies that do not actually block anything (`advisory` or `soft-mandatory`
-  enforcement, a wildcard EGP path, or a body that is empty or comments only).
+  enforcement, a wildcard EGP path, or a rule body that always evaluates to
+  true).
 - **Output files** — an index of the sibling JSON and CSV files from the same run.
 
 These observations are review prompts, not a compliance verdict — informational
@@ -154,9 +162,9 @@ diffing between runs.
 
 To exercise this against a local cluster, `task seed:sentinel` writes five no-op
 policies from [`examples/sentinel/`](examples/sentinel) — one per enforcement
-level, a wildcard EGP path, a comments-only body, and a hard-mandatory control
-that must produce no finding. Every one of them evaluates to `true`
-unconditionally, so nothing is ever blocked. `task unseed:sentinel` removes them.
+level, a wildcard EGP path, an always-true rule, and a hard-mandatory control
+that must produce no finding. Every one of them passes unconditionally, so
+nothing is ever blocked. `task unseed:sentinel` removes them.
 Both accept namespaces: `task seed:sentinel -- team-a/ team-b/`.
 
 ### Activity Export
@@ -266,7 +274,6 @@ exactly which subtrees are missing and widen the policy accordingly.
 ### Performance & Reliability
 
 - **Connection Pooling**: Reusable HTTP connections with 20-30% performance improvement
-- **Response Caching**: TTL-based cache (5min) for read-only endpoints, reducing API load
 - **Automatic Retry**: Transport-level retry with exponential backoff on transient HTTP failures (408/429/5xx)
 - **Rate Limiting**: Configurable batch processing to prevent API overload
 
@@ -281,7 +288,7 @@ exactly which subtrees are missing and widen the policy accordingly.
 - **Rich CLI Output**: Progress bars, colored status indicators (✓ ✗ ⚠), formatted tables
 - **Structured Logging**: JSON output for log aggregation (ELK, Splunk, Datadog)
 - **Modern Tooling**: Fast linting with ruff, uv package manager support
-- **Cache Statistics**: Performance metrics displayed after each run
+- **Quiet by Default**: The console carries progress and results; `--debug` adds per-namespace detail
 
 ### Optional Configuration
 

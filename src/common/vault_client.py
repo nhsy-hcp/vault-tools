@@ -1,4 +1,3 @@
-import hashlib
 import json
 import logging
 import os
@@ -7,7 +6,6 @@ from contextlib import contextmanager
 import hvac
 import requests
 import urllib3
-from cachetools import TTLCache
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -59,8 +57,6 @@ class VaultClient:
         hvac_timeout: int = 30,
         pool_connections: int = 10,
         pool_maxsize: int = 20,
-        cache_ttl: int = 300,
-        cache_maxsize: int = 1000,
     ):
         self.vault_addr = vault_addr or os.environ.get("VAULT_ADDR")
         self.vault_token = vault_token or os.environ.get("VAULT_TOKEN")
@@ -98,55 +94,7 @@ class VaultClient:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
 
-        # Initialize response cache
-        self.cache = TTLCache(maxsize=cache_maxsize, ttl=cache_ttl)
-        self.cache_hits = 0
-        self.cache_misses = 0
-
-        self.logger.info(f"VaultClient initialized with connection pool (connections={pool_connections}, maxsize={pool_maxsize})")
-
-    def _cache_key(self, path: str, namespace: str = "", params: dict = None) -> str:
-        """Generate cache key for a request.
-
-        The cache lives on the instance and each instance holds a single token
-        for its lifetime, so the token component is defensive rather than the
-        primary isolation mechanism: it keeps entries from colliding if a token
-        is ever rotated in place on a live client.
-
-        A SHA-256 digest is used rather than a raw prefix of the token. A short
-        prefix is not a fingerprint — tokens sharing a scheme prefix ("hvs.",
-        "hvb.") differ in only a few of the first 8 characters — and it also put
-        real token material into a dictionary key.
-        """
-        token_fingerprint = hashlib.sha256(self.vault_token.encode()).hexdigest()[:16] if self.vault_token else ""
-        params_str = json.dumps(params, sort_keys=True) if params else ""
-        return f"{token_fingerprint}:{namespace}:{path}:{params_str}"
-
-    def _is_cacheable(self, path: str) -> bool:
-        """Determine if a path should be cached (read-only endpoints)."""
-        cacheable_paths = [
-            "sys/health",
-            "sys/auth",
-            "sys/mounts",
-            "sys/policy",
-            "sys/policies",
-            "identity/entity",
-            "identity/group",
-        ]
-        return any(path.startswith(cp) for cp in cacheable_paths)
-
-    def get_cache_stats(self) -> dict:
-        """Return cache statistics."""
-        total_requests = self.cache_hits + self.cache_misses
-        hit_rate = (self.cache_hits / total_requests * 100) if total_requests > 0 else 0
-        return {
-            "hits": self.cache_hits,
-            "misses": self.cache_misses,
-            "total": total_requests,
-            "hit_rate": f"{hit_rate:.2f}%",
-            "cache_size": len(self.cache),
-            "cache_maxsize": self.cache.maxsize,
-        }
+        self.logger.debug(f"VaultClient initialized with connection pool (connections={pool_connections}, maxsize={pool_maxsize})")
 
     @contextmanager
     def get_client(self, namespace_path: str = "", timeout: int | None = None):
@@ -204,7 +152,7 @@ class VaultClient:
             raise VaultConnectionError(error_msg) from e
 
     def get(self, path: str, params: dict = None, namespace: str = "", timeout: int | None = None) -> dict | list:
-        """Make GET request to Vault API with caching support.
+        """Make a GET request to the Vault API.
 
         Args:
             path: API endpoint path.
@@ -218,15 +166,6 @@ class VaultClient:
                 endpoints, a list for NDJSON ones such as the activity export.
                 A 204 No Content response yields an empty list.
         """
-        # Check cache for cacheable endpoints
-        cache_key = self._cache_key(path, namespace, params)
-        if self._is_cacheable(path) and cache_key in self.cache:
-            self.cache_hits += 1
-            self.logger.debug(f"Cache hit for {path} (namespace: {namespace})")
-            return self.cache[cache_key]
-
-        self.cache_misses += 1
-
         try:
             with self.get_client(namespace, timeout=timeout) as client:
                 # Remove leading slash and v1 prefix if present. removeprefix,
@@ -263,11 +202,6 @@ class VaultClient:
                         else:
                             # Re-raise other JSONDecodeErrors
                             raise VaultDataError(f"Failed to parse JSON from {path}: {e}") from e
-
-                # Cache the result if cacheable
-                if self._is_cacheable(path):
-                    self.cache[cache_key] = result
-                    self.logger.debug(f"Cached response for {path} (namespace: {namespace})")
 
                 return result
 

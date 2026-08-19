@@ -78,10 +78,25 @@ def setup_logging(debug: bool = False, json_logs: bool = False) -> None:
     """Configure structured logging for the application.
 
     Args:
-        debug: If True, enable DEBUG level logging. Otherwise use INFO.
+        debug: If True, enable DEBUG level logging.
         json_logs: If True, output JSON formatted logs. Otherwise use console format.
     """
-    log_level = logging.DEBUG if debug else logging.INFO
+    # Module loggers are diagnostics, not UI. rich owns the human console -- the
+    # panel, progress bar, tables and check marks -- and an INFO line printed
+    # alongside a live progress bar corrupts it, which is what a default level of
+    # INFO used to do 134 times in a single namespace audit.
+    #
+    # So: anything a user must see on a default run belongs in a console.print,
+    # not a logger.info. Warnings and errors still reach the console, and both
+    # escape hatches below restore the detail.
+    if debug:
+        log_level = logging.DEBUG
+    elif json_logs:
+        # A machine-readable stream is not being read live by a human, so there
+        # is no progress bar to protect and the lifecycle events are the point.
+        log_level = logging.INFO
+    else:
+        log_level = logging.WARNING
 
     # Configure standard library logging
     logging.basicConfig(
@@ -89,6 +104,11 @@ def setup_logging(debug: bool = False, json_logs: bool = False) -> None:
         stream=sys.stdout,
         level=log_level,
     )
+    # basicConfig silently does nothing once the root logger has a handler, so
+    # its level= is honoured only on the very first call in a process. Set the
+    # level directly as well: whether the threshold actually applies is the
+    # whole point of this function, and it must not depend on being first.
+    logging.getLogger().setLevel(log_level)
 
     # Configure structlog processors
     shared_processors = [

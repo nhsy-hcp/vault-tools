@@ -52,18 +52,6 @@ def mock_vault_client():
     # Mock validate_connection method
     client.validate_connection.return_value = "test-cluster"
 
-    # Mock cache statistics
-    client.get_cache_stats = Mock(
-        return_value={
-            "hits": 0,
-            "misses": 0,
-            "total": 0,
-            "hit_rate": "0.00%",
-            "cache_size": 0,
-            "cache_maxsize": 1000,
-        }
-    )
-
     # Create a mock context manager for get_client
     mock_context_manager = MagicMock()
     mock_hvac_client = Mock()

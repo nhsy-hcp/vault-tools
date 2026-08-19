@@ -8,7 +8,6 @@
 #     "structlog>=23.1.0",
 #     "tenacity>=8.2.3",
 #     "python-json-logger>=2.0.7",
-#     "cachetools>=5.3.0",
 #     "rich>=13.7.0",
 # ]
 # ///

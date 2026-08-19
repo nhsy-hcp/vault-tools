@@ -644,7 +644,6 @@ def _summary_rows(
     data: AuditData,
     stats: AuditStats,
     worker_threads: int,
-    cache_stats: dict[str, Any] | None,
     system_lease_ttls: tuple[int, int] | None = None,
     sentinel_supported: bool | None = None,
 ) -> list[list[Any]]:
@@ -687,8 +686,6 @@ def _summary_rows(
         # defaults, which a tuned cluster will not be using.
         default_ttl, max_ttl = system_lease_ttls
         rows.append(["System lease TTL", f"{format_ttl(default_ttl)} default / {format_ttl(max_ttl)} max"])
-    if cache_stats:
-        rows.append(["Cache hit rate", cache_stats.get("hit_rate", "—")])
     return rows
 
 
@@ -699,7 +696,6 @@ def build_markdown_report(
     *,
     start_namespace: str = "",
     worker_threads: int = 0,
-    cache_stats: dict[str, Any] | None = None,
     output_files: list[str] | None = None,
     generated_at: datetime | None = None,
     system_lease_ttls: tuple[int, int] | None = None,
@@ -773,7 +769,7 @@ def build_markdown_report(
         "",
         "## Summary",
         "",
-        md_table(["Metric", "Value"], _summary_rows(data, stats, worker_threads, cache_stats, system_lease_ttls, sentinel_supported)),
+        md_table(["Metric", "Value"], _summary_rows(data, stats, worker_threads, system_lease_ttls, sentinel_supported)),
         "",
         "## Access gaps",
         "",

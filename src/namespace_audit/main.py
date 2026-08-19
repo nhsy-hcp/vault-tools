@@ -30,6 +30,11 @@ from src.namespace_audit.report import build_markdown_report
 logger = logging.getLogger(__name__)
 
 
+# The progress bar's resting label. Named because the rate-limit pause swaps it
+# out and has to put it back — printing the pause instead would corrupt the bar.
+PROGRESS_DESCRIPTION = "[cyan]Processing namespaces..."
+
+
 class Constants:
     DEFAULT_WORKER_THREADS = 4
     DEFAULT_TIMEOUT = 3
@@ -167,6 +172,12 @@ class NamespaceAuditor:
         # which short-circuits every later probe. The report distinguishes all
         # three, because "no policies" and "no Sentinel" are different answers.
         self.sentinel_supported: bool | None = None
+        # Basenames of everything _write_reports actually wrote, for the console
+        # list printed after the summary table. Held on the instance rather than
+        # returned because the integration tests patch _write_reports wholesale:
+        # an attribute that stays empty prints nothing, where a return value
+        # would hand the printer a Mock to iterate.
+        self.output_files: list[str] = []
         # First-denial-per-namespace guard for the per-policy reads, so a
         # namespace holding 40 unreadable policies contributes one access-gap
         # row rather than 40. Keyed by (namespace, kind); guarded by thread_lock.
@@ -238,7 +249,7 @@ class NamespaceAuditor:
                 # so the bar shows real progress and converges rather than
                 # spinning indefinitely (N4).
                 self.progress_task = progress.add_task(
-                    "[cyan]Processing namespaces...",
+                    PROGRESS_DESCRIPTION,
                     total=self.stats.discovered_count,
                 )
 
@@ -264,13 +275,9 @@ class NamespaceAuditor:
             self.stats.finish()
             duration = time.time() - start_time
 
-            # Display cache statistics
-            cache_stats = self.vault_client.get_cache_stats()
-            self.console.print("\n[bold]Cache Performance:[/bold]")
-            self.console.print(f"  Hits: [green]{cache_stats['hits']}[/green] | Misses: [yellow]{cache_stats['misses']}[/yellow] | Hit Rate: [cyan]{cache_stats['hit_rate']}[/cyan]")
-
-            self._write_reports(cluster_name, cache_stats=cache_stats)
+            self._write_reports(cluster_name)
             self._log_summary()
+            self._print_output_files()
 
             # Log successful completion
             self.audit_logger.log_tool_execution(
@@ -287,7 +294,6 @@ class NamespaceAuditor:
                     "namespaces_processed": self.stats.processed_count,
                     "errors": self.stats.error_count,
                     "forbidden": self.stats.forbidden_count,
-                    "cache_stats": cache_stats,
                 },
             )
 
@@ -396,7 +402,12 @@ class NamespaceAuditor:
             self._mark_sentinel_supported()
             return {}
         except hvac.exceptions.Forbidden:
-            logger.warning(f"Permission denied listing sentinel {kind.upper()} policies for: {display_path}")
+            # Debug, not warning: this fires once per namespace, and a token
+            # missing the rule outright produced 268 lines on a 134-namespace
+            # cluster — printed straight through the live progress bar. The
+            # denial is not lost: increment_forbidden feeds the summary
+            # table's count and the report's collapsed Access gaps table.
+            logger.debug(f"Permission denied listing sentinel {kind.upper()} policies for: {display_path}")
             self.stats.increment_forbidden(display_path, f"sentinel {kind.upper()} policies")
             return {}
         except Exception as e:
@@ -416,7 +427,7 @@ class NamespaceAuditor:
                 # its body is unreadable. One access-gap row per namespace and
                 # kind, not one per policy — a namespace with 40 denied reads
                 # would otherwise swamp the whole section.
-                logger.warning(f"Could not read sentinel {kind.upper()} policy '{name}' in {display_path}: {e}")
+                logger.debug(f"Could not read sentinel {kind.upper()} policy '{name}' in {display_path}: {e}")
                 policies[name] = {"name": name, "read_error": str(e)}
                 with self.thread_lock:
                     already_recorded = (display_path, kind) in self._sentinel_read_denied
@@ -424,6 +435,16 @@ class NamespaceAuditor:
                 if not already_recorded:
                     self.stats.increment_forbidden(display_path, f"sentinel {kind.upper()} policy bodies")
         return policies
+
+    def _set_progress_description(self, description: str) -> None:
+        """Relabel the progress bar, if one is running.
+
+        Same guard as _refresh_progress: the auditor is driven directly by tests
+        and by callers that never enter the Progress context.
+        """
+        if self.progress is None or self.progress_task is None:
+            return
+        self.progress.update(self.progress_task, description=description)
 
     def _refresh_progress(self) -> None:
         """Push current discovered/processed counts to the progress bar.
@@ -498,7 +519,14 @@ class NamespaceAuditor:
         self._refresh_progress()
         if not self.rate_limit_disable and processed % self.rate_limit_batch_size == 0:
             logger.info(f"Rate limiting - sleeping for {self.rate_limit_sleep_seconds} seconds")
-            time.sleep(self.rate_limit_sleep_seconds)
+            # Say so on the bar rather than printing: a stalled spinner with no
+            # explanation reads as a hang, and a print here would tear the bar
+            # apart — the very problem this change exists to fix.
+            self._set_progress_description(f"[yellow]Rate limiting — sleeping {self.rate_limit_sleep_seconds}s...")
+            try:
+                time.sleep(self.rate_limit_sleep_seconds)
+            finally:
+                self._set_progress_description(PROGRESS_DESCRIPTION)
 
         try:
             with self.vault_client.get_client(namespace_path) as client:
@@ -573,17 +601,18 @@ class NamespaceAuditor:
                     # The auth methods and engines above were already captured;
                     # only the subtree below this namespace is lost, so record
                     # the gap without discarding what this namespace returned.
-                    logger.warning(f"Permission denied listing child namespaces for: {display_path}")
+                    # Per-namespace, so debug — see the note in _list_and_read.
+                    logger.debug(f"Permission denied listing child namespaces for: {display_path}")
                     self.stats.increment_forbidden(display_path, "child namespaces (subtree not audited)")
 
         except hvac.exceptions.Forbidden:
-            logger.warning(f"Permission denied for namespace: {display_path}")
+            logger.debug(f"Permission denied for namespace: {display_path}")
             self.stats.increment_forbidden(display_path, "whole namespace (no data collected)")
         except Exception as e:
             logger.error(f"Error processing namespace {display_path}: {e}")
             self.stats.increment_errors(display_path, str(e))
 
-    def _write_reports(self, cluster_name: str, cache_stats: dict[str, Any] | None = None):
+    def _write_reports(self, cluster_name: str):
         date_str = datetime.now().strftime(FILE_DATE_FORMAT)
 
         os.makedirs(self.output_dir, exist_ok=True)
@@ -649,13 +678,17 @@ class NamespaceAuditor:
             )
         ]
         sibling_files = [os.path.basename(p) for p in candidates if os.path.exists(p)]
-        self._write_markdown_report(path_for("audit-report", "md"), cluster_name, cache_stats, sibling_files)
+        report_path = path_for("audit-report", "md")
+        self._write_markdown_report(report_path, cluster_name, sibling_files)
+        # The report indexes its siblings, so it is not in that list itself —
+        # but the console list is about what landed on disk, and the report is
+        # the file most readers want the path to.
+        self.output_files = [*sibling_files, os.path.basename(report_path)] if os.path.exists(report_path) else list(sibling_files)
 
     def _write_markdown_report(
         self,
         file_path: str,
         cluster_name: str,
-        cache_stats: dict[str, Any] | None,
         sibling_files: list[str],
     ):
         """Render and write the markdown audit report.
@@ -671,16 +704,28 @@ class NamespaceAuditor:
                 self.stats,
                 start_namespace=self.start_namespace,
                 worker_threads=self.worker_threads,
-                cache_stats=cache_stats,
                 output_files=sibling_files,
                 system_lease_ttls=self.system_lease_ttls,
                 sentinel_supported=self.sentinel_supported,
             )
             write_markdown(file_path, content)
-            self.console.print(f"[green]✓[/green] Markdown report: [bold]{file_path}[/bold]")
         except Exception as e:
             logger.exception(f"Failed to write the markdown report: {e}")
             self.console.print(f"[yellow]⚠[/yellow] Markdown report could not be written: {e}")
+
+    def _print_output_files(self) -> None:
+        """List what the run wrote, after the summary table.
+
+        The file writers log at INFO, which the console no longer shows — by
+        design, since those lines used to interleave with the progress bar. This
+        is the user-facing replacement, and it is one block rather than a line
+        per writer so the paths stay together and in a predictable order.
+        """
+        if not self.output_files:
+            return
+        self.console.print(f"\n[bold]Output files[/bold] → [cyan]{self.output_dir}/[/cyan]")
+        for name in self.output_files:
+            self.console.print(f"  [green]✓[/green] {name}")
 
     def _write_namespace_summary(self, file_path: str):
         if not self.data.namespaces:
@@ -777,7 +822,7 @@ class NamespaceAuditor:
         else:
             table.add_row("Permission Denied (skipped)", "[green]0[/green]")
 
-        self.console.print("\n")
+        self.console.print()
         self.console.print(table)
 
         # Log to standard logger as well

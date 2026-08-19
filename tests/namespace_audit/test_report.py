@@ -616,14 +616,6 @@ class TestFullReport:
         assert "| Cluster | prod |" in report
         assert "| Starting namespace | team-a/ |" in report
 
-    def test_includes_cache_stats_when_supplied(self, clean_data, finished_stats):
-        report = build_markdown_report("prod", clean_data, finished_stats, cache_stats={"hit_rate": "42.00%"})
-
-        assert "| Cache hit rate | 42.00% |" in report
-
-    def test_omits_cache_row_when_not_supplied(self, clean_data, finished_stats):
-        assert "Cache hit rate" not in build_markdown_report("prod", clean_data, finished_stats)
-
     def test_summary_reports_the_system_lease_ttls(self, clean_data, finished_stats):
         report = build_markdown_report("prod", clean_data, finished_stats, system_lease_ttls=(3600, 86400))
 

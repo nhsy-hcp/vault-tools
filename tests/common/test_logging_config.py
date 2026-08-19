@@ -74,6 +74,52 @@ class TestProcessors:
         assert "version" in result
 
 
+class TestSetupLoggingLevels:
+    """The console threshold, pinned in all three modes.
+
+    rich owns the human console — the panel, progress bar and result tables —
+    and a stdlib log line printed alongside a live progress bar corrupts it.
+    That is why the default is WARNING rather than INFO, and it is the thing a
+    future change is most likely to undo without noticing.
+    """
+
+    @pytest.fixture(autouse=True)
+    def restore_root_level(self):
+        original = logging.getLogger().level
+        yield
+        logging.getLogger().setLevel(original)
+
+    def test_default_console_is_quiet(self):
+        from src.common.logging_config import setup_logging
+
+        setup_logging(debug=False, json_logs=False)
+
+        assert logging.getLogger().level == logging.WARNING
+
+    def test_debug_shows_everything(self):
+        from src.common.logging_config import setup_logging
+
+        setup_logging(debug=True, json_logs=False)
+
+        assert logging.getLogger().level == logging.DEBUG
+
+    def test_json_logs_keep_info_for_aggregation(self):
+        """No progress bar to protect on a machine-readable stream, and the
+        lifecycle events are the reason to turn it on."""
+        from src.common.logging_config import setup_logging
+
+        setup_logging(debug=False, json_logs=True)
+
+        assert logging.getLogger().level == logging.INFO
+
+    def test_debug_wins_over_json_logs(self):
+        from src.common.logging_config import setup_logging
+
+        setup_logging(debug=True, json_logs=True)
+
+        assert logging.getLogger().level == logging.DEBUG
+
+
 class TestSetupLogging:
     def test_setup_logging_info_mode_suppresses_third_party(self):
         from src.common.logging_config import setup_logging

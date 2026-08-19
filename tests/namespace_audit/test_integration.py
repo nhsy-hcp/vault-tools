@@ -23,8 +23,8 @@ class TestAuditClusterIntegration:
             auditor.audit_cluster()
 
             mock_vault_client.validate_connection.assert_called_once()
-            # Assert on the cluster name only; cache_stats is passed through as
-            # a keyword and its contents are the vault client's business.
+            # Assert on the cluster name only — the writer's remaining
+            # behaviour is covered directly in test_auditor_core.
             mock_write_reports.assert_called_once()
             assert mock_write_reports.call_args.args[0] == "test-cluster"
 
@@ -60,8 +60,8 @@ class TestAuditClusterIntegration:
             auditor.audit_cluster("custom/namespace/")
 
             mock_vault_client.validate_connection.assert_called_once()
-            # Assert on the cluster name only; cache_stats is passed through as
-            # a keyword and its contents are the vault client's business.
+            # Assert on the cluster name only — the writer's remaining
+            # behaviour is covered directly in test_auditor_core.
             mock_write_reports.assert_called_once()
             assert mock_write_reports.call_args.args[0] == "test-cluster"
 

@@ -21,16 +21,6 @@ from src.entity_export.main import run_entity_export as create_entity_export_rep
 def mock_vault_client():
     client = Mock(spec=VaultClient)
     client.get = Mock(return_value=[])
-    client.get_cache_stats = Mock(
-        return_value={
-            "hits": 0,
-            "misses": 0,
-            "total": 0,
-            "hit_rate": "0.00%",
-            "cache_size": 0,
-            "cache_maxsize": 1000,
-        }
-    )
     return client
 
 

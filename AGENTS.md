@@ -224,6 +224,36 @@ skipped entirely unless policies were collected — so a root-only Community
 cluster produces five. The report's "Output files" index checks existence rather
 than assuming the full set.
 
+### Console output vs logging
+
+**rich owns the console; stdlib loggers are diagnostics.** `setup_logging` sets
+the root level to WARNING by default (DEBUG under `--debug`, INFO under
+`--json-logs`, which has no progress bar to protect). So:
+
+- Anything a user must see on a default run needs a `console.print`, **not** a
+  `logger.info`. An INFO line added anywhere — including in `file_utils` or
+  `vault_client` — is invisible by default, and if the threshold were raised it
+  would print over the live progress bar and shred it. That is exactly what a
+  default of INFO used to do, 134 times in a single audit.
+- Nothing may be printed while the progress bar is running. To say something
+  during the walk, relabel the bar via `_set_progress_description` — the
+  rate-limit pause is the worked example.
+- File writes are reported once, together, by `_print_output_files` after the
+  summary table, from the `output_files` list `_write_reports` populates. Do not
+  add a per-file `console.print` at the writer: that produced the same fact
+  twice, in two different styles, for the markdown report.
+- `setup_logging` sets the root level explicitly as well as passing `level=` to
+  `basicConfig`, because `basicConfig` is a no-op once the root logger has a
+  handler and would otherwise be honoured only on the first call in a process.
+
+There is deliberately **no response cache**. One existed, keyed on
+`sys/auth`/`sys/mounts`/`sys/policies` prefixes, but the traversal reads those
+through hvac inside `get_client()` and never through `VaultClient.get()`, so it
+could not fire; the only paths that do reach `get()` are not in that prefix list.
+It reported `Hits: 0 | Misses: 1` on every run. Reinstating one only makes sense
+alongside a call path that actually re-reads something — note the `visited` set
+already guarantees each namespace is walked once.
+
 ### Sentinel EGP/RGP collection
 
 `NamespaceAuditor._fetch_sentinel_policies()` runs inside the same `get_client()`
