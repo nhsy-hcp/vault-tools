@@ -223,7 +223,7 @@ class NamespaceAuditor:
 
         self.console.print(
             Panel.fit(
-                f"[bold cyan]Vault Namespace Audit[/bold cyan]\nStarting namespace: [yellow]{display_ns}[/yellow]\nWorker threads: [green]{self.worker_threads}[/green]",
+                f"[bold cyan]Vault Namespace Audit[/bold cyan]\nVault address: [yellow]{self.vault_client.vault_addr}[/yellow]\nStarting namespace: [yellow]{display_ns}[/yellow]\nWorker threads: [green]{self.worker_threads}[/green]",
                 border_style="cyan",
             )
         )
@@ -766,6 +766,7 @@ class NamespaceAuditor:
                 self.data,
                 self.stats,
                 start_namespace=self.start_namespace,
+                vault_addr=self.vault_client.vault_addr,
                 worker_threads=self.worker_threads,
                 output_files=sibling_files,
                 system_lease_ttls=self.system_lease_ttls,

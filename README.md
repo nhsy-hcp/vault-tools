@@ -98,6 +98,10 @@ aggregator can consume.
 
 The report is the human-readable view of the audit and contains:
 
+- **Header** — the cluster name, the `VAULT_ADDR` it was audited through, the
+  generation timestamp, the tool version and the starting namespace, so a report
+  found on its own still says which cluster it describes. The console prints the
+  same address when the run starts.
 - **Summary** — total namespaces, maximum nesting depth, mount totals and
   distinct type counts, duration, errors and denials.
 - **Access gaps** — every namespace the token was denied, by name, and whether

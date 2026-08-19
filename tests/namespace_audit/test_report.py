@@ -654,6 +654,14 @@ class TestFullReport:
         assert "| Cluster | prod |" in report
         assert "| Starting namespace | team-a/ |" in report
 
+    def test_header_records_the_vault_address(self, clean_data, finished_stats):
+        report = build_markdown_report("prod", clean_data, finished_stats, vault_addr="https://vault.example.com:8200")
+
+        assert "| Vault address | https://vault.example.com:8200 |" in report
+
+    def test_header_omits_the_vault_address_when_unknown(self, clean_data, finished_stats):
+        assert "Vault address" not in build_markdown_report("prod", clean_data, finished_stats)
+
     def test_summary_reports_the_system_lease_ttls(self, clean_data, finished_stats):
         report = build_markdown_report("prod", clean_data, finished_stats, system_lease_ttls=(3600, 86400))
 

@@ -45,9 +45,9 @@ Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providin
 │   └── entity_export/
 │       └── main.py           # Entity data extraction
 │
-├── tests/                    # 489 comprehensive tests
-│   ├── common/               # 159 tests for shared utilities
-│   ├── namespace_audit/      # 267 tests with threading & mocking
+├── tests/
+│   ├── common/               # Tests for shared utilities
+│   ├── namespace_audit/      # Threading & mocking tests
 │   │   ├── conftest.py       # Pytest configuration
 │   │   ├── fixtures.py       # Test fixtures
 │   │   ├── report_fixtures.py # Realistic AuditData for report tests
@@ -59,7 +59,7 @@ Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providin
 │   │   ├── test_integration_simple.py
 │   │   ├── test_integration.py
 │   │   └── test_default.py
-│   ├── activity_export/      # 43 tests for API & data processing
+│   ├── activity_export/      # Tests for API & data processing
 │   │   ├── conftest.py
 │   │   ├── fixtures.py
 │   │   ├── test_data_processing.py
@@ -68,7 +68,7 @@ Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providin
 │   │   ├── test_integration.py
 │   │   └── test_default.py
 │   ├── entity_export/        # Package marker only; tests live in activity_export/
-│   └── test_cli_parsing.py   # 20 argparse-level tests, no Vault required
+│   └── test_cli_parsing.py   # Argparse-level tests, no Vault required
 ├── inputs/                   # Input files for scripts
 └── outputs/                  # Generated reports (configurable)
     ├── _archive/             # Archived reports
@@ -403,13 +403,14 @@ spurious error rather than failing where the gap is.
 
 ### Comprehensive Test Coverage
 
-- **489 total tests** across all modules with no hanging issues
-- **common**: 159 tests covering VaultClient, config, logging and file I/O
-- **namespace_audit**: 267 tests including threading, mocking, report rendering
-  and integration
-- **activity_export**: 43 tests covering API interaction and data processing
-  (this directory also holds the entity_export tests)
-- **test_cli_parsing.py**: 20 argparse-level tests, no Vault required
+Counts are deliberately not recorded here — they go stale on every change. Run
+`task test` for the current total.
+
+- **common**: VaultClient, config, logging and file I/O
+- **namespace_audit**: threading, mocking, report rendering and integration
+- **activity_export**: API interaction and data processing (this directory also
+  holds the entity_export tests)
+- **test_cli_parsing.py**: argparse-level tests, no Vault required
 - **Centralized fixtures**: Reusable mock configurations in `fixtures.py` files
 - **Modular structure**: Tests organized by functionality for maintainability
 

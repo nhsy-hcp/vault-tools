@@ -735,6 +735,7 @@ def build_markdown_report(
     stats: AuditStats,
     *,
     start_namespace: str = "",
+    vault_addr: str = "",
     worker_threads: int = 0,
     output_files: list[str] | None = None,
     generated_at: datetime | None = None,
@@ -763,6 +764,10 @@ def build_markdown_report(
         ["Tool version", f"vault-tools {get_tool_version()}"],
         ["Starting namespace", display_namespace(start_namespace)],
     ]
+    # Omitted rather than rendered empty when unknown: a blank address row would
+    # read as "audited a cluster with no address" instead of "not recorded".
+    if vault_addr:
+        header_rows.insert(1, ["Vault address", vault_addr])
 
     sentinel_sections: list[str] = ["## Sentinel policies", ""]
     if sentinel_supported is False:

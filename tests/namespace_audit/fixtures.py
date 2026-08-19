@@ -50,6 +50,10 @@ def mock_vault_client():
     """Create a properly configured mock VaultClient."""
     client = Mock(spec=VaultClient)
 
+    # Set explicitly: vault_addr is assigned in VaultClient.__init__, so a
+    # spec'd Mock does not carry it and every read raises AttributeError.
+    client.vault_addr = "https://vault.example.com:8200"
+
     # Mock validate_connection method
     client.validate_connection.return_value = "test-cluster"
 
