@@ -1,0 +1,41 @@
+# Keeps the GitHub Actions in .github/workflows/ current.
+#
+# Added because drift here is silent until it breaks. actions/checkout and
+# actions/setup-python sat on majors whose Node 20 runtime GitHub had already
+# withdrawn, and every run carried a deprecation warning before anyone noticed.
+# astral-sh/setup-uv is worse: it is pinned to an exact patch tag because
+# upstream publishes no floating major beyond v7, so nothing would ever move it
+# without a person remembering to.
+#
+# Not covered here: .pre-commit-config.yaml. Dependabot has no pre-commit
+# ecosystem — refresh those hook revs with `pre-commit autoupdate`.
+#
+# Also not covered: the Python dependencies in pyproject.toml/uv.lock.
+# Dependabot does support uv, but that is a separate decision about how much
+# PR traffic the project wants; add a second `uv` entry here if wanted.
+
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    # Always "/" for this ecosystem. Dependabot scans .github/workflows/
+    # regardless of what is set here, and pointing it at a subdirectory
+    # silently matches nothing rather than erroring.
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Europe/London"
+    # One grouped PR rather than one per action. There are three actions, they
+    # are always reviewed together, and CI runs the full suite either way — so
+    # three separate PRs would be three runs of the same check.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      # The repo uses Conventional Commits; without this Dependabot opens PRs
+      # titled "Bump actions/checkout from 7 to 8", which breaks the convention.
+      prefix: "ci"
+    open-pull-requests-limit: 5
