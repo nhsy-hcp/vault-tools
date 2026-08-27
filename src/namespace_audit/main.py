@@ -142,6 +142,14 @@ class AuditData:
     # "this namespace defines no policies of its own" is a real answer, and on
     # the reference cluster 12 namespaces are in exactly that state.
     acl_policies: dict[str, list[str]] = field(default_factory=dict)
+    # Vault version string from sys/health (e.g. "1.17.0+ent"). None when the
+    # health response did not include it (pre-1.9 clusters, or mocked responses).
+    vault_version: str | None = None
+    # The "autoloaded" sub-dict from sys/license/status, or None when the
+    # endpoint is absent (Community Edition) or unreadable (permission denied).
+    license_status: dict[str, Any] | None = None
+    # Cluster UUID from sys/health. None when the health response omits it.
+    cluster_id: str | None = None
 
 
 class NamespaceAuditor:
@@ -233,10 +241,14 @@ class NamespaceAuditor:
         self.stats.start()
 
         try:
-            cluster_name = self.vault_client.validate_connection()
+            info = self.vault_client.validate_connection()
+            cluster_name = info.cluster_name
+            self.data.vault_version = info.vault_version
+            self.data.cluster_id = info.cluster_id
             self.console.print(f"[green]✓[/green] Connected to cluster: [bold]{cluster_name}[/bold]")
 
             self.system_lease_ttls = self._fetch_system_lease_ttls()
+            self.data.license_status = self._fetch_license_status(info.is_enterprise)
 
             # The queue must stay unbounded: worker threads are also the
             # producers (they enqueue child namespaces from _traverse_namespace),
@@ -363,6 +375,33 @@ class NamespaceAuditor:
             logger.debug(f"Unexpected sys/config/state/sanitized payload; lease TTLs unavailable: {payload!r}")
         except Exception as e:
             logger.debug(f"Could not read sys/config/state/sanitized ({e}); lease findings will use the fixed threshold")
+        return None
+
+    def _fetch_license_status(self, is_enterprise: bool) -> dict[str, Any] | None:
+        """Read the cluster's active license from sys/license/status.
+
+        Returns the "autoloaded" sub-dict, or None when the endpoint is absent
+        (Community Edition) or when the token lacks permission. This is optional
+        enrichment — any failure downgrades the report rather than sinking the run.
+        """
+        if not is_enterprise:
+            return None
+        try:
+            response = self.vault_client.get("sys/license/status")
+            payload = response.get("data", response) if isinstance(response, dict) else {}
+            autoloaded = payload.get("autoloaded")
+            if isinstance(autoloaded, dict):
+                logger.debug("License status collected from sys/license/status")
+                return autoloaded
+            logger.debug(f"Unexpected sys/license/status payload shape; license data unavailable: {payload!r}")
+        except Exception as e:
+            from src.common.exceptions import VaultPermissionError
+
+            if isinstance(e, VaultPermissionError):
+                logger.debug(f"Permission denied reading sys/license/status ({e}); license data unavailable")
+                self.stats.increment_forbidden("", "sys/license/status")
+            else:
+                logger.debug(f"Could not read sys/license/status ({e}); license data unavailable")
         return None
 
     def _fetch_acl_policies(self, client: Any, display_path: str) -> list[str]:
@@ -712,6 +751,9 @@ class NamespaceAuditor:
                 },
             )
 
+        # Enterprise-only: written only when license data was successfully read.
+        self._write_license(path_for("license", "json"))
+
         # Write CSV summaries
         self._write_namespace_summary(path_for("summary-namespaces", "csv"))
         self._write_auth_methods_summary(path_for("summary-auth-methods", "csv"))
@@ -733,6 +775,7 @@ class NamespaceAuditor:
                 ("secrets-engines", "json"),
                 ("acl-policies", "json"),
                 ("sentinel-policies", "json"),
+                ("license", "json"),
                 ("summary-namespaces", "csv"),
                 ("summary-auth-methods", "csv"),
                 ("summary-secrets-engines", "csv"),
@@ -771,6 +814,9 @@ class NamespaceAuditor:
                 output_files=sibling_files,
                 system_lease_ttls=self.system_lease_ttls,
                 sentinel_supported=self.sentinel_supported,
+                vault_version=self.data.vault_version,
+                license_status=self.data.license_status,
+                cluster_id=self.data.cluster_id,
             )
             write_markdown(file_path, content)
         except Exception as e:
@@ -790,6 +836,12 @@ class NamespaceAuditor:
         self.console.print(f"\n[bold]Output files[/bold] → [cyan]{self.output_dir}/[/cyan]")
         for name in self.output_files:
             self.console.print(f"  [green]✓[/green] {name}")
+
+    def _write_license(self, file_path: str):
+        """Write the raw license status JSON, skipped when no data was collected."""
+        if self.data.license_status is None:
+            return
+        write_json(file_path, self.data.license_status)
 
     def _write_namespace_summary(self, file_path: str):
         if not self.data.namespaces:

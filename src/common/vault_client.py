@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from contextlib import contextmanager
+from typing import NamedTuple
 
 import hvac
 import requests
@@ -19,6 +20,14 @@ from .exceptions import (  # noqa: F401
     VaultDataError,
     VaultPermissionError,
 )
+
+
+class ConnectionInfo(NamedTuple):
+    cluster_name: str
+    vault_version: str | None
+    is_enterprise: bool
+    cluster_id: str | None
+
 
 # Upper bound on how much of a Vault error body is carried in an exception
 # message. Exception text reaches the audit log via `error=str(e)`, so the whole
@@ -117,8 +126,8 @@ class VaultClient:
         )
         yield client
 
-    def validate_connection(self) -> str:
-        """Validate Vault connection and return cluster name."""
+    def validate_connection(self) -> ConnectionInfo:
+        """Validate Vault connection and return connection information."""
         try:
             with self.get_client() as client:
                 health_status = client.sys.read_health_status(
@@ -141,8 +150,11 @@ class VaultClient:
                     raise VaultConnectionError("Vault cluster is not initialized. Please initialize the cluster using 'vault operator init'.")
 
                 cluster_name = health_status.get("cluster_name", "unknown")
+                vault_version = health_status.get("version")
+                is_enterprise = "+ent" in (vault_version or "")
+                cluster_id = health_status.get("cluster_id")
                 self.logger.info(f"Connected to Vault cluster: {cluster_name}")
-                return cluster_name
+                return ConnectionInfo(cluster_name, vault_version, is_enterprise, cluster_id)
 
         except hvac.exceptions.VaultError as e:
             error_msg = f"Vault API error: {e}. Please check your VAULT_ADDR ({self.vault_addr}) and network connectivity."

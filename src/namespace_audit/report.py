@@ -89,6 +89,9 @@ ALWAYS_TRUE_MAIN = re.compile(r"^main\s*=\s*rule\s*\{\s*true\s*\}$")
 # the blast radius should be a deliberate choice.
 BROAD_EGP_PATHS = frozenset({"*", "/*"})
 
+# Days before license expiration at which a finding is raised.
+LICENSE_EXPIRY_WARNING_DAYS = 90
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -445,6 +448,53 @@ def render_enforcement_distribution(egp: dict[str, Any], rgp: dict[str, Any]) ->
     return md_table(["Enforcement level", "EGP", "RGP"], rows)
 
 
+def _license_expiry_days(expiration_time: str, now: datetime | None = None) -> int | None:
+    """Days until the license soft-expiry. Returns None when the string is unparseable."""
+    try:
+        expiry = datetime.fromisoformat(expiration_time.replace("Z", "+00:00"))
+        reference = now or datetime.now(UTC)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=UTC)
+        return (expiry - reference).days
+    except (ValueError, AttributeError):
+        return None
+
+
+def render_license(license_status: dict[str, Any] | None, is_enterprise: bool) -> str:
+    """Render the ## License section.
+
+    Returns an empty string for Community Edition so the caller can omit the
+    section entirely. Returns an unavailability note for Enterprise clusters
+    where the endpoint was inaccessible.
+    """
+    if license_status is None:
+        if not is_enterprise:
+            return ""
+        return "_License data unavailable — `sys/license/status` was not accessible with the provided token._"
+
+    rows: list[list[Any]] = []
+    rows.append(["License ID", license_status.get("license_id", "—")])
+    rows.append(["Issuer", license_status.get("issuer", "—")])
+    edition = license_status.get("edition", "")
+    if edition:
+        rows.append(["Edition", edition])
+    expiry = license_status.get("expiration_time", "")
+    if expiry:
+        rows.append(["Expires (soft)", expiry[:10]])
+    termination = license_status.get("termination_time", "")
+    if termination:
+        rows.append(["Terminates (hard)", termination[:10]])
+    perf_standbys = license_status.get("performance_standby_count")
+    if perf_standbys is not None:
+        rows.append(["Perf. standbys", perf_standbys])
+
+    features = license_status.get("features") or []
+    features_line = ", ".join(sorted(features)) if features else "—"
+
+    table = md_table(["Field", "Value"], rows)
+    return f"{table}\n\n**Features:** {features_line}"
+
+
 def _collect_sentinel_findings(data: AuditData) -> list[Finding]:
     """Security observations derived from the Sentinel policies collected."""
     findings: list[Finding] = []
@@ -609,6 +659,20 @@ def collect_findings(data: AuditData, system_max_lease_ttl: int | None = None) -
 
     findings.extend(_collect_sentinel_findings(data))
 
+    if isinstance(data.license_status, dict):
+        expiry_str = data.license_status.get("expiration_time", "")
+        days = _license_expiry_days(expiry_str)
+        if days is not None and days <= LICENSE_EXPIRY_WARNING_DAYS:
+            findings.append(
+                Finding(
+                    "Medium",
+                    "",
+                    "—",
+                    "license",
+                    f"License expires on {expiry_str[:10]} ({days} day{'s' if days != 1 else ''} remaining) — renew before the grace period ends.",
+                )
+            )
+
     findings.sort(key=lambda f: (SEVERITY_ORDER.index(f.severity), f.namespace, f.mount))
     return findings
 
@@ -726,6 +790,12 @@ def _summary_rows(
         # defaults, which a tuned cluster will not be using.
         default_ttl, max_ttl = system_lease_ttls
         rows.append(["System lease TTL", f"{format_ttl(default_ttl)} default / {format_ttl(max_ttl)} max"])
+    if isinstance(data.license_status, dict):
+        expiry = data.license_status.get("expiration_time", "")
+        if expiry:
+            rows.append(["License expiry", expiry[:10]])
+        features = data.license_status.get("features") or []
+        rows.append(["Licensed features", len(features)])
     return rows
 
 
@@ -741,6 +811,9 @@ def build_markdown_report(
     generated_at: datetime | None = None,
     system_lease_ttls: tuple[int, int] | None = None,
     sentinel_supported: bool | None = None,
+    vault_version: str | None = None,
+    license_status: dict[str, Any] | None = None,
+    cluster_id: str | None = None,
 ) -> str:
     """Render the complete namespace audit report as a markdown document.
 
@@ -758,16 +831,21 @@ def build_markdown_report(
     system_max = system_lease_ttls[1] if system_lease_ttls else None
     findings = collect_findings(data, system_max_lease_ttl=system_max)
 
+    is_enterprise = "+ent" in (vault_version or "")
+    edition_label = "Enterprise" if is_enterprise else "Community Edition"
+
     header_rows = [
         ["Cluster", cluster_name],
         ["Generated", generated.strftime("%Y-%m-%d %H:%M:%S UTC")],
         ["Tool version", f"vault-tools {get_tool_version()}"],
         ["Starting namespace", display_namespace(start_namespace)],
     ]
-    # Omitted rather than rendered empty when unknown: a blank address row would
-    # read as "audited a cluster with no address" instead of "not recorded".
     if vault_addr:
         header_rows.insert(1, ["Vault address", vault_addr])
+    if cluster_id:
+        header_rows.insert(1, ["Cluster ID", cluster_id])
+    if vault_version:
+        header_rows.append(["Vault version", f"{vault_version} ({edition_label})"])
 
     sentinel_sections: list[str] = ["## Sentinel policies", ""]
     if sentinel_supported is False:
@@ -807,6 +885,11 @@ def build_markdown_report(
             ]
         )
 
+    license_content = render_license(license_status, is_enterprise)
+    license_section: list[str] = []
+    if license_content:
+        license_section = ["## License", "", license_content, ""]
+
     sections = [
         f"# Vault Namespace Audit — {cluster_name}",
         "",
@@ -816,6 +899,7 @@ def build_markdown_report(
         "",
         md_table(["Metric", "Value"], _summary_rows(data, stats, worker_threads, system_lease_ttls, sentinel_supported)),
         "",
+        *license_section,
         "## Access gaps",
         "",
         render_access_gaps(stats, start_namespace),

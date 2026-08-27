@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import hvac
 import pytest
 
-from src.common.vault_client import VaultConnectionError
+from src.common.vault_client import ConnectionInfo, VaultConnectionError
 from src.namespace_audit.main import PROGRESS_DESCRIPTION, AuditData, AuditStats, NamespaceAuditor
 
 from .fixtures import mock_file_operations
@@ -56,11 +56,11 @@ class TestVaultConnectionHandling:
 
     def test_validate_vault_connection_success(self, auditor):
         """Test successful Vault connection validation."""
-        auditor.vault_client.validate_connection.return_value = "test-cluster"
+        auditor.vault_client.validate_connection.return_value = ConnectionInfo("test-cluster", "1.17.0+ent", True, "d33099d9-206e-53c2-4e50-44fb62ac69a6")
 
         result = auditor.vault_client.validate_connection()
 
-        assert result == "test-cluster"
+        assert result.cluster_name == "test-cluster"
         auditor.vault_client.validate_connection.assert_called_once()
 
     def test_validate_vault_connection_sealed(self, auditor):

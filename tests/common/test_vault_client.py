@@ -12,7 +12,7 @@ from src.common.exceptions import (
     VaultDataError,
     VaultPermissionError,
 )
-from src.common.vault_client import VaultClient
+from src.common.vault_client import ConnectionInfo, VaultClient
 from tests.fake_secrets import fake_token
 
 # ---------------------------------------------------------------------------
@@ -92,11 +92,13 @@ class TestGetClient:
 
 
 class TestValidateConnection:
-    def _make_health(self, cluster_name="test-cluster"):
+    def _make_health(self, cluster_name="test-cluster", version="1.17.0+ent", cluster_id="d33099d9-206e-53c2-4e50-44fb62ac69a6"):
         return {
             "cluster_name": cluster_name,
+            "cluster_id": cluster_id,
             "sealed": False,
             "initialized": True,
+            "version": version,
         }
 
     def test_success(self, client):
@@ -109,9 +111,49 @@ class TestValidateConnection:
         with patch.object(client, "get_client") as mock_gc:
             mock_gc.return_value.__enter__ = Mock(return_value=mock_hvac)
             mock_gc.return_value.__exit__ = Mock(return_value=False)
-            name = client.validate_connection()
+            info = client.validate_connection()
 
-        assert name == "test-cluster"
+        assert isinstance(info, ConnectionInfo)
+        assert info.cluster_name == "test-cluster"
+        assert info.vault_version == "1.17.0+ent"
+        assert info.is_enterprise is True
+        assert info.cluster_id == "d33099d9-206e-53c2-4e50-44fb62ac69a6"
+
+    def test_success_ce(self, client):
+        mock_hvac = MagicMock()
+        mock_hvac.sys.read_health_status.return_value = self._make_health(version="1.16.0")
+        mock_hvac.sys.is_sealed.return_value = False
+        mock_hvac.is_authenticated.return_value = True
+        mock_hvac.sys.is_initialized.return_value = True
+
+        with patch.object(client, "get_client") as mock_gc:
+            mock_gc.return_value.__enter__ = Mock(return_value=mock_hvac)
+            mock_gc.return_value.__exit__ = Mock(return_value=False)
+            info = client.validate_connection()
+
+        assert isinstance(info, ConnectionInfo)
+        assert info.cluster_name == "test-cluster"
+        assert info.vault_version == "1.16.0"
+        assert info.is_enterprise is False
+        assert info.cluster_id == "d33099d9-206e-53c2-4e50-44fb62ac69a6"
+
+    def test_cluster_id_none_when_absent(self, client):
+        mock_hvac = MagicMock()
+        mock_hvac.sys.read_health_status.return_value = self._make_health(cluster_id=None)
+        mock_hvac.sys.is_sealed.return_value = False
+        mock_hvac.is_authenticated.return_value = True
+        mock_hvac.sys.is_initialized.return_value = True
+
+        health = self._make_health()
+        health.pop("cluster_id")
+        mock_hvac.sys.read_health_status.return_value = health
+
+        with patch.object(client, "get_client") as mock_gc:
+            mock_gc.return_value.__enter__ = Mock(return_value=mock_hvac)
+            mock_gc.return_value.__exit__ = Mock(return_value=False)
+            info = client.validate_connection()
+
+        assert info.cluster_id is None
 
     def test_sealed_raises(self, client):
         mock_hvac = MagicMock()

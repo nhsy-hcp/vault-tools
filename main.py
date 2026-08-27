@@ -270,7 +270,7 @@ def main() -> None:
                 start_date=args.start_date,
                 end_date=args.end_date,
             )
-            cluster_name = vault_client.validate_connection()
+            cluster_name = vault_client.validate_connection().cluster_name
             run_activity_export(
                 vault_client,
                 args.start_date,
@@ -288,7 +288,7 @@ def main() -> None:
                 start_date=args.start_date,
                 end_date=args.end_date,
             )
-            cluster_name = vault_client.validate_connection()
+            cluster_name = vault_client.validate_connection().cluster_name
             run_entity_export(
                 vault_client,
                 args.start_date,
@@ -308,7 +308,7 @@ def main() -> None:
                 workers=args.workers,
             )
             # Validate connection once and reuse the cluster name for all sub-tools.
-            cluster_name = vault_client.validate_connection()
+            cluster_name = vault_client.validate_connection().cluster_name
 
             # Run namespace-audit
             logger.info("subcommand_started", subcommand="namespace-audit")

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from src.common.vault_client import VaultClient
+from src.common.vault_client import ConnectionInfo, VaultClient
 from src.namespace_audit.main import NamespaceAuditor
 
 
@@ -55,7 +55,7 @@ def mock_vault_client():
     client.vault_addr = "https://vault.example.com:8200"
 
     # Mock validate_connection method
-    client.validate_connection.return_value = "test-cluster"
+    client.validate_connection.return_value = ConnectionInfo("test-cluster", "1.17.0+ent", True, "d33099d9-206e-53c2-4e50-44fb62ac69a6")
 
     # Create a mock context manager for get_client
     mock_context_manager = MagicMock()
@@ -122,6 +122,7 @@ def mock_file_operations():
         patch("src.namespace_audit.main.write_json") as mock_write_json,
         patch("src.namespace_audit.main.write_csv") as mock_write_csv,
         patch("src.namespace_audit.main.write_markdown"),
+        patch("src.namespace_audit.main.NamespaceAuditor._write_license"),
         patch("os.makedirs"),
     ):
         yield mock_write_json, mock_write_csv

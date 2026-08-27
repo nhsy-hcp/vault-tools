@@ -18,10 +18,12 @@ from tests.namespace_audit.fixtures import (
     sample_audit_data,
 )
 from tests.namespace_audit.report_fixtures import (
+    ce_data,
     clean_data,
     denied_stats,
     finished_stats,
     flagged_data,
+    license_expiring_data,
     sentinel_data,
 )
 
@@ -56,10 +58,12 @@ def temp_dir():
 
 __all__ = [
     "auditor",
+    "ce_data",
     "clean_data",
     "denied_stats",
     "finished_stats",
     "flagged_data",
+    "license_expiring_data",
     "mock_file_operations",
     "mock_threading",
     "mock_vault_client",

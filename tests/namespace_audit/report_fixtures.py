@@ -5,6 +5,8 @@ the real output files in outputs/) rather than the minimal {"type": ...} stubs
 used elsewhere, because the report reads config, deprecation_status and local.
 """
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from src.namespace_audit.main import AuditData, AuditStats
@@ -37,6 +39,36 @@ def mount(mount_type, **overrides):
     return data
 
 
+def _sample_license(expiration_days_from_now: int = 365) -> dict:
+    """Build a realistic sys/license/status autoloaded dict."""
+    expiry = datetime.now(UTC) + timedelta(days=expiration_days_from_now)
+    termination = datetime.now(UTC) + timedelta(days=expiration_days_from_now + 3650)
+    return {
+        "license_id": "060d7820-fa59-f95c-832b-395db0aeb9ba",
+        "issuer": "hashicorp",
+        "edition": "",
+        "start_time": "2024-01-01T00:00:00Z",
+        "expiration_time": expiry.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "termination_time": termination.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "performance_standby_count": 9999,
+        "features": [
+            "DR Replication",
+            "Entropy Augmentation",
+            "HSM",
+            "Key Management Secrets Engine",
+            "KMIP",
+            "Lease Count Quotas",
+            "MFA",
+            "Namespaces",
+            "Performance Replication",
+            "Performance Standby",
+            "Seal Wrapping",
+            "Sentinel",
+            "Transform Secrets Engine",
+        ],
+    }
+
+
 @pytest.fixture
 def clean_data():
     """A cluster with nothing worth flagging: root plus one populated child."""
@@ -50,6 +82,9 @@ def clean_data():
         "": {"cubbyhole/": mount("cubbyhole"), "identity/": mount("identity"), "kv/": mount("kv")},
         "team-a": {"ns_cubbyhole/": mount("ns_cubbyhole"), "pki/": mount("pki")},
     }
+    data.vault_version = "1.17.0+ent"
+    data.license_status = _sample_license(expiration_days_from_now=365)
+    data.cluster_id = "d33099d9-206e-53c2-4e50-44fb62ac69a6"
     return data
 
 
@@ -80,6 +115,8 @@ def flagged_data():
         # built-ins only: triggers the "empty namespace" finding
         "empty": {"cubbyhole/": mount("cubbyhole"), "identity/": mount("identity")},
     }
+    data.vault_version = "1.17.0+ent"
+    data.license_status = _sample_license(expiration_days_from_now=365)
     return data
 
 
@@ -127,6 +164,32 @@ def sentinel_data():
     data.rgp_policies = {
         "team-a": {"overridable": sentinel_policy("overridable", enforcement_level="soft-mandatory")},
     }
+    data.vault_version = "1.17.0+ent"
+    data.license_status = _sample_license(expiration_days_from_now=365)
+    return data
+
+
+@pytest.fixture
+def license_expiring_data():
+    """A cluster whose license expires within the warning window."""
+    data = AuditData()
+    data.namespaces = {}
+    data.auth_methods = {"": {"token/": mount("token")}}
+    data.secret_engines = {"": {"cubbyhole/": mount("cubbyhole"), "identity/": mount("identity")}}
+    data.vault_version = "1.17.0+ent"
+    data.license_status = _sample_license(expiration_days_from_now=30)
+    return data
+
+
+@pytest.fixture
+def ce_data():
+    """A Community Edition cluster — no license, CE version string."""
+    data = AuditData()
+    data.namespaces = {}
+    data.auth_methods = {"": {"token/": mount("token")}}
+    data.secret_engines = {"": {"cubbyhole/": mount("cubbyhole"), "identity/": mount("identity")}}
+    data.vault_version = "1.16.0"
+    data.license_status = None
     return data
 
 

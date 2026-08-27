@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.common.vault_client import VaultConnectionError
+from src.common.vault_client import ConnectionInfo, VaultConnectionError
 from src.namespace_audit.main import NamespaceAuditor
 
 
@@ -16,7 +16,7 @@ class TestAuditClusterIntegration:
     def test_audit_cluster_success(self, mock_vault_client, mock_threading):
         """Test successful cluster audit."""
         auditor = NamespaceAuditor(mock_vault_client)
-        mock_vault_client.validate_connection.return_value = "test-cluster"
+        mock_vault_client.validate_connection.return_value = ConnectionInfo("test-cluster", "1.17.0+ent", True, "d33099d9-206e-53c2-4e50-44fb62ac69a6")
         mock_thread, mock_queue = mock_threading
 
         with patch.object(auditor, "_write_reports") as mock_write_reports:
@@ -53,7 +53,7 @@ class TestAuditClusterIntegration:
     def test_audit_cluster_with_custom_namespace(self, mock_vault_client, mock_threading):
         """Test audit starting from a custom namespace."""
         auditor = NamespaceAuditor(mock_vault_client)
-        mock_vault_client.validate_connection.return_value = "test-cluster"
+        mock_vault_client.validate_connection.return_value = ConnectionInfo("test-cluster", "1.17.0+ent", True, "d33099d9-206e-53c2-4e50-44fb62ac69a6")
         mock_thread, mock_queue = mock_threading
 
         with patch.object(auditor, "_write_reports") as mock_write_reports:
@@ -78,7 +78,7 @@ class TestEndToEndWorkflow:
     def test_minimal_audit_workflow(self, mock_vault_client, temp_dir, mock_threading):
         """Test a minimal audit workflow."""
         auditor = NamespaceAuditor(mock_vault_client, worker_threads=1)
-        mock_vault_client.validate_connection.return_value = "test-cluster"
+        mock_vault_client.validate_connection.return_value = ConnectionInfo("test-cluster", "1.17.0+ent", True, "d33099d9-206e-53c2-4e50-44fb62ac69a6")
         mock_thread, mock_queue = mock_threading
 
         # Set up minimal test data
@@ -101,7 +101,7 @@ class TestEndToEndWorkflow:
         mock_thread, mock_queue = mock_threading
 
         # Simulate various error conditions
-        mock_vault_client.validate_connection.return_value = "test-cluster"
+        mock_vault_client.validate_connection.return_value = ConnectionInfo("test-cluster", "1.17.0+ent", True, "d33099d9-206e-53c2-4e50-44fb62ac69a6")
 
         # Test error handling during report writing
         with patch.object(auditor, "_write_reports", side_effect=Exception("Write failed")):
@@ -121,7 +121,7 @@ class TestConfigurationVariations:
         mock_thread, mock_queue = mock_threading
 
         # Should work with single thread
-        mock_vault_client.validate_connection.return_value = "test-cluster"
+        mock_vault_client.validate_connection.return_value = ConnectionInfo("test-cluster", "1.17.0+ent", True, "d33099d9-206e-53c2-4e50-44fb62ac69a6")
         with patch.object(auditor, "_write_reports"):
             auditor.audit_cluster()
             # Should create exactly one worker thread
@@ -133,7 +133,7 @@ class TestConfigurationVariations:
         assert auditor.worker_threads == 4
         mock_thread, mock_queue = mock_threading
 
-        mock_vault_client.validate_connection.return_value = "test-cluster"
+        mock_vault_client.validate_connection.return_value = ConnectionInfo("test-cluster", "1.17.0+ent", True, "d33099d9-206e-53c2-4e50-44fb62ac69a6")
         with patch.object(auditor, "_write_reports"):
             auditor.audit_cluster()
             # Should create exactly four worker threads

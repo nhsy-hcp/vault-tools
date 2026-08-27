@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.common.vault_client import VaultConnectionError
+from src.common.vault_client import ConnectionInfo, VaultConnectionError
 from src.namespace_audit.main import NamespaceAuditor
 
 
@@ -131,9 +131,9 @@ class TestComponentInteractions:
         assert auditor.vault_client == mock_vault_client
 
         # Test client method calls
-        mock_vault_client.validate_connection.return_value = "test-cluster"
+        mock_vault_client.validate_connection.return_value = ConnectionInfo("test-cluster", "1.17.0+ent", True, "d33099d9-206e-53c2-4e50-44fb62ac69a6")
         result = auditor.vault_client.validate_connection()
-        assert result == "test-cluster"
+        assert result.cluster_name == "test-cluster"
 
         # Test client context manager
         assert auditor.vault_client.get_client is not None
