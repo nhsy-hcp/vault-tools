@@ -1,7 +1,10 @@
 name: Test Vault Tools
 
+# Push runs only on main: a feature branch is tested through its PR, which would
+# otherwise run the same job twice per commit (once for push, once for the PR).
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
