@@ -26,7 +26,9 @@ def mount(mount_type, **overrides):
         "description": "",
         "external_entropy_access": False,
         "local": False,
-        "options": None,
+        # Vault writes {"version": "2"} for KV v2 and nothing for v1, so a kv
+        # stub without it would be a KV v1 mount and trip VT-MOUNT-006.
+        "options": {"version": "2"} if mount_type == "kv" else None,
         "plugin_version": "",
         "running_plugin_version": "v1.0.0+builtin.vault",
         "seal_wrap": False,

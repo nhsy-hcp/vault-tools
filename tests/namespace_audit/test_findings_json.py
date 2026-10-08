@@ -103,3 +103,13 @@ class TestAuditorWritesFindings:
 
         assert any("-namespace-findings-" in call.args[0] for call in mock_write_json.call_args_list)
         assert auditor.findings_document["summary"]["total"] == 0
+
+
+def test_cluster_default_lease_ttl_reaches_both_files(clean_data, finished_stats):
+    """VT-LEASE-001 reads the default from system_lease_ttls in both renderers."""
+    ttls = (1000 * 3600, 2000 * 3600)
+    doc = _build(clean_data, finished_stats, system_lease_ttls=ttls)
+    jsonschema.validate(doc, SCHEMA)
+    assert doc["summary"]["by_rule"].get("VT-LEASE-001") == 1
+    markdown = build_markdown_report("test-cluster", clean_data, finished_stats, generated_at=NOW, system_lease_ttls=ttls)
+    assert "| VT-LEASE-001 |" in markdown

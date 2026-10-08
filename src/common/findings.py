@@ -51,13 +51,20 @@ RULES: dict[str, Rule] = {
     "VT-AUTH-001": Rule("Low", "exposure", "Auth mount listed to unauthenticated callers"),
     "VT-MOUNT-002": Rule("Low", "lease", "Mount max lease TTL overrides cluster ceiling"),
     "VT-MOUNT-003": Rule("Info", "replication", "Mount is local (not replicated)"),
+    "VT-MOUNT-004": Rule("Low", "lease", "Mount default lease TTL is long"),
+    "VT-MOUNT-005": Rule("Info", "hygiene", "Many mounts of one type in a namespace"),
+    "VT-MOUNT-006": Rule("Info", "hygiene", "KV version 1 mount"),
     "VT-NS-001": Rule("Info", "hygiene", "Namespace has no auth method beyond token"),
     "VT-NS-002": Rule("Info", "hygiene", "Leaf namespace appears unused"),
     "VT-SNT-001": Rule("Low", "governance", "Sentinel policy is advisory"),
     "VT-SNT-002": Rule("Info", "governance", "Sentinel policy is overridable"),
     "VT-SNT-003": Rule("Info", "governance", "EGP applies to every path"),
     "VT-SNT-004": Rule("Low", "governance", "Sentinel policy always evaluates true"),
+    "VT-SNT-005": Rule("Low", "governance", "Same-named Sentinel policy differs across namespaces"),
+    "VT-SNT-006": Rule("Medium", "governance", "Hard-mandatory Sentinel policy always evaluates false"),
+    "VT-SNT-007": Rule("Info", "governance", "Sentinel policy makes outbound HTTP calls"),
     "VT-LIC-001": Rule("Medium", "lifecycle", "License expires soon"),
+    "VT-LEASE-001": Rule("Low", "lease", "Cluster default lease TTL is long"),
 }
 
 

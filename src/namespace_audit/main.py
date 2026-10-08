@@ -48,6 +48,11 @@ PROGRESS_DESCRIPTION = "[cyan]Processing namespaces..."
 # "default-ceiling-override" is real configuration and must still be listed.
 BUILTIN_ACL_POLICIES = frozenset({"default", "root", "default-ceiling"})
 
+# Error bodies that mean "this build has no Sentinel", as opposed to "no
+# policies in this namespace" (both 404). Vault 1.x Community says
+# "unsupported path"; Vault 2.x Community says "enterprise-only feature".
+SENTINEL_UNSUPPORTED_MARKERS = ("unsupported path", "enterprise-only feature")
+
 
 class Constants:
     DEFAULT_WORKER_THREADS = 4
@@ -512,7 +517,7 @@ class NamespaceAuditor:
             lister = client.sys.list_egp_policies if kind == "egp" else client.sys.list_rgp_policies
             names = lister()["data"]["keys"] or []
         except hvac.exceptions.InvalidPath as e:
-            if "unsupported path" in str(e).lower():
+            if any(marker in str(e).lower() for marker in SENTINEL_UNSUPPORTED_MARKERS):
                 with self.thread_lock:
                     first = self.sentinel_supported is None
                     self.sentinel_supported = False
