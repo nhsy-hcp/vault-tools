@@ -301,6 +301,65 @@ def build_findings_document(
     }
 
 
+def merge_documents(documents: list[dict[str, Any]], *, run: dict[str, Any], cluster_context: dict[str, Any], tool_version: str) -> dict[str, Any]:
+    """One findings document from several, for full-audit.
+
+    Findings are deduplicated by fingerprint: namespace-audit embeds the
+    cluster health, license and lease findings that cluster-audit also
+    reports. Coverage is complete only if every input was.
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    for document in documents:
+        for item in document.get("findings", []):
+            seen.setdefault(item["fingerprint"], item)
+    ordered = sorted(
+        seen.values(),
+        key=lambda f: (SEVERITY_ORDER.index(f["severity"].capitalize()), f["namespace"], (f.get("object") or {}).get("path") or "—", f["rule_id"]),
+    )
+
+    denied: dict[tuple[str, str], dict[str, str]] = {}
+    errors: dict[tuple[str, str], dict[str, str]] = {}
+    for document in documents:
+        coverage = document.get("coverage", {})
+        for d in coverage.get("denied", []):
+            denied.setdefault((d["namespace"], d["scope"]), d)
+        for e in coverage.get("errors", []):
+            errors.setdefault((e["namespace"], e["message"]), e)
+
+    by_severity = {s.lower(): 0 for s in SEVERITY_ORDER}
+    by_severity.update(Counter(f["severity"] for f in ordered))
+    return {
+        "schema_version": FINDINGS_SCHEMA_VERSION,
+        "tool": {"name": TOOL_NAME, "version": tool_version},
+        "run": run,
+        "cluster_context": cluster_context,
+        "coverage": {
+            "namespaces_processed": max((d.get("coverage", {}).get("namespaces_processed", 0) for d in documents), default=0),
+            "complete": all(d.get("coverage", {}).get("complete", True) for d in documents),
+            "denied": [denied[k] for k in sorted(denied)],
+            "errors": [errors[k] for k in sorted(errors)],
+        },
+        "summary": {"total": len(ordered), "by_severity": by_severity, "by_rule": dict(sorted(Counter(f["rule_id"] for f in ordered).items()))},
+        "findings": ordered,
+    }
+
+
+def finding_from_dict(item: dict[str, Any]) -> Finding:
+    """Rebuild a Finding from its findings.json form, for rendering merged documents."""
+    obj = item.get("object") or {}
+    namespace = item["namespace"]
+    return Finding(
+        item["rule_id"],
+        item["severity"].capitalize(),
+        "" if namespace == "/" else namespace,
+        obj.get("kind", ""),
+        obj.get("path"),
+        obj.get("type"),
+        item["detail"],
+        MappingProxyType(dict(item.get("evidence") or {})),
+    )
+
+
 def diff_documents(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     """Compare two findings documents by fingerprint.
 

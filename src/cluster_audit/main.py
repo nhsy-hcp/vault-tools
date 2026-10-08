@@ -10,13 +10,14 @@ from __future__ import annotations
 import logging
 import os
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from src.cluster_audit.collector import (
+    ClusterCoverage,
     collect_cluster_health,
     fetch_license_status,
     fetch_system_lease_ttls,
@@ -39,8 +40,24 @@ _NODE_STATE = {
 }
 
 
+class ClusterAuditResult(NamedTuple):
+    document: dict[str, Any]
+    health: dict[str, Any]
+    coverage: ClusterCoverage
+    cluster_name: str
+    # "sealed", "uninitialized" or "dr_secondary" when the node rejects
+    # authenticated reads; None when it serves them.
+    unavailable_reason: str | None
+
+
 def run_cluster_audit(vault_client: VaultClient, output_dir: str, console: Console | None = None) -> dict[str, Any] | None:
     """Collect, judge and write the cluster audit. Returns the findings document, or None on failure."""
+    result = run_cluster_audit_full(vault_client, output_dir, console)
+    return result.document if result else None
+
+
+def run_cluster_audit_full(vault_client: VaultClient, output_dir: str, console: Console | None = None) -> ClusterAuditResult | None:
+    """run_cluster_audit, also returning what was collected so full-audit can reuse it."""
     console = console or Console()
     console.print(Panel.fit(f"[bold cyan]Vault Cluster Audit[/bold cyan]\nVault address: [yellow]{vault_client.vault_addr}[/yellow]", border_style="cyan"))
     started = datetime.now(UTC)
@@ -126,7 +143,7 @@ def run_cluster_audit(vault_client: VaultClient, output_dir: str, console: Conso
     console.print(f"\n[bold]Output files[/bold] → [cyan]{output_dir}/[/cyan]")
     for path in written:
         console.print(f"  [green]✓[/green] {os.path.basename(path)}")
-    return document
+    return ClusterAuditResult(document, health, coverage, cluster_name, reason)
 
 
 def _print_summary(console: Console, health: dict[str, Any], document: dict[str, Any]) -> None:
