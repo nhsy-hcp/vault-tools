@@ -1160,7 +1160,7 @@ def build_findings_json(
         coverage=coverage_block(
             stats.processed_count,
             [*stats.forbidden_namespaces, *_cluster_denials(data)],
-            [*stats.errors, *(data.cluster_coverage.errors if data.cluster_coverage else [])],
+            [*stats.errors, *(data.cluster_coverage.error_rows() if data.cluster_coverage else [])],
             unattributed_denials=stats.forbidden_count - len(stats.forbidden_namespaces),
             unattributed_errors=stats.error_count - len(stats.errors),
         ),

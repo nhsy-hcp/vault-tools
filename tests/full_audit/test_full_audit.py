@@ -7,10 +7,11 @@ import pytest
 from rich.console import Console
 
 from src.activity_export.main import ActivityExportResult
-from src.cluster_audit.collector import ClusterCoverage
+from src.cluster_audit.collector import ClusterCoverage, ClusterReads, LicenseResult
 from src.cluster_audit.main import ClusterAuditResult
 from src.common.findings import finding, merge_documents
-from src.full_audit.main import build_full_report, default_window, run_full_audit
+from src.full_audit.main import build_full_report, default_window, files_written_since, run_full_audit
+from src.identity_audit.main import IdentityAuditResult
 
 
 def _doc(findings=(), complete=True, denied=(), sentinel="skipped"):
@@ -30,7 +31,9 @@ ORPHAN = finding("VT-ID-001", "team-a", "entity", "e1", None, "orphan", entity_i
 
 
 def _cluster(reason=None):
-    return ClusterAuditResult(_doc([AUD]), {"enterprise": True, "version": "1.20.1+ent"}, ClusterCoverage(), "c", reason)
+    health, coverage = {"enterprise": True, "version": "1.20.1+ent"}, ClusterCoverage()
+    reads = ClusterReads(health, coverage, LicenseResult(None, None, True), (3600, 86400))
+    return ClusterAuditResult(_doc([AUD]), health, coverage, "c", reason, reads)
 
 
 class Harness:
@@ -72,7 +75,7 @@ class Harness:
         with (
             patch("src.full_audit.main.run_cluster_audit_full", side_effect=step("cluster-audit", self.cluster)),
             patch("src.full_audit.main.NamespaceAuditor", return_value=auditor) as auditor_cls,
-            patch("src.full_audit.main.run_identity_audit", side_effect=step("identity-audit", _doc([ORPHAN]))),
+            patch("src.full_audit.main.run_identity_audit_full", side_effect=step("identity-audit", IdentityAuditResult(_doc([ORPHAN]), {"clients": 7}))),
             patch("src.full_audit.main.run_activity_export", side_effect=step("activity-export", ActivityExportResult([], [], _doc()))),
             patch("src.full_audit.main.run_entity_export", side_effect=step("entity-export", None)),
             patch("src.full_audit.main.write_json") as write_json,
@@ -90,11 +93,13 @@ def test_runs_every_step_in_order_and_reuses_shared_state(tmp_path):
     merged = h.run(collect_acl_bodies=True, include_entity_list=True)
 
     assert h.calls == ["cluster-audit", "namespace-audit", "identity-audit", "activity-export", "entity-export"]
-    assert h.auditor_kwargs["cluster_health"] == (h.cluster.health, h.cluster.coverage)
+    assert h.auditor_kwargs["cluster_reads"] is h.cluster.reads
     assert h.auditor_kwargs["collect_acl_bodies"] is True
     assert h.kwargs["identity-audit"]["namespaces"] == ["", "team-a"]
     assert h.kwargs["identity-audit"]["include_list"] is True
     assert h.kwargs["activity-export"]["is_enterprise"] is True
+    # identity-audit's current-month read is handed on, not repeated.
+    assert h.kwargs["activity-export"]["current_month"] == {"clients": 7}
     # VT-AUD-001 came from both cluster- and namespace-audit: listed once.
     assert merged["summary"]["by_rule"] == {"VT-AUD-001": 1, "VT-ID-001": 1, "VT-MOUNT-006": 1}
     assert merged["cluster_context"]["sentinel"] == "supported"
@@ -200,3 +205,25 @@ def test_cli_gates_on_the_merged_document(monkeypatch, tmp_path):
         main.main()
     assert exc.value.code == 3
     assert run.call_args.kwargs["collect_acl_bodies"] is True and run.call_args.kwargs["start_date"] is None
+
+
+class TestFilesWrittenSince:
+    def test_lists_only_this_runs_files_for_this_cluster(self, tmp_path):
+        import os
+        import time
+
+        stale = tmp_path / "c-identity-entities-20261008.json"
+        stale.write_text("{}")
+        old = time.time() - 3600
+        os.utime(stale, (old, old))
+        since = time.time()
+        (tmp_path / "c-namespace-findings-20261007.json").write_text("{}")  # local date differs from UTC: still listed
+        (tmp_path / "c-cluster-findings-20261008.json").write_text("{}")
+        (tmp_path / "other-cluster-findings-20261008.json").write_text("{}")
+        report = tmp_path / "c-full-audit-20261008.md"
+        report.write_text("")
+
+        assert files_written_since(str(tmp_path), "c", since, exclude={str(report)}) == ["c-cluster-findings-20261008.json", "c-namespace-findings-20261007.json"]
+
+    def test_missing_directory_is_empty(self, tmp_path):
+        assert files_written_since(str(tmp_path / "nope"), "c", 0) == []

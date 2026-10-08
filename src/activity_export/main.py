@@ -71,6 +71,11 @@ def _read_optional(client: VaultClient, path: str, denied: list[tuple[str, str]]
     return None
 
 
+# Default for "the caller has not read activity/monthly": None already means
+# "read and found unreadable", so it cannot double as "not read".
+NOT_READ: Any = object()
+
+
 def _covers_current_month(end_date: str, now: datetime) -> bool:
     """The billing-period query excludes the month in progress; read it only if the window reaches it."""
     return end_date >= now.strftime("%Y-%m-01")
@@ -138,6 +143,7 @@ def assess_activity(
     output_dir: str,
     is_enterprise: bool | None = None,
     started_at: datetime | None = None,
+    current_month: Any = NOT_READ,
 ) -> dict[str, Any]:
     """Run the VT-CLI checks over exported activity and write their findings files.
 
@@ -148,7 +154,13 @@ def assess_activity(
     denied: list[tuple[str, str]] = []
     errors: list[tuple[str, str]] = []
     activity_log = parse_activity_config(_read_optional(client, "sys/internal/counters/config", denied, errors))
-    current = _read_optional(client, "sys/internal/counters/activity/monthly", denied, errors) if _covers_current_month(end_date, started) else None
+    if not _covers_current_month(end_date, started):
+        current = None
+    elif current_month is not NOT_READ:
+        # Already read this run (identity-audit, in full-audit).
+        current = current_month
+    else:
+        current = _read_optional(client, "sys/internal/counters/activity/monthly", denied, errors)
     findings = sort_findings(usage_findings(data, current, is_enterprise, activity_log))
     generated = datetime.now(UTC)
 
@@ -268,6 +280,7 @@ def run_activity_export(
     data: dict[str, Any] | None = None,
     output_dir: str = "outputs",
     is_enterprise: bool | None = None,
+    current_month: Any = NOT_READ,
 ) -> ActivityExportResult:
     console = Console()
     started_at = datetime.now(UTC)
@@ -310,7 +323,7 @@ def run_activity_export(
             progress.update(task, completed=True)
 
             task = progress.add_task("[cyan]Checking client usage patterns...", total=None)
-            findings_document = assess_activity(client, data, cluster_name, start_date, end_date, output_dir, is_enterprise, started_at)
+            findings_document = assess_activity(client, data, cluster_name, start_date, end_date, output_dir, is_enterprise, started_at, current_month)
             progress.update(task, completed=True)
 
         duration = time.time() - start_time

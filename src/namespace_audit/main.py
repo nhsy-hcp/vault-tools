@@ -21,7 +21,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from src.cluster_audit.collector import collect_cluster_health, fetch_license_status, fetch_system_lease_ttls
+from src.cluster_audit.collector import ClusterReads, LicenseResult, collect_cluster_health, fetch_license_status, fetch_system_lease_ttls
 from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import write_csv, write_json, write_markdown
 from src.common.utils import FILE_DATE_FORMAT, normalise_namespace_path
@@ -190,7 +190,7 @@ class NamespaceAuditor:
         queue_depth_warn_threshold: int = 10_000,
         collect_sentinel: bool = True,
         collect_acl_bodies: bool = False,
-        cluster_health: tuple[dict[str, Any], Any] | None = None,
+        cluster_reads: ClusterReads | None = None,
     ):
         self.vault_client = vault_client
         self.worker_threads = worker_threads
@@ -202,9 +202,9 @@ class NamespaceAuditor:
         self.queue_depth_warn_threshold = queue_depth_warn_threshold
         self.collect_sentinel = collect_sentinel
         self.collect_acl_bodies = collect_acl_bodies
-        # (health, ClusterCoverage) already read by cluster-audit in full-audit,
-        # so the cluster endpoints are not read twice in one run.
-        self.precollected_cluster_health = cluster_health
+        # Everything cluster-audit already read in full-audit (health, license,
+        # lease TTLs), so no cluster endpoint is read twice in one run.
+        self.cluster_reads = cluster_reads
         self._queue_depth_warned = False
         self.stats = AuditStats()
         self.data = AuditData()
@@ -287,11 +287,18 @@ class NamespaceAuditor:
             self.data.is_enterprise = info.is_enterprise
             self.console.print(f"[green]✓[/green] Connected to cluster: [bold]{cluster_name}[/bold]")
 
-            self.system_lease_ttls = self._fetch_system_lease_ttls()
-            self.data.license_status = self._fetch_license_status(info.is_enterprise)
+            if self.cluster_reads is not None and self.cluster_reads.license is not None:
+                self.system_lease_ttls = self.cluster_reads.lease_ttls
+                self._apply_license(self.cluster_reads.license)
+            else:
+                self.system_lease_ttls = self._fetch_system_lease_ttls()
+                self.data.license_status = self._fetch_license_status(info.is_enterprise)
             # Once per run, before the walk: these are cluster-level, and the
             # collector never raises, so a denied sys/audit cannot sink the audit.
-            self.data.cluster_health, self.data.cluster_coverage = self.precollected_cluster_health or collect_cluster_health(self.vault_client)
+            if self.cluster_reads is not None:
+                self.data.cluster_health, self.data.cluster_coverage = self.cluster_reads.health, self.cluster_reads.coverage
+            else:
+                self.data.cluster_health, self.data.cluster_coverage = collect_cluster_health(self.vault_client)
 
             # The queue must stay unbounded: worker threads are also the
             # producers (they enqueue child namespaces from _traverse_namespace),
@@ -424,10 +431,14 @@ class NamespaceAuditor:
         list means "the namespace tree is incomplete below here", and a
         cluster-level license read says nothing about namespace coverage.
         """
-        result = fetch_license_status(self.vault_client, is_enterprise)
+        return self._apply_license(fetch_license_status(self.vault_client, is_enterprise))
+
+    def _apply_license(self, result: LicenseResult) -> dict[str, Any] | None:
+        """Copy a license read onto AuditData; returns the status for license_status."""
         self.data.is_enterprise = result.is_enterprise
         if result.unavailable_reason is not None:
             self.data.license_unavailable_reason = result.unavailable_reason
+        self.data.license_status = result.status
         return result.status
 
     def _fetch_acl_policies(self, client: Any, display_path: str) -> tuple[list[str], dict[str, AclAssessment]]:

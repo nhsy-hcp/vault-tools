@@ -137,15 +137,24 @@ def collect_entities(
                     coverage.denied.append((ns, "identity entities"))
                     return ns, []
                 key_info = (listing.get("data") or {}).get("key_info") or {}
-                entities, denied = [], False
+                entities, denied, error = [], False, None
                 for entity_id in sorted(key_info):
                     info = key_info[entity_id] or {}
                     try:
                         body: dict[str, Any] | None = reader.data(f"identity/entity/id/{entity_id}")
-                    except (hvac.exceptions.VaultError, requests.exceptions.RequestException):
+                    except hvac.exceptions.InvalidPath:
+                        # Deleted between the LIST and the read: it no longer
+                        # exists, so it is neither counted nor a gap.
+                        continue
+                    except hvac.exceptions.Forbidden:
                         # The listing still names it, so the entity is counted;
                         # one access-gap row per namespace, not one per entity.
                         body, denied = None, True
+                    except (hvac.exceptions.VaultError, requests.exceptions.RequestException) as e:
+                        # A 5xx or timeout is not a token problem: report it as
+                        # an error, once per namespace, so nobody widens a policy.
+                        body = None
+                        error = error or f"identity entity details: {sanitise_error(e)}"
                     source = body or info
                     entities.append(
                         Entity(
@@ -162,6 +171,8 @@ def collect_entities(
                     )
                 if denied:
                     coverage.denied.append((ns, "identity entity details"))
+                if error:
+                    coverage.errors.append((ns, error))
                 return ns, entities
         except Exception as e:
             coverage.errors.append((ns, sanitise_error(e)))

@@ -169,3 +169,14 @@ def test_current_month_window():
     now = datetime(2026, 10, 8, tzinfo=UTC)
     assert _covers_current_month("2026-10-01", now) and _covers_current_month("2026-12-31", now)
     assert not _covers_current_month("2026-09-30", now)
+
+
+def test_current_month_read_elsewhere_is_reused():
+    """full-audit hands identity-audit's activity/monthly read on instead of repeating it."""
+    client = Mock()
+    client.vault_addr = "addr"
+    client.get.return_value = {"data": {"enabled": "enable"}}
+    with patch("src.activity_export.main.write_json"), patch("src.activity_export.main.write_csv"), patch("src.activity_export.main.write_markdown") as wm:
+        assess_activity(client, _activity([]), "c", "2026-01-01", "2026-12-31", "out", True, datetime(2026, 10, 8, tzinfo=UTC), current_month={"clients": 9})
+    assert [c.args[0] for c in client.get.call_args_list] == ["sys/internal/counters/config"]
+    assert "Clients this month (in progress) | 9" in wm.call_args.args[1]

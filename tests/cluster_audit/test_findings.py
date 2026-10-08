@@ -53,9 +53,15 @@ class TestReplication:
     def test_unhealthy_state(self):
         assert _ids(health_findings(self._repl(state="idle-ish", secondaries=[]))) == ["VT-HLTH-002"]
 
-    def test_never_connected_secondary(self):
+    def test_never_connected_secondary_is_reported_once(self):
+        """VT-REPL-002 alone: a second, higher-severity VT-HLTH-002 for the same peer double-counted it."""
         found = health_findings(self._repl(secondaries=[{"node_id": "dr-1", "connection_status": "disconnected"}]))
-        assert _ids(found) == ["VT-HLTH-002", "VT-REPL-002"]
+        assert _ids(found) == ["VT-REPL-002"]
+
+    def test_a_down_secondary_with_a_heartbeat_is_still_unhealthy(self):
+        peer = {"node_id": "dr-1", "connection_status": "disconnected", "last_heartbeat": NOW.isoformat()}
+        [f] = health_findings(self._repl(secondaries=[peer]))
+        assert f.rule_id == "VT-HLTH-002" and f.evidence["disconnected_peers"] == ["dr-1"]
 
     def test_lagging_canary(self):
         peer = {"node_id": "dr-1", "connection_status": "connected", "last_heartbeat": NOW.isoformat(), "replication_primary_canary_age_ms": 120_000}

@@ -38,8 +38,40 @@ def md_table(headers: list[str], rows: list[list[Any]]) -> str:
     return "\n".join([header_line, separator, *body])
 
 
-def render_findings_table(findings: list[Finding], empty_message: str) -> str:
-    """Findings grouped by severity, most severe first; ``empty_message`` when there are none."""
+# Above this many namespaces with an identical finding (same rule, object, type
+# and wording), the table collapses them into one row with a count and three
+# examples. A policy copied into every namespace is one decision, not 62 — on a
+# dev cluster a single `admin` policy otherwise filled 124 of 167 rows. Matches
+# the access-gaps threshold in namespace_audit/report.py. findings.json is never
+# collapsed: each copy keeps its own fingerprint for diffs and CI gates.
+MAX_FINDING_COPIES = 10
+
+
+def _finding_rows(group: list[Finding], max_copies: int) -> list[list[Any]]:
+    """One row per finding, except identical copies across many namespaces, which share one."""
+    copies: dict[tuple[str, str, str, str], list[Finding]] = {}
+    for f in group:
+        copies.setdefault((f.rule_id, f.mount, f.mount_type, f.detail), []).append(f)
+    rows: list[list[Any]] = []
+    emitted: set[tuple[str, str, str, str]] = set()
+    for f in group:
+        key = (f.rule_id, f.mount, f.mount_type, f.detail)
+        same = copies[key]
+        if len(same) <= max_copies:
+            rows.append([f.rule_id, display_namespace(f.namespace), f.mount, f.mount_type, f.detail])
+        elif key not in emitted:
+            emitted.add(key)
+            examples = ", ".join(display_namespace(c.namespace) for c in same[:3])
+            rows.append([f.rule_id, f"{len(same)} namespaces ({examples}, …)", f.mount, f.mount_type, f.detail])
+    return rows
+
+
+def render_findings_table(findings: list[Finding], empty_message: str, max_copies: int = MAX_FINDING_COPIES) -> str:
+    """Findings grouped by severity, most severe first; ``empty_message`` when there are none.
+
+    Each heading counts findings, not rows, so it still agrees with findings.json
+    when copies are collapsed.
+    """
     if not findings:
         return empty_message
 
@@ -48,7 +80,7 @@ def render_findings_table(findings: list[Finding], empty_message: str) -> str:
         group = [f for f in findings if f.severity == severity]
         if not group:
             continue
-        rows = [[f.rule_id, display_namespace(f.namespace), f.mount, f.mount_type, f.detail] for f in group]
+        rows = _finding_rows(group, max_copies)
         # "Object", not "Mount": the Sentinel checks put a policy name in this
         # column, and findings that name a whole namespace put a dash in it.
         # "Rule" carries the vault-ops catalogue ID, so a row can be looked up

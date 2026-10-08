@@ -135,3 +135,21 @@ class TestRun:
         vault = fake_identity_client({}, {})
         vault.validate_connection.side_effect = VaultConnectionError("down")
         assert self._run(vault, tmp_path)[0] is None
+
+
+class TestReadFailures:
+    """Regressions: only a 403 is a permission gap."""
+
+    def test_entity_deleted_mid_walk_is_dropped_not_a_gap(self):
+        vault = fake_identity_client({}, {"": [entity("e1"), entity("e2")]}, {("", "identity/entity/id/e1"): hvac.exceptions.InvalidPath()})
+        entities, coverage = collect_entities(vault, [""])
+        assert [e.id for e in entities[""]] == ["e2"]
+        assert coverage.complete
+
+    def test_server_error_is_an_error_not_a_denial(self):
+        extra = {("", "identity/entity/id/e1"): hvac.exceptions.InternalServerError(), ("", "identity/entity/id/e2"): hvac.exceptions.InternalServerError()}
+        vault = fake_identity_client({}, {"": [entity("e1"), entity("e2")]}, extra)
+        entities, coverage = collect_entities(vault, [""])
+        assert coverage.denied == []
+        assert coverage.errors == [("", "identity entity details: InternalServerError")]
+        assert [e.disabled for e in entities[""]] == [None, None]

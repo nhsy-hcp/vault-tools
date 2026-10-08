@@ -388,7 +388,10 @@ def health_findings(health: dict[str, Any] | None, now: datetime | None = None) 
             continue
         peers = status.get("secondaries") or status.get("primaries") or []
         findings += replication_link_findings(kind, status, peers, now)
-        disconnected = sorted(p.get("node_id") or "primary" for p in peers if p.get("connection_status") != "connected")
+        # A peer with no heartbeat since the primary started is VT-REPL-002 alone:
+        # listing it here too reported one dead secondary twice, the second time
+        # at a higher severity than the rule written for it.
+        disconnected = sorted(p.get("node_id") or "primary" for p in peers if p.get("connection_status") != "connected" and not never_connected(p))
         if state not in HEALTHY_REPLICATION_STATES:
             detail = f"{kind.upper()} replication is `{mode}` but its state is `{state}` — check the replication link."
         elif disconnected:
