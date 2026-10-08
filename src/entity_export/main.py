@@ -11,7 +11,7 @@ from rich.table import Table
 
 from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import FileProcessingError, write_csv, write_json
-from src.common.utils import FILE_DATE_FORMAT
+from src.common.utils import FILE_DATE_FORMAT, file_prefix
 from src.common.vault_client import VaultClient
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,7 @@ def run_entity_export(
     cluster_name: str,
     data: list[dict[str, Any]] | None = None,
     output_dir: str = "outputs",
+    cluster_id: str | None = None,
 ):
     console = Console()
     audit_logger = get_audit_logger()
@@ -141,7 +142,7 @@ def run_entity_export(
                 console.print("[green]✓[/green] Entity data retrieved")
 
             task = progress.add_task("[cyan]Processing and writing reports...", total=None)
-            df = process_entity_export_data(data, cluster_name, output_dir)
+            df = process_entity_export_data(data, file_prefix(cluster_name, cluster_id), output_dir)
             progress.update(task, completed=True)
 
         duration = time.time() - start_time
@@ -186,7 +187,7 @@ def run_entity_export(
             audit_logger.log_data_export(
                 export_type="entities",
                 record_count=len(df),
-                output_file=f"{output_dir}/{cluster_name}-entity-export-*.csv",
+                output_file=f"{output_dir}/{file_prefix(cluster_name, cluster_id)}-entity-export-*.csv",
                 filters={"start_date": start_date, "end_date": end_date},
             )
         else:

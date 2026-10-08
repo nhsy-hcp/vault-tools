@@ -42,3 +42,10 @@ class TestMainFunctionIntegration:
             assert len(result.namespaces) == 1
             assert len(result.mounts) == 1
             assert result.findings_document["tool"]["name"] == "vault-tools"
+
+
+def test_export_file_names_carry_the_short_cluster_id(mock_vault_client, sample_activity_data):
+    with patch("src.activity_export.main.write_csv") as write_csv, patch("src.activity_export.main.write_json") as write_json, patch("src.activity_export.main.write_markdown") as write_markdown:
+        run_activity_export(mock_vault_client, "2024-01-01", "2024-01-31", "vault-cluster", data=sample_activity_data, cluster_id="d33099d9-206e-53c2-4e50-44fb62ac69a6")
+    paths = [c.args[0] for m in (write_csv, write_json, write_markdown) for c in m.call_args_list]
+    assert paths and all("/vault-cluster-d33099d9-" in p for p in paths)

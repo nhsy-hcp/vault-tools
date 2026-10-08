@@ -9,6 +9,21 @@ DATE_FORMAT = "%Y-%m-%d"  # Parsing/validation (YYYY-MM-DD)
 FILE_DATE_FORMAT = "%Y%m%d"  # File name suffix (YYYYMMDD)
 
 
+def file_prefix(cluster_name: str, cluster_id: str | None) -> str:
+    """The prefix every output file name starts with: ``{cluster-name}-{cluster-id[:8]}``.
+
+    The ID keeps two clusters that share a name (every cluster renamed to
+    "vault-cluster", say) from overwriting each other's outputs. Vault's default
+    names already end in eight hex characters of their own, so the ID is not
+    appended a second time when the name already ends with it. Without an ID —
+    a sealed node does not report one — the name alone is used.
+    """
+    short_id = (cluster_id or "").replace("-", "")[:8].lower()
+    if not short_id or cluster_name.lower().endswith(f"-{short_id}"):
+        return cluster_name
+    return f"{cluster_name}-{short_id}"
+
+
 def validate_date_format(date_str: str) -> None:
     """Validate date string format.
 

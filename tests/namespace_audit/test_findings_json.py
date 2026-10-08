@@ -113,3 +113,16 @@ def test_cluster_default_lease_ttl_reaches_both_files(clean_data, finished_stats
     assert doc["summary"]["by_rule"].get("VT-LEASE-001") == 1
     markdown = build_markdown_report("test-cluster", clean_data, finished_stats, generated_at=NOW, system_lease_ttls=ttls)
     assert "| VT-LEASE-001 |" in markdown
+
+
+def test_output_files_carry_the_short_cluster_id(auditor):
+    auditor.data.cluster_id = "d33099d9-206e-53c2-4e50-44fb62ac69a6"
+    with (
+        patch("src.namespace_audit.main.write_json") as mock_write_json,
+        patch("src.namespace_audit.main.write_csv"),
+        patch("src.namespace_audit.main.write_markdown") as mock_write_markdown,
+        patch("os.makedirs"),
+    ):
+        auditor._write_reports("vault-cluster")
+    paths = [c.args[0] for c in mock_write_json.call_args_list] + [mock_write_markdown.call_args.args[0]]
+    assert paths and all("/vault-cluster-d33099d9-" in p for p in paths)

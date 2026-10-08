@@ -182,6 +182,9 @@ def empty_health(health: dict[str, Any]) -> dict[str, Any]:
     version = health.get("version")
     return {
         "cluster_name": health.get("cluster_name") or "vault",
+        # This cluster's own ID, for file names and the report header. Peer
+        # cluster IDs in the replication blocks are still never kept.
+        "cluster_id": health.get("cluster_id") or None,
         "version": version,
         # None when sys/health was unreadable, matching ConnectionInfo.
         "enterprise": ("+ent" in version) if isinstance(version, str) else None,

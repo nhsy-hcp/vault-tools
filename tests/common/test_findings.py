@@ -156,3 +156,20 @@ class TestExitCode:
 
     def test_findings_win_over_gaps(self):
         assert exit_code_for(_document([self.LOW], complete=False), "low", True) == EXIT_FINDINGS
+
+
+class TestFilePrefix:
+    def test_appends_the_short_cluster_id(self):
+        from src.common.utils import file_prefix
+
+        assert file_prefix("vault-cluster", "d33099d9-206e-53c2-4e50-44fb62ac69a6") == "vault-cluster-d33099d9"
+
+    def test_default_names_are_not_doubled(self):
+        from src.common.utils import file_prefix
+
+        assert file_prefix("vault-cluster-d33099d9", "d33099d9-206e-53c2-4e50-44fb62ac69a6") == "vault-cluster-d33099d9"
+
+    def test_no_id_means_the_name_alone(self):
+        from src.common.utils import file_prefix
+
+        assert file_prefix("vault", None) == "vault" and file_prefix("vault", "") == "vault"

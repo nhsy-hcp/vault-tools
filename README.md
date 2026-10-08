@@ -395,6 +395,16 @@ python main.py all -s 2026-01-01 -e 2026-01-31
 task run -- all -s 2026-01-01 -e 2026-01-31
 ```
 
+### Output file names
+
+Every file starts with the cluster name and the first eight hex characters of
+the cluster ID: `{cluster-name}-{cluster-id-8}-{kind}-{YYYYMMDD}.{ext}`, e.g.
+`vault-cluster-d33099d9-audit-report-20261008.md`. So two clusters that share a
+name never overwrite each other's outputs. A name that already ends in its ID,
+like Vault's default `vault-cluster-d33099d9`, is not doubled. A sealed node
+reports no ID, so its files use the name alone. File names below are written
+`{cluster-name}-{kind}-…` for brevity.
+
 ## Configuration
 
 ### Required Environment Variables
