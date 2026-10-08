@@ -18,6 +18,7 @@ from rich.table import Table
 
 from src.cluster_audit.collector import (
     ClusterCoverage,
+    ClusterReads,
     collect_cluster_health,
     fetch_license_status,
     fetch_system_lease_ttls,
@@ -48,6 +49,7 @@ class ClusterAuditResult(NamedTuple):
     # "sealed", "uninitialized" or "dr_secondary" when the node rejects
     # authenticated reads; None when it serves them.
     unavailable_reason: str | None
+    reads: ClusterReads
 
 
 def run_cluster_audit(vault_client: VaultClient, output_dir: str, console: Console | None = None) -> dict[str, Any] | None:
@@ -143,7 +145,7 @@ def run_cluster_audit_full(vault_client: VaultClient, output_dir: str, console: 
     console.print(f"\n[bold]Output files[/bold] → [cyan]{output_dir}/[/cyan]")
     for path in written:
         console.print(f"  [green]✓[/green] {os.path.basename(path)}")
-    return ClusterAuditResult(document, health, coverage, cluster_name, reason)
+    return ClusterAuditResult(document, health, coverage, cluster_name, reason, ClusterReads(health, coverage, license_result, lease_ttls))
 
 
 def _print_summary(console: Console, health: dict[str, Any], document: dict[str, Any]) -> None:

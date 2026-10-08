@@ -94,6 +94,14 @@ class ClusterCoverage:
     def complete(self) -> bool:
         return not self.denied and not self.errors
 
+    def error_rows(self) -> list[tuple[str, str]]:
+        """Errors as findings.json coverage rows: root namespace, endpoint in the message.
+
+        ``errors`` holds (scope, message); passed straight to coverage_block the
+        endpoint would be read as a namespace and drop out of the message.
+        """
+        return [("", f"{scope}: {message}") for scope, message in self.errors]
+
 
 def sanitise_error(exc: BaseException) -> str:
     """Exception class plus HTTP status only: hvac messages can echo request URLs."""
@@ -504,6 +512,17 @@ def fetch_system_lease_ttls(vault_client: VaultClient) -> tuple[int, int] | None
     except Exception as e:
         logger.debug(f"Could not read sys/config/state/sanitized ({e}); lease findings will use the fixed threshold")
     return None
+
+
+@dataclass
+class ClusterReads:
+    """Everything cluster-audit read, handed to namespace-audit in full-audit so
+    no cluster endpoint is read twice in one run."""
+
+    health: dict[str, Any]
+    coverage: ClusterCoverage
+    license: LicenseResult | None
+    lease_ttls: tuple[int, int] | None
 
 
 @dataclass

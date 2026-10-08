@@ -14,9 +14,9 @@ secondary) only cluster-audit runs; the rest are marked skipped.
 
 from __future__ import annotations
 
-import glob
 import logging
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -25,7 +25,7 @@ from typing import Any
 from rich.console import Console
 from rich.table import Table
 
-from src.activity_export.main import run_activity_export
+from src.activity_export.main import NOT_READ, run_activity_export
 from src.cluster_audit.main import run_cluster_audit_full
 from src.common.file_utils import write_json, write_markdown
 from src.common.findings import SEVERITY_ORDER, finding_from_dict, get_tool_version, merge_documents, run_block
@@ -33,7 +33,7 @@ from src.common.markdown import md_escape, md_table, render_findings_table
 from src.common.utils import FILE_DATE_FORMAT
 from src.common.vault_client import VaultClient
 from src.entity_export.main import run_entity_export
-from src.identity_audit.main import run_identity_audit
+from src.identity_audit.main import run_identity_audit_full
 from src.namespace_audit.main import NamespaceAuditor
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,9 @@ def run_full_audit(
     """Run every step and write the combined files. Returns the merged findings document, or None if Vault was unreachable."""
     console = console or Console()
     started = datetime.now(UTC)
+    # Wall-clock floor for "written by this run": steps name files by local or
+    # UTC date inconsistently, and same-day leftovers share their names.
+    started_epoch = time.time()
     if not (start_date and end_date):
         start_date, end_date = default_window(started.date())
     results: list[StepResult] = []
@@ -121,7 +124,7 @@ def run_full_audit(
                 output_dir=output_dir,
                 collect_sentinel=collect_sentinel,
                 collect_acl_bodies=collect_acl_bodies,
-                cluster_health=(cluster.health, cluster.coverage),
+                cluster_reads=cluster.reads,
             )
             document = auditor.audit_cluster()
             if document is None:
@@ -129,14 +132,26 @@ def run_full_audit(
             namespaces = sorted(auditor.data.auth_methods) or None
             return StepResult("namespace-audit", "ok", document=document, extra={"sentinel": document["cluster_context"]["sentinel"]})
 
+        current_month: Any = NOT_READ
+
         def identity_step() -> StepResult:
-            document = run_identity_audit(vault_client, output_dir, workers=workers, include_list=include_entity_list, namespaces=namespaces, console=console)
-            if document is None:
+            nonlocal current_month
+            result = run_identity_audit_full(vault_client, output_dir, workers=workers, include_list=include_entity_list, namespaces=namespaces, console=console)
+            if result is None:
                 return StepResult("identity-audit", "failed", "see the message above.")
-            return StepResult("identity-audit", "ok", document=document)
+            current_month = result.current_month
+            return StepResult("identity-audit", "ok", document=result.document)
 
         def activity_step() -> StepResult:
-            result = run_activity_export(vault_client, start_date, end_date, cluster.cluster_name, output_dir=output_dir, is_enterprise=cluster.health.get("enterprise"))
+            result = run_activity_export(
+                vault_client,
+                start_date,
+                end_date,
+                cluster.cluster_name,
+                output_dir=output_dir,
+                is_enterprise=cluster.health.get("enterprise"),
+                current_month=current_month,
+            )
             return StepResult("activity-export", "ok", document=result.findings_document)
 
         def entity_step() -> StepResult:
@@ -164,9 +179,7 @@ def run_full_audit(
     findings_path = os.path.join(output_dir, f"{cluster.cluster_name}-full-findings-{date_str}.json")
     report_path = os.path.join(output_dir, f"{cluster.cluster_name}-full-audit-{date_str}.md")
     write_json(findings_path, merged)
-    # Every file this run's steps wrote, found on disk rather than assumed:
-    # several writers skip empty outputs.
-    step_files = sorted(os.path.basename(p) for p in glob.glob(os.path.join(output_dir, f"{glob.escape(cluster.cluster_name)}-*-{date_str}.*")) if p != report_path)
+    step_files = files_written_since(output_dir, cluster.cluster_name, started_epoch, exclude={report_path})
     try:
         write_markdown(
             report_path,
@@ -191,6 +204,29 @@ def run_full_audit(
         if os.path.exists(path):
             console.print(f"  [green]✓[/green] {os.path.basename(path)}")
     return merged
+
+
+def files_written_since(output_dir: str, cluster_name: str, since: float, exclude: set[str] | None = None) -> list[str]:
+    """Basenames of this cluster's files modified at or after ``since``.
+
+    Found on disk rather than collected from each step: several writers skip
+    empty outputs, and the steps disagree on local vs UTC dates in file names.
+    A leftover from an earlier run — an identity ``--list`` file, say — is older
+    than ``since`` and so is never claimed as this run's output.
+    """
+    exclude = {os.path.abspath(p) for p in exclude or set()}
+    found = []
+    try:
+        entries = list(os.scandir(output_dir))
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.is_file() or not entry.name.startswith(f"{cluster_name}-") or os.path.abspath(entry.path) in exclude:
+            continue
+        # One second of slack: some filesystems store whole-second mtimes.
+        if entry.stat().st_mtime >= since - 1:
+            found.append(entry.name)
+    return sorted(found)
 
 
 def build_full_report(

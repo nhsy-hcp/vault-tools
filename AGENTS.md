@@ -381,8 +381,17 @@ namespace via hvac's `list_acl_policies()` and stores the sorted names on
   must never reach `AuditData`, a finding or a file, and a test plants a
   parameter value to check that. A denied body read records one access gap per
   namespace whose scope names the add-on (`BODY_DENIED_SCOPE`). The HCL parser
-  is the skill's: it keeps `path` blocks and `capabilities` only, and returns
-  `None` (VT-POL-005) instead of raising. Expect VT-POL-003 on this tool's own
+  is the skill's: it keeps `path` blocks, `capabilities` and the legacy
+  `policy = "read|write|sudo|deny"` attribute (expanded the way Vault expands
+  it), and returns `None` (VT-POL-005) instead of raising.
+- **VT-POL-002 matches in both directions** (`escalation_areas`). A broad glob
+  covers a representative target (`sys/*` covers `sys/auth/x`), and a narrow
+  rule falls inside a target's area (`sys/policies/acl/admin`,
+  `auth/token/roles/ci`), including through a namespace prefix
+  (`+/sys/policies/acl/*` in a root policy). The skill checks only the first
+  direction and so misses grants on one named policy, mount or role.
+- **`sudo` on a match-everything path is VT-POL-001 alone**, never VT-POL-003
+  as well. Reporting both doubled every copy of an `admin` policy. Expect VT-POL-003 on this tool's own
   `audit-policy.hcl`, which needs `sudo` on three exact paths. That is expected
   and deliberately not special-cased.
 - **No tri-state.** Unlike Sentinel, `sys/policies/acl` exists on every Vault
@@ -574,9 +583,15 @@ unrelated tests. Keep it that way.
   a long namespace walk or host clock skew does not read as replication lag.
 - **namespace-audit embeds it**: one `collect_cluster_health` call before the
   walk, stored on `AuditData.cluster_health` / `cluster_coverage`, and
-  `health_findings` joins `collect_findings`. full-audit passes cluster-audit's
-  result in through `NamespaceAuditor(cluster_health=...)` so nothing is read
+  `health_findings` joins `collect_findings`. full-audit passes everything
+  cluster-audit read (health, license, lease TTLs) in as a `ClusterReads`
+  through `NamespaceAuditor(cluster_reads=...)`, so no cluster endpoint is read
   twice.
+- **One finding per dead secondary.** A peer with no heartbeat since the
+  primary started is VT-REPL-002 (Low) and is left out of VT-HLTH-002's
+  disconnected list. The skill reports both. The trade-off: after a primary
+  restart, a production secondary that is really down looks the same and is
+  now reported only at Low.
 - **Thresholds are the skill's heuristics** (100,000 leases, 60s lag, 2s skew,
   25h snapshot grace, `MIN_SUPPORTED_VERSION` 1.19, which goes stale). None has
   been measured against the reference cluster yet.
@@ -591,7 +606,9 @@ unrelated tests. Keep it that way.
   reports counts only, never the shared alias names.
 - **A denied entity body is counted but not judged**: the entity still appears
   (from the LIST), VT-ID-001 is skipped for it, and the namespace gets one
-  access-gap row.
+  access-gap row. Only a 403 is a gap. A 404 (deleted mid-walk) drops the
+  entity entirely, and a 5xx or timeout is recorded once per namespace as an
+  error, so nobody widens a token policy that was never the problem.
 - **Discovery is its own LIST-only walk** (`discover_namespaces`), not
   `NamespaceAuditor`'s. That walk also collects mounts and policies and drives
   the progress bar and rate limiting. full-audit passes the namespace list the
@@ -619,6 +636,15 @@ unrelated tests. Keep it that way.
   entity-export. Each step is wrapped by `_run_step`, so an exception becomes a
   `failed` row and the next step runs. A failed step forces
   `coverage.complete` to false.
+- **Shared reads**: cluster-audit's `ClusterReads` go to namespace-audit, the
+  walk's namespace list to identity-audit, and identity-audit's
+  `activity/monthly` read to activity-export (`current_month`, with `NOT_READ`
+  as the "not read" default because `None` already means "unreadable").
+- **The report's file index is `files_written_since`**: this cluster's files in
+  the output directory modified after the run started. Matching by date was
+  wrong twice over: the steps mix local and UTC dates in file names, and an
+  earlier same-day run's files (an identity `--list` file, say) were claimed
+  as this run's.
 - A node that rejects authenticated reads runs only cluster-audit; the rest are
   `skipped` with the reason. If cluster-audit cannot connect at all, full-audit
   returns `None` (exit 1): there is no cluster name to file a report under.

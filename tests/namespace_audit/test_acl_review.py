@@ -67,8 +67,14 @@ class TestGlobs:
 
 
 class TestRuleFlags:
-    def test_wildcard_write_is_admin_and_sudo(self):
-        assert rule_flags(AclRule("*", ("update", "sudo"))) == ["VT-POL-001", "VT-POL-003"]
+    def test_wildcard_sudo_is_admin_only_not_also_sudo(self):
+        """VT-POL-001 already covers sudo on every path; VT-POL-003 would double-count it."""
+        assert rule_flags(AclRule("*", ("update", "sudo"))) == ["VT-POL-001"]
+        assert rule_flags(AclRule("+/*", ("sudo",))) == ["VT-POL-001"]
+
+    def test_sudo_on_a_specific_path_is_still_flagged(self):
+        assert rule_flags(AclRule("sys/audit", ("read", "sudo"))) == ["VT-POL-003"]
+        assert rule_flags(AclRule("sys/policies/acl/*", ("update", "sudo"))) == ["VT-POL-002", "VT-POL-003"]
 
     def test_read_only_wildcard_is_not_flagged(self):
         assert rule_flags(AclRule("*", ("read", "list"))) == []
@@ -100,7 +106,7 @@ class TestAssessment:
 class TestFindings:
     def test_one_finding_per_rule_per_policy(self):
         found = acl_policy_findings({"": {"admin": assess_policy(ADMIN), "policy-admin": assess_policy(POLICY_ADMIN), "reader": assess_policy(READER)}})
-        assert _ids(found) == ["VT-POL-001", "VT-POL-002", "VT-POL-003"]
+        assert _ids(found) == ["VT-POL-001", "VT-POL-002"]
         [p2] = [f for f in found if f.rule_id == "VT-POL-002"]
         assert p2.evidence["areas"] == ["ACL policies"] and p2.mount == "policy-admin"
 
@@ -162,7 +168,7 @@ class TestReporting:
         markdown = build_markdown_report("c", clean_data, finished_stats, generated_at=self.NOW)
         assert "Permissions assessed for 1 policy" in markdown and "| VT-POL-001 |" in markdown
         doc = build_findings_json("c", clean_data, finished_stats, generated_at=self.NOW)
-        assert {"VT-POL-001", "VT-POL-003"} <= set(doc["summary"]["by_rule"])
+        assert doc["summary"]["by_rule"] == {"VT-POL-001": 1}
 
     def test_default_run_says_permissions_were_not_assessed(self, clean_data, finished_stats):
         assert "Permissions were not assessed" in build_markdown_report("c", clean_data, finished_stats, generated_at=self.NOW)
@@ -177,3 +183,40 @@ class TestReporting:
         [review] = [c.args[1] for c in write_json.call_args_list if "-acl-policy-review-" in c.args[0]]
         assert review["/"]["policy-admin"]["flagged"][0]["path"] == "sys/policies/acl/*"
         assert "s3cr3t-value" not in json.dumps(review)
+
+
+class TestReviewFixes:
+    """Regressions from the code review: specific-path escalation and legacy syntax."""
+
+    @pytest.mark.parametrize(
+        "path,area",
+        [
+            ("sys/policies/acl/admin", "ACL policies"),
+            ("sys/auth/userpass", "auth methods"),
+            ("auth/token/roles/ci", "token roles"),
+            ("identity/entity/id/abc", "identity entities"),
+            ("+/sys/policies/acl/*", "ACL policies"),
+            ("team-a/auth/token/create", "token creation"),
+        ],
+    )
+    def test_writes_on_a_specific_target_are_escalation(self, path, area):
+        assert rule_flags(AclRule(path, ("update",))) == ["VT-POL-002"]
+        [f] = acl_policy_findings({"": {"p": assess_policy(f'path "{path}" {{ capabilities = ["update"] }}')}})
+        assert f.evidence["areas"] == [area]
+
+    @pytest.mark.parametrize("path", ["secret/data/app/*", "sys/mounts", "sys/policies/egp/x", "kv/sys/notes"])
+    def test_unrelated_paths_are_not_escalation(self, path):
+        assert rule_flags(AclRule(path, ("create", "update"))) == []
+
+    @pytest.mark.parametrize(
+        "legacy,expected",
+        [("sudo", ["VT-POL-001"]), ("write", ["VT-POL-001"]), ("read", []), ("deny", [])],
+    )
+    def test_legacy_policy_attribute_is_assessed(self, legacy, expected):
+        assessment = assess_policy(f'path "*" {{\n  policy = "{legacy}"\n}}\n')
+        assert assessment.parsed
+        assert sorted({r for f in assessment.flagged for r in f["rules"]}) == expected
+
+    def test_legacy_attribute_in_json_policy(self):
+        rules = parse_acl_policy(json.dumps({"path": {"sys/auth/*": {"policy": "sudo"}}}))
+        assert set(rules[0].capabilities) == {"create", "read", "update", "delete", "list", "sudo"}

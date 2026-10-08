@@ -51,6 +51,14 @@ ESCALATION_PATHS = {
     "identity/group/name/x": "identity groups",
 }
 
+# The legacy `policy = "..."` attribute, as Vault expands it into capabilities.
+LEGACY_POLICY_CAPABILITIES = {
+    "deny": ("deny",),
+    "read": ("read", "list"),
+    "write": ("create", "read", "update", "delete", "list"),
+    "sudo": ("create", "read", "update", "delete", "list", "sudo"),
+}
+
 # The access-gap scope a denied body read records, naming the fix.
 BODY_DENIED_SCOPE = "ACL policy bodies (attach audit-policy-acl-reader)"
 
@@ -80,13 +88,16 @@ class AclAssessment:
 def parse_acl_policy(text: str) -> tuple[AclRule, ...] | None:
     """Path rules of an HCL or JSON ACL policy; None when it cannot be parsed. Never raises.
 
-    Only ``path`` blocks and their ``capabilities`` are kept: other attributes
-    (allowed/denied parameters, wrapping TTLs) are skipped unread.
+    Only ``path`` blocks, their ``capabilities`` and the legacy ``policy``
+    attribute are kept: other attributes (allowed/denied parameters, wrapping
+    TTLs) are skipped unread.
     """
     try:
         if text.lstrip().startswith("{"):
             paths = json.loads(text).get("path") or {}
-            return tuple(AclRule(str(glob), tuple(str(c) for c in (body or {}).get("capabilities") or [])) for glob, body in paths.items())
+            return tuple(
+                AclRule(str(glob), tuple(str(c) for c in (body or {}).get("capabilities") or []) + LEGACY_POLICY_CAPABILITIES.get(str((body or {}).get("policy")), ())) for glob, body in paths.items()
+            )
         return _parse_hcl_policy(text)
     except (ValueError, TypeError, IndexError, AttributeError):
         return None
@@ -127,6 +138,11 @@ def _parse_hcl_policy(text: str) -> tuple[AclRule, ...] | None:
                         capabilities.append(json.loads(tokens[i]))
                     i += 1
                 i += 1
+            elif key == "policy" and tokens[i].startswith('"'):
+                # Pre-0.9 syntax, still accepted: `policy = "sudo"` is the
+                # full capability set, so skipping it hid root-level grants.
+                capabilities.extend(LEGACY_POLICY_CAPABILITIES.get(json.loads(tokens[i]), ()))
+                i += 1
             else:
                 i = skip_value(i)
             if tokens[i] == ",":
@@ -148,15 +164,48 @@ def matches_everything(glob: str) -> bool:
     return glob.endswith("*") and all(part in ("+", "") for part in glob[:-1].split("/"))
 
 
+def _as_concrete_path(glob: str) -> str:
+    """A representative concrete path for a rule glob: ``+`` and a trailing ``*`` become ``x``."""
+    concrete = "/".join("x" if part == "+" else part for part in glob.split("/"))
+    return concrete[:-1] + "x" if concrete.endswith("*") else concrete
+
+
+def escalation_areas(glob: str) -> set[str]:
+    """The access-control areas a rule glob touches, in either direction.
+
+    A broad glob (``sys/*``) covers the representative targets; a narrow one
+    (``sys/policies/acl/admin``, ``auth/token/roles/ci``) falls inside a target's
+    area. Checking only the first direction missed every rule that names one
+    specific policy, mount or role — the most common way such grants are written.
+    The narrow check also ignores leading namespace segments, so a grant on a
+    child namespace's policies from the root is caught too.
+    """
+    segments = _as_concrete_path(glob).split("/")
+    # Every suffix too: a root-namespace policy reaches child namespaces through
+    # prefixed paths (`+/sys/policies/acl/*`, `team-a/auth/token/create`).
+    suffixes = ["/".join(segments[i:]) for i in range(len(segments))]
+    areas = set()
+    for target, label in ESCALATION_PATHS.items():
+        area = "/".join("+" if part == "x" else part for part in target.split("/"))
+        if glob_matches(glob, target) or any(glob_matches(area, suffix) for suffix in suffixes):
+            areas.add(label)
+    return areas
+
+
 def rule_flags(rule: AclRule) -> list[str]:
-    """VT-POL rule IDs one path rule trips. A rule containing ``deny`` grants nothing."""
+    """VT-POL rule IDs one path rule trips. A rule containing ``deny`` grants nothing.
+
+    ``sudo`` on a match-everything path is VT-POL-001 alone, not also VT-POL-003:
+    the admin finding already covers it. Reporting both doubled every copy of
+    an ``admin`` policy — 124 of 167 findings on a 78-namespace dev cluster.
+    """
     capabilities = set(rule.capabilities)
     if "deny" in capabilities:
         return []
-    flags = []
     if matches_everything(rule.path) and capabilities & (WRITE_CAPABILITIES | {"sudo"}):
-        flags.append("VT-POL-001")
-    elif capabilities & WRITE_CAPABILITIES and any(glob_matches(rule.path, target) for target in ESCALATION_PATHS):
+        return ["VT-POL-001"]
+    flags = []
+    if capabilities & WRITE_CAPABILITIES and escalation_areas(rule.path):
         flags.append("VT-POL-002")
     if "sudo" in capabilities:
         flags.append("VT-POL-003")
@@ -189,7 +238,7 @@ def acl_policy_findings(assessments: dict[str, dict[str, AclAssessment]]) -> lis
                 detail = f"Grants write or sudo on every path ({', '.join(f'`{x}`' for x in paths)}) — effectively admin in this namespace."
                 findings.append(finding("VT-POL-001", namespace, "acl_policy", name, None, detail, paths=paths))
             if paths := _flagged_paths(a, "VT-POL-002"):
-                areas = sorted({label for p in paths for target, label in ESCALATION_PATHS.items() if glob_matches(p, target)})
+                areas = sorted({label for p in paths for label in escalation_areas(p)})
                 detail = f"Can write {', '.join(areas)} ({', '.join(f'`{x}`' for x in paths)}) — a holder can grant itself or others more access."
                 findings.append(finding("VT-POL-002", namespace, "acl_policy", name, None, detail, areas=areas, paths=paths))
             if paths := _flagged_paths(a, "VT-POL-003"):

@@ -221,3 +221,24 @@ class TestClusterHealthEmbedding:
         collect.assert_called_once_with(mock_vault_client)
         assert auditor.data.cluster_health is health
         assert document["summary"]["by_rule"].get("VT-AUD-001") == 1
+
+    def test_precollected_cluster_reads_are_not_read_again(self, mock_vault_client, mock_threading):
+        from src.cluster_audit.collector import ClusterCoverage, ClusterReads, LicenseResult
+
+        license_result = LicenseResult({"license_id": "x", "expiration_time": "2099-01-01T00:00:00Z"}, None, True)
+        reads = ClusterReads({"sealed": False}, ClusterCoverage(), license_result, (3600, 86400))
+        auditor = NamespaceAuditor(mock_vault_client, worker_threads=1, cluster_reads=reads)
+        with (
+            patch("src.namespace_audit.main.collect_cluster_health") as collect,
+            patch("src.namespace_audit.main.write_json"),
+            patch("src.namespace_audit.main.write_csv"),
+            patch("src.namespace_audit.main.write_markdown"),
+            patch("os.makedirs"),
+        ):
+            auditor.audit_cluster()
+
+        collect.assert_not_called()
+        read_paths = [c.args[0] for c in mock_vault_client.get.call_args_list]
+        assert "sys/license/status" not in read_paths and "sys/config/state/sanitized" not in read_paths
+        assert auditor.data.license_status == license_result.status
+        assert auditor.system_lease_ttls == (3600, 86400)

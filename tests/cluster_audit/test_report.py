@@ -68,3 +68,13 @@ class TestEmbeddedInNamespaceReport:
 
     def test_namespace_report_without_cluster_health_is_unchanged(self, clean_data, finished_stats):
         assert "## Cluster health" not in build_markdown_report("c", clean_data, finished_stats, generated_at=NOW)
+
+
+def test_cluster_errors_are_root_rows_naming_the_endpoint(clean_data, finished_stats):
+    """Regression: (scope, message) was read as (namespace, message)."""
+    coverage = ClusterCoverage(errors=[("sys/metrics", "InternalServerError (HTTP 500)")])
+    assert coverage.error_rows() == [("", "sys/metrics: InternalServerError (HTTP 500)")]
+    clean_data.cluster_health = dict(HEALTHY)
+    clean_data.cluster_coverage = coverage
+    doc = build_findings_json("c", clean_data, finished_stats, generated_at=NOW)
+    assert {"namespace": "/", "message": "sys/metrics: InternalServerError (HTTP 500)"} in doc["coverage"]["errors"]

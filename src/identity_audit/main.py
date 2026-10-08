@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 from rich.console import Console
 from rich.panel import Panel
@@ -25,7 +25,20 @@ logger = logging.getLogger(__name__)
 CSV_HEADERS = ["namespace", "entities", "disabled", "without_aliases", "with_direct_policies", "unreadable", "alias_mount_types"]
 
 
-def run_identity_audit(
+class IdentityAuditResult(NamedTuple):
+    document: dict[str, Any]
+    # The activity/monthly read, handed on to activity-export in full-audit.
+    # None when unreadable; {} when nothing is recorded.
+    current_month: dict[str, Any] | None
+
+
+def run_identity_audit(vault_client: VaultClient, output_dir: str, **kwargs: Any) -> dict[str, Any] | None:
+    """Collect, judge and write the identity audit. Returns the findings document, or None on failure."""
+    result = run_identity_audit_full(vault_client, output_dir, **kwargs)
+    return result.document if result else None
+
+
+def run_identity_audit_full(
     vault_client: VaultClient,
     output_dir: str,
     *,
@@ -33,8 +46,8 @@ def run_identity_audit(
     include_list: bool = False,
     namespaces: list[str] | None = None,
     console: Console | None = None,
-) -> dict[str, Any] | None:
-    """Collect, judge and write the identity audit. Returns the findings document, or None on failure.
+) -> IdentityAuditResult | None:
+    """run_identity_audit, also returning the current-month activity it read.
 
     ``namespaces`` (stored keys, "" for root) skips discovery: full-audit passes
     the tree its namespace walk already found.
@@ -122,4 +135,4 @@ def run_identity_audit(
     console.print(f"\n[bold]Output files[/bold] → [cyan]{output_dir}/[/cyan]")
     for path in written:
         console.print(f"  [green]✓[/green] {os.path.basename(path)}")
-    return document
+    return IdentityAuditResult(document, current)

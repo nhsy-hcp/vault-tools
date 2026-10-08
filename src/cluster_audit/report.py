@@ -319,7 +319,7 @@ def build_cluster_findings_json(
             # cluster-audit never reads Sentinel; namespace-audit does.
             "sentinel": "skipped",
         },
-        coverage=coverage_block(0, denied, list(coverage.errors)),
+        coverage=coverage_block(0, denied, coverage.error_rows()),
         tool_version=get_tool_version(),
     )
 
