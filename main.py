@@ -412,10 +412,6 @@ COMMANDS: dict[str, Callable[[argparse.Namespace, VaultClient, GlobalConfig, Any
 
 def _run_diff_command(args: argparse.Namespace, global_config: GlobalConfig, logger) -> None:
     """Run ``diff``: needs no Vault, so it runs before create_vault_client."""
-    if (args.old is None) != (args.new is None):
-        logger.error("diff_needs_two_files", old=args.old)
-        sys.stderr.write("Error: pass two findings files to diff, or none to compare the two newest full-audit runs\n")
-        sys.exit(1)
     try:
         run_diff(args.old, args.new, global_config.output_dir)
     except VaultToolsError as e:

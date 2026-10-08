@@ -428,12 +428,12 @@ class TestDiffArguments:
         assert (args.old, args.new) == (None, None)
 
     def test_one_arg_exits_1(self, monkeypatch, tmp_path, capsys):
+        """run_diff owns the both-or-neither rule; the CLI reports its error."""
         monkeypatch.setattr("sys.argv", ["main.py", "diff", "old.json", "--output-dir", str(tmp_path)])
-        with patch("main.run_diff") as run, pytest.raises(SystemExit) as exc:
+        with pytest.raises(SystemExit) as exc:
             main.main()
         assert exc.value.code == 1
-        assert "pass two findings files" in capsys.readouterr().err
-        run.assert_not_called()
+        assert "both OLD and NEW, or neither" in capsys.readouterr().err
 
     def test_zero_args_passes_none_to_run_diff(self, monkeypatch, tmp_path):
         monkeypatch.delenv("VAULT_ADDR", raising=False)
