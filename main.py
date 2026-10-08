@@ -31,6 +31,7 @@ from src.common.utils import validate_date_format
 from src.common.vault_client import VaultClient
 from src.entity_export.main import run_entity_export
 from src.findings_diff.main import run_diff
+from src.identity_audit.main import run_identity_audit
 from src.namespace_audit.main import NamespaceAuditor
 
 # `uv run main.py` executes this file as a PEP 723 script, so the vault-tools
@@ -180,6 +181,19 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common, gating],
     )
 
+    # Identity Audit command
+    parser_identity = subparsers.add_parser(
+        "identity-audit",
+        help="Audit identity entities: orphans, direct policies, disabled entities, duplicate aliases.",
+        parents=[common, gating],
+    )
+    parser_identity.add_argument("-w", "--workers", type=int, default=4, help="Number of worker threads.")
+    parser_identity.add_argument(
+        "--list",
+        action="store_true",
+        help="Also write every entity's name, metadata and aliases to a separate file. Confidential: they can hold emails and role_ids.",
+    )
+
     # Activity Export command
     parser_activity = subparsers.add_parser("activity-export", help="Export activity data.", parents=[common])
     parser_activity.add_argument("-s", "--start-date", required=True, type=str, help="Start date (YYYY-MM-DD)")
@@ -237,6 +251,7 @@ def main() -> None:
     Parses command line arguments and executes the appropriate tool:
     - namespace-audit: Audit Vault namespaces, auth methods, and secret engines
     - cluster-audit: Audit cluster health, replication, audit devices and snapshots
+    - identity-audit: Audit identity entities and aliases
     - activity-export: Export Vault activity logs and usage metrics
     - entity-export: Export Vault entity data
     - diff: Compare two findings.json files
@@ -331,6 +346,14 @@ def main() -> None:
                 sys.exit(1)
             exit_code = exit_code_for(document, args.fail_on, args.fail_on_gaps)
             logger.info("command_execution_completed", command="cluster-audit", exit_code=exit_code)
+
+        elif args.command == "identity-audit":
+            logger.info("command_execution_started", command="identity-audit", workers=args.workers)
+            document = run_identity_audit(vault_client, global_config.output_dir, workers=args.workers, include_list=args.list)
+            if document is None:
+                sys.exit(1)
+            exit_code = exit_code_for(document, args.fail_on, args.fail_on_gaps)
+            logger.info("command_execution_completed", command="identity-audit", exit_code=exit_code)
 
         elif args.command == "activity-export":
             validate_dates(args.start_date, args.end_date, logger)

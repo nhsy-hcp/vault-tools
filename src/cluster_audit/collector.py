@@ -129,7 +129,7 @@ def unauthenticated_only(health: dict[str, Any]) -> str | None:
     return None
 
 
-class _Reader:
+class RawReader:
     """GET-only helper over one hvac client; raises hvac exceptions unchanged."""
 
     def __init__(self, client: Any):
@@ -151,7 +151,7 @@ def read_health(vault_client: VaultClient) -> dict[str, Any] | None:
     """Unauthenticated sys/health, answering for every node state. None if unreachable."""
     try:
         with vault_client.get_client() as client:
-            return _Reader(client).get("sys/health", params=HEALTH_PARAMS)
+            return RawReader(client).get("sys/health", params=HEALTH_PARAMS)
     except Exception as e:
         logger.debug(f"Could not read sys/health: {e}")
         return None
@@ -174,7 +174,7 @@ def collect_cluster_health(
     coverage = coverage or ClusterCoverage()
     try:
         with vault_client.get_client() as client:
-            return _collect(_Reader(client), health_status, coverage), coverage
+            return _collect(RawReader(client), health_status, coverage), coverage
     except Exception as e:  # pragma: no cover - defensive: never sink the caller's run
         logger.debug(f"Cluster health collection failed: {e}")
         coverage.error("cluster health", e)
@@ -208,7 +208,7 @@ def empty_health(health: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _optional(reader: _Reader, coverage: ClusterCoverage, path: str) -> dict[str, Any] | None:
+def _optional(reader: RawReader, coverage: ClusterCoverage, path: str) -> dict[str, Any] | None:
     try:
         return reader.data(path)
     except hvac.exceptions.Forbidden:
@@ -220,7 +220,7 @@ def _optional(reader: _Reader, coverage: ClusterCoverage, path: str) -> dict[str
     return None
 
 
-def _collect(reader: _Reader, health_status: dict[str, Any] | None, coverage: ClusterCoverage) -> dict[str, Any]:
+def _collect(reader: RawReader, health_status: dict[str, Any] | None, coverage: ClusterCoverage) -> dict[str, Any]:
     health = health_status
     if health is None:
         try:
@@ -267,7 +267,7 @@ def _collect(reader: _Reader, health_status: dict[str, Any] | None, coverage: Cl
     return result
 
 
-def collect_metrics(reader: _Reader, coverage: ClusterCoverage) -> dict[str, Any] | None:
+def collect_metrics(reader: RawReader, coverage: ClusterCoverage) -> dict[str, Any] | None:
     try:
         payload = reader.get("sys/metrics")
     except hvac.exceptions.Forbidden:
@@ -303,7 +303,7 @@ def metrics_timestamp(value: Any) -> str | None:
         return None
 
 
-def collect_raft(reader: _Reader, coverage: ClusterCoverage) -> dict[str, Any] | None:
+def collect_raft(reader: RawReader, coverage: ClusterCoverage) -> dict[str, Any] | None:
     """Integrated storage peers and autopilot; None when the cluster does not use raft."""
 
     def read(path: str) -> dict[str, Any] | None:
@@ -344,7 +344,7 @@ def collect_raft(reader: _Reader, coverage: ClusterCoverage) -> dict[str, Any] |
     return raft
 
 
-def collect_audit_devices(reader: _Reader, coverage: ClusterCoverage) -> list[dict[str, Any]] | None:
+def collect_audit_devices(reader: RawReader, coverage: ClusterCoverage) -> list[dict[str, Any]] | None:
     """Enabled audit devices (sys/audit needs read+sudo); None when unreadable."""
     try:
         devices = reader.data("sys/audit")
@@ -383,7 +383,7 @@ def snapshot_status(status: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def collect_snapshots(reader: _Reader, coverage: ClusterCoverage) -> dict[str, Any] | None:
+def collect_snapshots(reader: RawReader, coverage: ClusterCoverage) -> dict[str, Any] | None:
     """Automated snapshot config names plus each one's status.
 
     The configs themselves are never read: they return storage credentials in plaintext.
@@ -453,7 +453,7 @@ def replication_summary(status: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
-def collect_paths_filters(reader: _Reader, coverage: ClusterCoverage, secondary_ids: list[str]) -> list[dict[str, Any]] | None:
+def collect_paths_filters(reader: RawReader, coverage: ClusterCoverage, secondary_ids: list[str]) -> list[dict[str, Any]] | None:
     """Performance paths filters per known secondary; a denial makes the whole list None."""
     base = "sys/replication/performance/primary"
     filters: list[dict[str, Any]] = []
