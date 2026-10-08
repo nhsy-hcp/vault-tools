@@ -19,11 +19,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.common.findings import Finding, display_namespace, finding
+from src.common.findings import Finding, drift_findings, finding
 
 # Capabilities that change state; sudo is judged separately (VT-POL-003).
 WRITE_CAPABILITIES = frozenset({"create", "update", "patch", "delete"})
@@ -244,19 +243,9 @@ def acl_policy_findings(assessments: dict[str, dict[str, AclAssessment]]) -> lis
             if paths := _flagged_paths(a, "VT-POL-003"):
                 findings.append(finding("VT-POL-003", namespace, "acl_policy", name, None, f"Grants `sudo` on {', '.join(f'`{x}`' for x in paths)}.", sudo_paths=paths))
 
-    # Drift: one name, several bodies. Anchored on the root namespace so the
-    # fingerprint survives copies being added or removed.
     copies: dict[str, list[tuple[str, str]]] = {}
     for namespace, policies in assessments.items():
         for name, a in policies.items():
             copies.setdefault(name, []).append((namespace, a.sha256))
-    for name in sorted(copies):
-        variants = Counter(digest for _, digest in copies[name])
-        if len(variants) < 2:
-            continue
-        common = variants.most_common(1)[0][0]
-        outliers = sorted(display_namespace(ns) for ns, digest in copies[name] if digest != common)
-        differ = "differs" if len(outliers) == 1 else "differ"
-        detail = f"`{name}` exists in {len(copies[name])} namespaces with {len(variants)} different bodies — copies have drifted; {len(outliers)} {differ} from the most common one."
-        findings.append(finding("VT-POL-004", "", "acl_policy", name, None, detail, namespaces=len(copies[name]), variants=len(variants), outliers=len(outliers), examples=outliers[:3]))
+    findings.extend(drift_findings("VT-POL-004", "acl_policy", None, copies))
     return findings

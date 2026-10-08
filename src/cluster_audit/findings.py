@@ -14,8 +14,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from src.cluster_audit.collector import parse_time
-from src.common.findings import Finding, finding, format_ttl
+from src.common.findings import Finding, finding, format_ttl, parse_time
 
 # Days before license expiration at which a finding is raised.
 LICENSE_EXPIRY_WARNING_DAYS = 90
@@ -50,16 +49,12 @@ def parse_version(version: str) -> tuple[int, int] | None:
 
 
 def parse_license_time(value: Any) -> datetime | None:
-    """Parse a sys/license/status timestamp as an aware UTC datetime.
+    """A sys/license/status timestamp as an aware UTC datetime; None for a non-string or unparseable value.
 
     A timestamp with no offset is taken as UTC: subtracting a naive datetime
     from an aware one raises TypeError, which would sink the whole report.
     """
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, TypeError, AttributeError):
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return parse_time(value) if isinstance(value, str) else None
 
 
 def license_expiry_days(expiration_time: Any, now: datetime | None = None) -> int | None:

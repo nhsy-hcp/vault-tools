@@ -35,6 +35,7 @@ from src.common.findings import (
     build_findings_document,
     coverage_block,
     display_namespace,
+    drift_findings,
     finding,
     format_ttl,
     get_tool_version,
@@ -575,8 +576,7 @@ def _collect_sentinel_drift_findings(data: AuditData) -> list[Finding]:
     because a deliberately stricter copy is still worth seeing as drift, and the
     body is where accidental divergence happens. Unreadable bodies (the
     ``read_error`` placeholders) are skipped — an unknown body is not evidence
-    of a different one. One cluster-wide finding per name, anchored on the root
-    namespace, so its fingerprint survives copies being added or removed.
+    of a different one.
     """
     findings: list[Finding] = []
     for kind, collection in (("egp", data.egp_policies), ("rgp", data.rgp_policies)):
@@ -586,27 +586,7 @@ def _collect_sentinel_drift_findings(data: AuditData) -> list[Finding]:
                 body = policy.get("policy") if isinstance(policy, dict) else None
                 if isinstance(body, str):
                     copies.setdefault(name, []).append((namespace, hashlib.sha256(body.encode()).hexdigest()))
-        for name in sorted(copies):
-            variants = Counter(digest for _, digest in copies[name])
-            if len(variants) < 2:
-                continue
-            common = variants.most_common(1)[0][0]
-            outliers = sorted(display_namespace(ns) for ns, digest in copies[name] if digest != common)
-            differ = "differs" if len(outliers) == 1 else "differ"
-            findings.append(
-                finding(
-                    "VT-SNT-005",
-                    "",
-                    f"{kind}_policy",
-                    name,
-                    kind,
-                    f"{kind.upper()} `{name}` exists in {len(copies[name])} namespaces with {len(variants)} different bodies — copies have drifted; {len(outliers)} {differ} from the most common one.",
-                    namespaces=len(copies[name]),
-                    variants=len(variants),
-                    outliers=len(outliers),
-                    examples=outliers[:3],
-                )
-            )
+        findings.extend(drift_findings("VT-SNT-005", f"{kind}_policy", kind, copies, label=f"{kind.upper()} "))
     return findings
 
 

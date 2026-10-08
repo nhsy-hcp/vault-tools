@@ -19,6 +19,7 @@ from typing import Any
 import hvac
 import requests
 
+from src.activity_export.findings import client_count
 from src.cluster_audit.collector import RawReader, sanitise_error
 from src.common.vault_client import VaultClient
 
@@ -198,21 +199,17 @@ def read_activity(vault_client: VaultClient, path: str, coverage: IdentityCovera
     return None
 
 
-def _client_count(block: dict[str, Any] | None, key: str = "clients") -> int:
-    return int((block or {}).get(key) or 0)
-
-
 def active_entity_clients(activity: dict[str, Any] | None, current: dict[str, Any] | None = None) -> dict[str, int] | None:
     """Active entity clients per namespace: the higher of the billing period and the current month.
 
     None when no activity is recorded at all (log disabled, or a new cluster),
     so VT-ID-004 is never judged against an empty log.
     """
-    if activity is None or (not _client_count(activity.get("total")) and not _client_count(current)):
+    if activity is None or (not client_count(activity.get("total")) and not client_count(current)):
         return None
     active: dict[str, int] = {}
     for rows in (activity.get("by_namespace") or [], (current or {}).get("by_namespace") or []):
         for row in rows:
             ns = (row.get("namespace_path") or "").strip().strip("/")
-            active[ns] = max(active.get(ns, 0), _client_count(row.get("counts"), "entity_clients"))
+            active[ns] = max(active.get(ns, 0), client_count(row.get("counts"), "entity_clients"))
     return active

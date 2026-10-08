@@ -15,13 +15,14 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 import hvac
 import requests
 
 from src.common.exceptions import VaultPermissionError
+from src.common.findings import iso_utc, parse_time
 from src.common.vault_client import VaultClient
 
 logger = logging.getLogger(__name__)
@@ -112,18 +113,6 @@ def sanitise_error(exc: BaseException) -> str:
 def as_bool(value: Any) -> bool:
     """Vault stores audit options as strings ("true"/"false"); parse like Go's ParseBool."""
     return value is True or str(value).strip().lower() in ("1", "t", "true")
-
-
-def parse_time(timestamp: Any) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
-def _iso(ts: datetime) -> str:
-    return ts.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def unauthenticated_only(health: dict[str, Any]) -> str | None:
@@ -306,7 +295,7 @@ def collect_metrics(reader: RawReader, coverage: ClusterCoverage) -> dict[str, A
 def metrics_timestamp(value: Any) -> str | None:
     """sys/metrics uses Go's time format ("2026-10-05 14:53:30 +0000 UTC"); return RFC 3339."""
     try:
-        return _iso(datetime.strptime(str(value)[:25], "%Y-%m-%d %H:%M:%S %z"))
+        return iso_utc(datetime.strptime(str(value)[:25], "%Y-%m-%d %H:%M:%S %z"))
     except ValueError:
         return None
 
@@ -381,7 +370,7 @@ def collect_audit_devices(reader: RawReader, coverage: ClusterCoverage) -> list[
 def snapshot_status(status: dict[str, Any]) -> dict[str, Any]:
     """Allowlisted automated-snapshot status: no snapshot URL and no error text."""
     errors = status.get("consecutive_errors")
-    times = {k: _iso(t) if (t := parse_time(status[k])) else None for k in SNAPSHOT_TIME_KEYS if status.get(k)}
+    times = {k: iso_utc(t) if (t := parse_time(status[k])) else None for k in SNAPSHOT_TIME_KEYS if status.get(k)}
     scheme = URL_SCHEME.match(str(status.get("last_snapshot_url") or "").lower())
     return {
         "consecutive_errors": errors if isinstance(errors, int) else None,
