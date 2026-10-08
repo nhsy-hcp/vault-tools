@@ -12,9 +12,11 @@ circular import.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import logging
 import re
+from collections import Counter
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -58,6 +60,17 @@ MAX_ACCESS_GAP_ROWS = 10
 # makes this constant far too permissive to catch anything.
 LONG_MAX_LEASE_TTL_SECONDS = 768 * 3600
 
+# A *default* lease TTL above Vault's stock 768h means every lease that does not
+# ask for a TTL lives that long (VT-MOUNT-004 per mount, VT-LEASE-001 for the
+# cluster). Fixed rather than calibrated: unlike the max, there is no cluster
+# value that makes a longer default the norm. 0 means "inherit" and never fires.
+DEFAULT_LEASE_TTL_WARNING_SECONDS = 768 * 3600
+
+# More than this many non-built-in mounts of one type in one namespace
+# (VT-MOUNT-005). Above it the mount table itself becomes the problem: slower
+# namespace operations and replication, and policies written per mount.
+MOUNT_SPRAWL_THRESHOLD = 20
+
 # Mounts Vault creates itself in every namespace. A namespace holding only these
 # has nothing in it, which is what the "empty namespace" check looks for.
 # Child namespaces get the "ns_"-prefixed variants of the same engines.
@@ -91,6 +104,16 @@ SENTINEL_ENFORCEMENT_LEVELS = ("hard-mandatory", "soft-mandatory", "advisory")
 # Vault will not store a policy with no main rule at all, so this — not an empty
 # body — is what a do-nothing Sentinel policy looks like on a real cluster.
 ALWAYS_TRUE_MAIN = re.compile(r"^main\s*=\s*rule\s*\{\s*true\s*\}$")
+
+# The mirror image: a main that is literally false denies every request the
+# policy applies to. Only a finding under hard-mandatory (VT-SNT-006), where
+# nothing can override it. Literal match only — "false in practice" would need
+# evaluating the policy.
+ALWAYS_FALSE_MAIN = re.compile(r"^main\s*=\s*(?:rule\s*\{\s*false\s*\}|false)$")
+
+# Sentinel import statements. Only `http` is acted on (VT-SNT-007): it is the
+# one import that makes request handling wait on something outside Vault.
+SENTINEL_IMPORT = re.compile(r'^\s*import\s+"([^"]+)"', re.M)
 
 # EGP paths that cover every endpoint in the namespace. Worth surfacing not
 # because it is wrong — a catch-all EGP is a legitimate pattern — but because
@@ -328,6 +351,27 @@ def _policy_line_count(body: Any) -> int:
     return len(body.splitlines()) if isinstance(body, str) else 0
 
 
+def _meaningful_lines(body: str) -> list[str]:
+    """Policy lines with comments and blank lines removed; Sentinel takes # and //."""
+    return [stripped for line in body.splitlines() if (stripped := line.strip()) and not stripped.startswith(("#", "//"))]
+
+
+def _is_always_false_policy(body: Any) -> bool:
+    """True when the only rule is ``main = rule { false }`` (or ``main = false``).
+
+    Imports are skipped as well as comments: an unused import does not change
+    what the policy decides.
+    """
+    if not isinstance(body, str):
+        return False
+    meaningful = [line for line in _meaningful_lines(body) if not SENTINEL_IMPORT.match(line)]
+    return ALWAYS_FALSE_MAIN.match(" ".join(meaningful)) is not None
+
+
+def _sentinel_imports(body: Any) -> list[str]:
+    return sorted(set(SENTINEL_IMPORT.findall(body))) if isinstance(body, str) else []
+
+
 def _is_trivial_policy(body: Any) -> bool:
     """True when the policy body has no executable content.
 
@@ -343,7 +387,7 @@ def _is_trivial_policy(body: Any) -> bool:
     """
     if not isinstance(body, str):
         return False
-    meaningful = [stripped for line in body.splitlines() if (stripped := line.strip()) and not stripped.startswith(("#", "//"))]
+    meaningful = _meaningful_lines(body)
     if not meaningful:
         return True
     # Joined rather than matched line by line — the rule is often wrapped.
@@ -576,6 +620,81 @@ def _collect_sentinel_findings(data: AuditData) -> list[Finding]:
                             line_count=_policy_line_count(body),
                         )
                     )
+
+                if level == "hard-mandatory" and _is_always_false_policy(body):
+                    scope = f" on {', '.join(f'`{p}`' for p in paths)}" if kind == "egp" and isinstance(paths, list) and paths else ""
+                    evidence: dict[str, Any] = {"enforcement_level": level}
+                    if kind == "egp" and isinstance(paths, list):
+                        evidence["paths"] = sorted(paths)
+                    findings.append(
+                        finding(
+                            "VT-SNT-006",
+                            namespace,
+                            object_kind,
+                            name,
+                            kind,
+                            f"Hard-mandatory and `main` is always false — every request it applies to{scope} is denied, which can lock callers out.",
+                            **evidence,
+                        )
+                    )
+
+                imports = _sentinel_imports(body)
+                if "http" in imports:
+                    findings.append(
+                        finding(
+                            "VT-SNT-007",
+                            namespace,
+                            object_kind,
+                            name,
+                            kind,
+                            "Imports `http` — each request it applies to can wait on an outbound call, so that endpoint's availability and latency gate Vault requests.",
+                            imports=imports,
+                        )
+                    )
+
+    findings.extend(_collect_sentinel_drift_findings(data))
+    return findings
+
+
+def _collect_sentinel_drift_findings(data: AuditData) -> list[Finding]:
+    """VT-SNT-005: one policy name, several bodies across namespaces.
+
+    Compared by body hash only; enforcement level and paths are left out
+    because a deliberately stricter copy is still worth seeing as drift, and the
+    body is where accidental divergence happens. Unreadable bodies (the
+    ``read_error`` placeholders) are skipped — an unknown body is not evidence
+    of a different one. One cluster-wide finding per name, anchored on the root
+    namespace, so its fingerprint survives copies being added or removed.
+    """
+    findings: list[Finding] = []
+    for kind, collection in (("egp", data.egp_policies), ("rgp", data.rgp_policies)):
+        copies: dict[str, list[tuple[str, str]]] = {}
+        for namespace, policies in collection.items():
+            for name, policy in policies.items():
+                body = policy.get("policy") if isinstance(policy, dict) else None
+                if isinstance(body, str):
+                    copies.setdefault(name, []).append((namespace, hashlib.sha256(body.encode()).hexdigest()))
+        for name in sorted(copies):
+            variants = Counter(digest for _, digest in copies[name])
+            if len(variants) < 2:
+                continue
+            common = variants.most_common(1)[0][0]
+            outliers = sorted(display_namespace(ns) for ns, digest in copies[name] if digest != common)
+            differ = "differs" if len(outliers) == 1 else "differ"
+            findings.append(
+                finding(
+                    "VT-SNT-005",
+                    "",
+                    f"{kind}_policy",
+                    name,
+                    kind,
+                    f"{kind.upper()} `{name}` exists in {len(copies[name])} namespaces with {len(variants)} different bodies — copies have drifted; {len(outliers)} {differ} from the most common one.",
+                    namespaces=len(copies[name]),
+                    variants=len(variants),
+                    outliers=len(outliers),
+                    examples=outliers[:3],
+                )
+            )
     return findings
 
 
@@ -583,6 +702,7 @@ def collect_findings(
     data: AuditData,
     system_max_lease_ttl: int | None = None,
     now: datetime | None = None,
+    system_default_lease_ttl: int | None = None,
 ) -> list[Finding]:
     """Derive security observations from the mount metadata already collected.
 
@@ -593,6 +713,9 @@ def collect_findings(
     sys/config/state/sanitized. When known, the lease check reports mounts that
     *override* it, which is the actionable question; without it the check falls
     back to the fixed LONG_MAX_LEASE_TTL_SECONDS threshold.
+
+    ``system_default_lease_ttl`` is the same endpoint's ``default_lease_ttl``,
+    judged on its own by VT-LEASE-001.
 
     Two checks Vault users often expect are deliberately absent because they
     would be pure noise rather than signal. ``max_lease_ttl == 0`` means "inherit
@@ -662,6 +785,36 @@ def collect_findings(
                         )
                     )
 
+                default_ttl = config.get("default_lease_ttl")
+                if isinstance(default_ttl, int) and default_ttl > DEFAULT_LEASE_TTL_WARNING_SECONDS:
+                    findings.append(
+                        finding(
+                            "VT-MOUNT-004",
+                            namespace,
+                            kind,
+                            mount_path,
+                            mount_type,
+                            f"`default_lease_ttl` is {format_ttl(default_ttl)}, above the {format_ttl(DEFAULT_LEASE_TTL_WARNING_SECONDS)} review threshold — new leases get this TTL by default.",
+                            default_lease_ttl_seconds=default_ttl,
+                            threshold_seconds=DEFAULT_LEASE_TTL_WARNING_SECONDS,
+                        )
+                    )
+
+                # "generic" is the pre-0.8 name for the same engine. A missing
+                # version option means v1: Vault only writes it for v2.
+                if mount_type in ("kv", "generic") and str((mount_data.get("options") or {}).get("version") or "1") == "1":
+                    findings.append(
+                        finding(
+                            "VT-MOUNT-006",
+                            namespace,
+                            kind,
+                            mount_path,
+                            mount_type,
+                            "KV version 1 — no secret versioning, soft delete or check-and-set.",
+                            kv_version=1,
+                        )
+                    )
+
                 # Built-ins are excluded because cubbyhole is *always* local —
                 # it is per-token storage. Flagging it produced one noise row per
                 # namespace and no signal at all.
@@ -677,6 +830,38 @@ def collect_findings(
                             local=True,
                         )
                     )
+
+            # One finding per namespace and kind, naming every crowded type, so
+            # a namespace with 40 KV and 30 PKI mounts is one row, not two.
+            by_type = Counter(m.get("type", "unknown") for m in mounts.values() if isinstance(m, dict) and m.get("type") not in BUILTIN_ENGINE_TYPES | BUILTIN_AUTH_TYPES)
+            crowded = {t: n for t, n in sorted(by_type.items()) if n > MOUNT_SPRAWL_THRESHOLD}
+            if crowded:
+                findings.append(
+                    finding(
+                        "VT-MOUNT-005",
+                        namespace,
+                        kind,
+                        None,
+                        None,
+                        f"{', '.join(f'{n} {t}' for t, n in crowded.items())} mounts in one namespace — consider fewer mounts with per-path policies.",
+                        mounts_by_type=crowded,
+                        threshold=MOUNT_SPRAWL_THRESHOLD,
+                    )
+                )
+
+    if isinstance(system_default_lease_ttl, int) and system_default_lease_ttl > DEFAULT_LEASE_TTL_WARNING_SECONDS:
+        findings.append(
+            finding(
+                "VT-LEASE-001",
+                "",
+                "cluster",
+                None,
+                "lease_ttl",
+                f"Cluster `default_lease_ttl` is {format_ttl(system_default_lease_ttl)}, above the {format_ttl(DEFAULT_LEASE_TTL_WARNING_SECONDS)} review threshold — mounts without their own default inherit it.",
+                default_lease_ttl_seconds=system_default_lease_ttl,
+                threshold_seconds=DEFAULT_LEASE_TTL_WARNING_SECONDS,
+            )
+        )
 
     for namespace, mounts in data.auth_methods.items():
         external = {m.get("type") for m in mounts.values() if isinstance(m, dict) and m.get("type") not in BUILTIN_AUTH_TYPES}
@@ -751,7 +936,7 @@ def _collect_license_findings(data: AuditData, now: datetime | None) -> list[Fin
 def render_findings(findings: list[Finding]) -> str:
     """Findings grouped by severity, most severe first."""
     if not findings:
-        return "_No observations — no deprecated plugins, publicly listed auth mounts, long leases, empty namespaces or non-blocking Sentinel policies were found._"
+        return "_No observations — no deprecated plugins, publicly listed auth mounts, long leases, KV v1 or crowded mounts, empty namespaces or Sentinel policy issues were found._"
 
     sections: list[str] = []
     for severity in SEVERITY_ORDER:
@@ -907,7 +1092,8 @@ def build_markdown_report(
     """
     generated = generated_at or datetime.now(UTC)
     system_max = system_lease_ttls[1] if system_lease_ttls else None
-    findings = collect_findings(data, system_max_lease_ttl=system_max, now=generated)
+    system_default = system_lease_ttls[0] if system_lease_ttls else None
+    findings = collect_findings(data, system_max_lease_ttl=system_max, now=generated, system_default_lease_ttl=system_default)
 
     header_rows = [
         ["Cluster", cluster_name],
@@ -1061,7 +1247,8 @@ def build_findings_json(
     """
     generated = generated_at or datetime.now(UTC)
     system_max = system_lease_ttls[1] if system_lease_ttls else None
-    findings = collect_findings(data, system_max_lease_ttl=system_max, now=generated)
+    system_default = system_lease_ttls[0] if system_lease_ttls else None
+    findings = collect_findings(data, system_max_lease_ttl=system_max, now=generated, system_default_lease_ttl=system_default)
     started = stats.start_time or generated
     finished = stats.end_time or generated
     return build_findings_document(
@@ -1071,7 +1258,7 @@ def build_findings_json(
             "vault_version": data.vault_version,
             "enterprise": data.is_enterprise,
             "system_max_lease_ttl_seconds": system_max,
-            "system_default_lease_ttl_seconds": system_lease_ttls[0] if system_lease_ttls else None,
+            "system_default_lease_ttl_seconds": system_default,
             "sentinel": sentinel_status(sentinel_supported),
         },
         coverage=coverage_block(

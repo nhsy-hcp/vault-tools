@@ -256,6 +256,21 @@ class TestSentinelPolicyCollection:
         assert auditor.stats.forbidden_count == 0
         assert auditor.data.egp_policies == {}
 
+    def test_vault_2_community_marks_the_cluster_unsupported(self, auditor):
+        """Vault 2.x Community 404s with 'enterprise-only feature' instead.
+
+        Regression: only 'unsupported path' was recognised, so a 2.x Community
+        cluster was reported as having Sentinel with zero policies.
+        """
+        client = attach(auditor, make_hvac_client())
+        client.sys.list_egp_policies.side_effect = hvac.exceptions.InvalidPath("enterprise-only feature")
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert auditor.sentinel_supported is False
+        assert client.sys.list_rgp_policies.call_count == 0
+        assert auditor.stats.error_count == 0
+
     def test_unsupported_cluster_is_probed_only_once(self, auditor):
         """The short-circuit caps a Community run at two extra API calls."""
         client = attach(auditor, make_hvac_client())
