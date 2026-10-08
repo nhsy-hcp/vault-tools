@@ -27,12 +27,12 @@ from rich.table import Table
 
 from src.activity_export.main import NOT_READ, run_activity_export
 from src.cluster_audit.main import run_cluster_audit_full
-from src.common.file_utils import write_json, write_markdown
-from src.common.findings import SEVERITY_ORDER, finding_from_dict, get_tool_version, merge_documents, run_block
-from src.common.markdown import md_escape, md_table, render_findings_table
+from src.common.file_utils import read_json, write_json, write_markdown
+from src.common.findings import SEVERITY_ORDER, diff_documents, get_tool_version, merge_documents, run_block
 from src.common.utils import FILE_DATE_FORMAT
 from src.common.vault_client import VaultClient
 from src.entity_export.main import run_entity_export
+from src.full_audit.report import FullAuditContext, StepSummary, build_full_report, top_groups
 from src.identity_audit.main import run_identity_audit_full
 from src.namespace_audit.main import NamespaceAuditor
 
@@ -49,6 +49,7 @@ class StepResult:
     reason: str = ""
     document: dict[str, Any] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    duration: float | None = None
 
     @property
     def findings(self) -> int | None:
@@ -65,11 +66,13 @@ def default_window(today: date) -> tuple[str, str]:
 def _run_step(name: str, results: list[StepResult], console: Console, fn: Callable[[], StepResult]) -> StepResult:
     """Run one step; any exception becomes a failed result instead of ending the run."""
     console.rule(f"[bold]{name}")
+    began = time.monotonic()
     try:
         result = fn()
     except Exception as e:
         logger.exception(f"{name} failed: {e}")
         result = StepResult(name, "failed", f"{type(e).__name__}: {e}"[:MAX_REASON_LENGTH])
+    result.duration = time.monotonic() - began
     results.append(result)
     return result
 
@@ -110,6 +113,9 @@ def run_full_audit(
         # Nothing else can connect either; there is no cluster name to file a report under.
         return None
 
+    # What the report needs from each step beyond its findings document.
+    context: dict[str, Any] = {}
+
     if cluster.unavailable_reason:
         reason = f"skipped: node is {cluster.unavailable_reason.replace('_', ' ')} and cannot serve authenticated reads"
         results.extend(StepResult(name, "skipped", reason) for name in STEPS[1:])
@@ -130,6 +136,7 @@ def run_full_audit(
             if document is None:
                 return StepResult("namespace-audit", "failed", "the namespace walk failed — see the message above.")
             namespaces = sorted(auditor.data.auth_methods) or None
+            context.update(audit_data=auditor.data, audit_stats=auditor.stats)
             return StepResult("namespace-audit", "ok", document=document, extra={"sentinel": document["cluster_context"]["sentinel"]})
 
         current_month: Any = NOT_READ
@@ -140,6 +147,7 @@ def run_full_audit(
             if result is None:
                 return StepResult("identity-audit", "failed", "see the message above.")
             current_month = result.current_month
+            context["identity_rows"] = result.namespace_rows
             return StepResult("identity-audit", "ok", document=result.document)
 
         def activity_step() -> StepResult:
@@ -152,6 +160,13 @@ def run_full_audit(
                 is_enterprise=cluster.health.get("enterprise"),
                 current_month=current_month,
                 cluster_id=cluster.health.get("cluster_id"),
+            )
+            context.update(
+                activity_ran=True,
+                activity_log=result.activity_log,
+                total_clients=result.total_clients,
+                current_month_clients=result.current_month_clients,
+                activity_namespaces=result.namespaces,
             )
             return StepResult("activity-export", "ok", document=result.findings_document)
 
@@ -179,22 +194,39 @@ def run_full_audit(
     date_str = finished.strftime(FILE_DATE_FORMAT)
     findings_path = os.path.join(output_dir, f"{cluster.file_prefix}-full-findings-{date_str}.json")
     report_path = os.path.join(output_dir, f"{cluster.file_prefix}-full-audit-{date_str}.md")
+    # Before writing this run's file, which may replace a same-day earlier one.
+    previous_path = latest_previous_findings(output_dir, cluster.file_prefix, started_epoch)
+    previous_diff = None
+    if previous_path:
+        try:
+            previous_diff = diff_documents(read_json(previous_path), merged)
+        except Exception as e:
+            logger.debug(f"Could not compare with {previous_path}: {e}")
     write_json(findings_path, merged)
     step_files = files_written_since(output_dir, cluster.file_prefix, started_epoch, exclude={report_path})
+    reads = cluster.reads
+    report_context = FullAuditContext(
+        cluster_name=cluster.cluster_name,
+        cluster_id=cluster.health.get("cluster_id"),
+        vault_addr=vault_client.vault_addr,
+        started_at=started,
+        finished_at=finished,
+        workers=workers,
+        window=(start_date, end_date),
+        merged=merged,
+        steps=[StepSummary(r.name, r.status, r.reason, r.findings, r.duration) for r in results],
+        health=cluster.health,
+        license_status=reads.license.status if reads.license else None,
+        license_reason=reads.license.unavailable_reason if reads.license else None,
+        lease_ttls=reads.lease_ttls,
+        acl_bodies=collect_acl_bodies,
+        previous_diff=previous_diff,
+        previous_path=os.path.basename(previous_path) if previous_path else None,
+        output_files=step_files,
+        **context,
+    )
     try:
-        write_markdown(
-            report_path,
-            build_full_report(
-                cluster.cluster_name,
-                merged,
-                results,
-                vault_addr=vault_client.vault_addr,
-                generated_at=finished,
-                window=(start_date, end_date),
-                output_files=step_files,
-                vault_version=cluster.health.get("version"),
-            ),
-        )
+        write_markdown(report_path, build_full_report(report_context))
     except Exception as e:
         logger.exception(f"Failed to write the full audit report: {e}")
         console.print(f"[yellow]⚠[/yellow] Markdown report could not be written: {e}")
@@ -230,64 +262,17 @@ def files_written_since(output_dir: str, cluster_name: str, since: float, exclud
     return sorted(found)
 
 
-def build_full_report(
-    cluster_name: str,
-    merged: dict[str, Any],
-    results: list[StepResult],
-    *,
-    vault_addr: str,
-    generated_at: datetime,
-    window: tuple[str, str],
-    output_files: list[str],
-    vault_version: str | None = None,
-) -> str:
-    """The combined report. Pure: everything comes in as arguments."""
-    header = [
-        ["Cluster", cluster_name],
-        ["Vault address", vault_addr],
-        ["Generated", generated_at.strftime("%Y-%m-%d %H:%M:%S UTC")],
-        ["Tool version", f"vault-tools {get_tool_version()}"],
-        ["Activity window", f"{window[0]} to {window[1]}"],
-    ]
-    if vault_version:
-        header.append(["Vault version", vault_version])
-    steps = [[r.name, r.status, "—" if r.findings is None else r.findings, md_escape(r.reason) or "—"] for r in results]
-    by_severity = merged["summary"]["by_severity"]
-    coverage = merged["coverage"]
-    gaps = [[d["namespace"], d["scope"]] for d in coverage["denied"]]
-    gap_text = md_table(["Namespace", "What was denied"], gaps) if gaps else "None."
-    if coverage["errors"]:
-        gap_text += "\n\n**Errors**\n\n" + md_table(["Namespace", "Error"], [[e["namespace"], e["message"]] for e in coverage["errors"]])
-    findings = [finding_from_dict(f) for f in merged["findings"]]
-    sections = [
-        f"# Vault Full Audit — {cluster_name}",
-        "",
-        md_table(["Field", "Value"], header),
-        "",
-        "## Steps",
-        "",
-        md_table(["Step", "Status", "Findings", "Notes"], steps),
-        "",
-        "Each step's own report has the detail behind its findings; this report merges them. Findings reported by more than one step (cluster health appears in both cluster-audit and namespace-audit) are listed once.",
-        "",
-        "## Summary",
-        "",
-        md_table(["Severity", "Findings"], [[s, by_severity.get(s.lower(), 0)] for s in SEVERITY_ORDER]),
-        "",
-        "## Access gaps",
-        "",
-        gap_text,
-        "",
-        "## Security observations",
-        "",
-        render_findings_table(findings, "_No observations from any step._"),
-        "",
-        "## Output files",
-        "",
-        md_table(["File"], [[f] for f in output_files]),
-        "",
-    ]
-    return "\n".join(sections)
+def latest_previous_findings(output_dir: str, prefix: str, before: float) -> str | None:
+    """The newest earlier ``{prefix}-full-findings-*.json`` in the output directory, if any."""
+    candidates = []
+    try:
+        entries = list(os.scandir(output_dir))
+    except OSError:
+        return None
+    for entry in entries:
+        if entry.is_file() and entry.name.startswith(f"{prefix}-full-findings-") and entry.name.endswith(".json") and entry.stat().st_mtime < before - 1:
+            candidates.append((entry.stat().st_mtime, entry.path))
+    return max(candidates)[1] if candidates else None
 
 
 def _print_summary(console: Console, results: list[StepResult], merged: dict[str, Any]) -> None:
@@ -295,10 +280,26 @@ def _print_summary(console: Console, results: list[StepResult], merged: dict[str
     table.add_column("Step", style="cyan")
     table.add_column("Status")
     table.add_column("Findings", justify="right")
+    table.add_column("Duration", justify="right")
     styles = {"ok": "[green]ok[/green]", "failed": "[red]failed[/red]", "skipped": "[yellow]skipped[/yellow]"}
     for r in results:
-        table.add_row(r.name, styles[r.status], "—" if r.findings is None else str(r.findings))
-    by_severity = merged["summary"]["by_severity"]
-    table.add_row("[bold]merged[/bold]", "", str(merged["summary"]["total"]))
+        table.add_row(r.name, styles[r.status], "—" if r.findings is None else str(r.findings), f"{r.duration:.1f}s" if r.duration is not None else "—")
+    table.add_row("[bold]merged[/bold]", "", str(merged["summary"]["total"]), "")
     console.print(table)
-    console.print("Merged findings: " + ", ".join(f"{by_severity.get(s.lower(), 0)} {s.lower()}" for s in SEVERITY_ORDER))
+
+    by_severity = merged["summary"]["by_severity"]
+    coverage = merged["coverage"]
+    console.print(
+        "Findings: "
+        + ", ".join(f"{by_severity.get(s.lower(), 0)} {s.lower()}" for s in SEVERITY_ORDER)
+        + f" · coverage {'complete' if coverage['complete'] else '[yellow]partial[/yellow]'}"
+        + f" · {coverage['namespaces_processed']} namespaces"
+    )
+    groups = top_groups(merged)
+    if groups:
+        top = Table(title="Top findings")
+        for column in ("#", "Rule", "Severity", "Count", "Title"):
+            top.add_column(column)
+        for i, g in enumerate(groups, 1):
+            top.add_row(str(i), g.rule_id, g.severity.lower(), str(g.count), g.title)
+        console.print(top)
