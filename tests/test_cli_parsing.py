@@ -227,3 +227,26 @@ class TestIdentityAuditCommand:
 
     def test_list_off_by_default(self):
         assert _build_parser().parse_args(["identity-audit"]).list is False
+
+
+class TestActivityExportGating:
+    def test_parses_gating_flags(self):
+        args = _build_parser().parse_args(["activity-export", "-s", "2026-01-01", "-e", "2026-01-31", "--fail-on", "low"])
+        assert args.fail_on == "low"
+
+    def test_findings_gate_exit_3(self, monkeypatch, tmp_path):
+        from src.activity_export.main import ActivityExportResult
+        from src.common.vault_client import ConnectionInfo
+
+        monkeypatch.setenv("VAULT_ADDR", "http://127.0.0.1:8200")
+        monkeypatch.setenv("VAULT_TOKEN", "test-token")
+        monkeypatch.setattr("sys.argv", ["main.py", "activity-export", "-s", "2026-01-01", "-e", "2026-01-31", "--fail-on", "low", "--output-dir", str(tmp_path)])
+        result = ActivityExportResult([], [], _findings_doc([{"severity": "low"}]))
+        with (
+            patch("main.VaultClient.validate_connection", return_value=ConnectionInfo("c", "1.20.0+ent", True, "id")),
+            patch("main.run_activity_export", return_value=result) as run,
+            pytest.raises(SystemExit) as exc,
+        ):
+            main.main()
+        assert exc.value.code == 3
+        assert run.call_args.kwargs["is_enterprise"] is True

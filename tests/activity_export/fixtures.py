@@ -11,6 +11,9 @@ from src.common.vault_client import VaultClient
 def mock_vault_client():
     """Create a properly configured mock VaultClient."""
     client = Mock(spec=VaultClient)
+    # Set explicitly: vault_addr is assigned in VaultClient.__init__, so a
+    # spec'd Mock does not carry it. The findings document records it.
+    client.vault_addr = "https://vault.example.com:8200"
 
     # Create a mock context manager for get_client
     mock_context_manager = MagicMock()

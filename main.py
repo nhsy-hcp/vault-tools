@@ -195,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Activity Export command
-    parser_activity = subparsers.add_parser("activity-export", help="Export activity data.", parents=[common])
+    parser_activity = subparsers.add_parser("activity-export", help="Export activity data and check client usage patterns (VT-CLI-*).", parents=[common, gating])
     parser_activity.add_argument("-s", "--start-date", required=True, type=str, help="Start date (YYYY-MM-DD)")
     parser_activity.add_argument("-e", "--end-date", required=True, type=str, help="End date (YYYY-MM-DD)")
 
@@ -363,15 +363,17 @@ def main() -> None:
                 start_date=args.start_date,
                 end_date=args.end_date,
             )
-            cluster_name = vault_client.validate_connection().cluster_name
-            run_activity_export(
+            info = vault_client.validate_connection()
+            result = run_activity_export(
                 vault_client,
                 args.start_date,
                 args.end_date,
-                cluster_name,
+                info.cluster_name,
                 output_dir=global_config.output_dir,
+                is_enterprise=info.is_enterprise,
             )
-            logger.info("command_execution_completed", command="activity-export")
+            exit_code = exit_code_for(result.findings_document, args.fail_on, args.fail_on_gaps)
+            logger.info("command_execution_completed", command="activity-export", exit_code=exit_code)
 
         elif args.command == "entity-export":
             validate_dates(args.start_date, args.end_date, logger)
@@ -401,7 +403,8 @@ def main() -> None:
                 workers=args.workers,
             )
             # Validate connection once and reuse the cluster name for all sub-tools.
-            cluster_name = vault_client.validate_connection().cluster_name
+            info = vault_client.validate_connection()
+            cluster_name = info.cluster_name
 
             # Run namespace-audit
             logger.info("subcommand_started", subcommand="namespace-audit")
@@ -422,6 +425,7 @@ def main() -> None:
                 args.end_date,
                 cluster_name,
                 output_dir=global_config.output_dir,
+                is_enterprise=info.is_enterprise,
             )
             logger.info("subcommand_completed", subcommand="activity-export")
 

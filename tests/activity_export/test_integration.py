@@ -8,7 +8,7 @@ class TestCreateActivityReportIntegration:
 
     def test_create_report_from_json_file(self, mock_vault_client, sample_activity_data):
         """Test creating report from JSON file end-to-end."""
-        with patch("src.activity_export.main.write_csv") as mock_write:
+        with patch("src.activity_export.main.write_csv") as mock_write, patch("src.activity_export.main.write_json"), patch("src.activity_export.main.write_markdown"):
             run_activity_export(
                 mock_vault_client,
                 "2024-01-01",
@@ -22,7 +22,7 @@ class TestCreateActivityReportIntegration:
         """Test creating report from Vault API end-to-end."""
         mock_vault_client.get.return_value = {"data": sample_activity_data}
 
-        with patch("src.activity_export.main.write_csv") as mock_write:
+        with patch("src.activity_export.main.write_csv") as mock_write, patch("src.activity_export.main.write_json"), patch("src.activity_export.main.write_markdown"):
             run_activity_export(mock_vault_client, "2024-01-01", "2024-01-31", "test-cluster")
             assert mock_write.call_count == 2
 
@@ -34,11 +34,11 @@ class TestMainFunctionIntegration:
         """Test run_activity_export function directly."""
         mock_vault_client.get.return_value = {"data": sample_activity_data}
 
-        with patch("src.activity_export.main.write_csv"), patch("src.activity_export.main.write_json"):
+        with patch("src.activity_export.main.write_csv"), patch("src.activity_export.main.write_json"), patch("src.activity_export.main.write_markdown"):
             result = run_activity_export(mock_vault_client, "2024-01-01", "2024-01-31", "test-cluster")
 
             # Verify function completed successfully
             assert result is not None
-            namespaces_data, mounts_data = result
-            assert len(namespaces_data) == 1
-            assert len(mounts_data) == 1
+            assert len(result.namespaces) == 1
+            assert len(result.mounts) == 1
+            assert result.findings_document["tool"]["name"] == "vault-tools"
