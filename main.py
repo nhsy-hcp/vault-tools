@@ -20,6 +20,7 @@ import uuid
 from src.activity_export.main import run_activity_export
 from src.common.config import GlobalConfig
 from src.common.exceptions import ConfigurationError, VaultToolsError
+from src.common.findings import EXIT_OK, SEVERITY_ORDER, exit_code_for
 from src.common.logging_config import (
     get_structured_logger,
     set_correlation_id,
@@ -28,6 +29,7 @@ from src.common.logging_config import (
 from src.common.utils import validate_date_format
 from src.common.vault_client import VaultClient
 from src.entity_export.main import run_entity_export
+from src.findings_diff.main import run_diff
 from src.namespace_audit.main import NamespaceAuditor
 
 # `uv run main.py` executes this file as a PEP 723 script, so the vault-tools
@@ -141,8 +143,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    # CI gating flags, shared by every subcommand that writes a findings.json.
+    # Exit 3 beats exit 2 when both apply: a finding is the stronger signal.
+    gating = argparse.ArgumentParser(add_help=False)
+    gating.add_argument(
+        "--fail-on",
+        choices=[s.lower() for s in SEVERITY_ORDER],
+        default=None,
+        help="Exit 3 when any finding is at or above this severity.",
+    )
+    gating.add_argument(
+        "--fail-on-gaps",
+        action="store_true",
+        help="Exit 2 when coverage is incomplete (a namespace or scope was denied or errored).",
+    )
+
     # Namespace Audit command
-    parser_audit = subparsers.add_parser("namespace-audit", help="Audit Vault namespaces.", parents=[common])
+    parser_audit = subparsers.add_parser("namespace-audit", help="Audit Vault namespaces.", parents=[common, gating])
     parser_audit.add_argument("-w", "--workers", type=int, default=4, help="Number of worker threads.")
     parser_audit.add_argument(
         "--no-sentinel",
@@ -159,6 +176,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser_entity = subparsers.add_parser("entity-export", help="Export entity data.", parents=[common])
     parser_entity.add_argument("-s", "--start-date", required=True, type=str, help="Start date (YYYY-MM-DD)")
     parser_entity.add_argument("-e", "--end-date", required=True, type=str, help="End date (YYYY-MM-DD)")
+
+    # Diff command: compares two findings.json files, no Vault connection.
+    parser_diff = subparsers.add_parser(
+        "diff",
+        help="Compare two findings.json files (new, resolved, unchanged).",
+        parents=[common],
+    )
+    parser_diff.add_argument("old", help="Earlier *-findings-*.json")
+    parser_diff.add_argument("new", help="Later *-findings-*.json")
 
     # All command
     parser_all = subparsers.add_parser("all", help="Run all available commands.", parents=[common])
@@ -199,7 +225,11 @@ def main() -> None:
     - namespace-audit: Audit Vault namespaces, auth methods, and secret engines
     - activity-export: Export Vault activity logs and usage metrics
     - entity-export: Export Vault entity data
+    - diff: Compare two findings.json files
     - all: Run all available tools in sequence
+
+    Exit codes: 0 ok, 1 fatal, 2 coverage gaps (--fail-on-gaps), 3 findings at
+    or above --fail-on.
     """
     args = build_parser().parse_args()
 
@@ -244,7 +274,19 @@ def main() -> None:
     if debug:
         logger.debug("debug_logging_enabled", args=vars(args))
 
+    if args.command == "diff":
+        # Before create_vault_client: comparing two files needs no Vault.
+        try:
+            run_diff(args.old, args.new, global_config.output_dir)
+        except VaultToolsError as e:
+            logger.error("vault_tools_failed", command="diff", error=str(e), error_type=type(e).__name__)
+            sys.stderr.write(f"Error: {e}\n")
+            sys.exit(1)
+        logger.info("vault_tools_completed", command="diff")
+        return
+
     vault_client = create_vault_client(logger)
+    exit_code = EXIT_OK
 
     try:
         if args.command == "namespace-audit":
@@ -259,8 +301,13 @@ def main() -> None:
                 output_dir=global_config.output_dir,
                 collect_sentinel=not args.no_sentinel,
             )
-            auditor.audit_cluster()
-            logger.info("command_execution_completed", command="namespace-audit")
+            document = auditor.audit_cluster()
+            if document is None:
+                # The auditor has already printed why; a failed audit must not
+                # pass a CI gate by exiting 0.
+                sys.exit(1)
+            exit_code = exit_code_for(document, args.fail_on, args.fail_on_gaps)
+            logger.info("command_execution_completed", command="namespace-audit", exit_code=exit_code)
 
         elif args.command == "activity-export":
             validate_dates(args.start_date, args.end_date, logger)
@@ -346,6 +393,8 @@ def main() -> None:
             logger.info("command_execution_completed", command="all")
 
         logger.info("vault_tools_completed", command=args.command)
+        if exit_code != EXIT_OK:
+            sys.exit(exit_code)
 
     except KeyboardInterrupt:
         # Ctrl-C during a threaded audit otherwise surfaces as stack traces from

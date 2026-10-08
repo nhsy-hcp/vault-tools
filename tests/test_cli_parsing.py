@@ -7,8 +7,10 @@ subparser parses last, so an ordinary default would overwrite a value supplied
 before the subcommand. These tests pin both positions.
 """
 
+import json
 import tomllib
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -102,3 +104,88 @@ class TestVersionFlag:
     def test_fallback_version_matches_pyproject(self):
         """The PEP 723 script path uses the literal; keep it in step with the manifest."""
         assert _manifest_version() == main._FALLBACK_VERSION
+
+
+class TestFindingsGatingFlags:
+    def test_defaults_do_not_gate(self):
+        args = _build_parser().parse_args(["namespace-audit"])
+        assert (args.fail_on, args.fail_on_gaps) == (None, False)
+
+    def test_fail_on_takes_a_severity(self):
+        args = _build_parser().parse_args(["namespace-audit", "--fail-on", "medium", "--fail-on-gaps"])
+        assert (args.fail_on, args.fail_on_gaps) == ("medium", True)
+
+    def test_fail_on_rejects_unknown_severity(self):
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(["namespace-audit", "--fail-on", "critical-ish"])
+
+    def test_diff_takes_two_files(self):
+        args = _build_parser().parse_args(["diff", "old.json", "new.json", "--output-dir", "/tmp/x"])
+        assert (args.old, args.new, args.output_dir) == ("old.json", "new.json", "/tmp/x")
+
+
+def _findings_doc(findings, complete=True):
+    return {"findings": findings, "coverage": {"complete": complete}, "run": {}}
+
+
+class TestMainExitCodes:
+    """main() end to end with the auditor stubbed, so no Vault is needed."""
+
+    def _run(self, monkeypatch, tmp_path, argv, document):
+        monkeypatch.setenv("VAULT_ADDR", "http://127.0.0.1:8200")
+        monkeypatch.setenv("VAULT_TOKEN", "test-token")
+        monkeypatch.setattr("sys.argv", ["main.py", *argv, "--output-dir", str(tmp_path)])
+        with patch("main.NamespaceAuditor") as auditor_cls:
+            auditor_cls.return_value.audit_cluster.return_value = document
+            with pytest.raises(SystemExit) as exc:
+                main.main()
+            return exc.value.code
+
+    def _run_ok(self, monkeypatch, tmp_path, argv, document):
+        monkeypatch.setenv("VAULT_ADDR", "http://127.0.0.1:8200")
+        monkeypatch.setenv("VAULT_TOKEN", "test-token")
+        monkeypatch.setattr("sys.argv", ["main.py", *argv, "--output-dir", str(tmp_path)])
+        with patch("main.NamespaceAuditor") as auditor_cls:
+            auditor_cls.return_value.audit_cluster.return_value = document
+            main.main()
+
+    def test_findings_at_threshold_exit_3(self, monkeypatch, tmp_path):
+        doc = _findings_doc([{"severity": "low"}])
+        assert self._run(monkeypatch, tmp_path, ["namespace-audit", "--fail-on", "low"], doc) == 3
+
+    def test_gaps_exit_2(self, monkeypatch, tmp_path):
+        doc = _findings_doc([], complete=False)
+        assert self._run(monkeypatch, tmp_path, ["namespace-audit", "--fail-on-gaps"], doc) == 2
+
+    def test_failed_audit_exits_1(self, monkeypatch, tmp_path):
+        assert self._run(monkeypatch, tmp_path, ["namespace-audit"], None) == 1
+
+    def test_clean_run_without_flags_exits_normally(self, monkeypatch, tmp_path):
+        self._run_ok(monkeypatch, tmp_path, ["namespace-audit"], _findings_doc([{"severity": "high"}]))
+
+
+class TestDiffCommand:
+    def _write(self, path, findings):
+        path.write_text(json.dumps(_findings_doc(findings)))
+        return str(path)
+
+    def test_diff_runs_without_vault_credentials(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("VAULT_ADDR", raising=False)
+        monkeypatch.delenv("VAULT_TOKEN", raising=False)
+        item = {"fingerprint": "a" * 16, "rule_id": "VT-NS-001", "severity": "info", "namespace": "/", "object": {}, "detail": "d", "evidence": {}}
+        old = self._write(tmp_path / "old.json", [])
+        new = self._write(tmp_path / "new.json", [item])
+        monkeypatch.setattr("sys.argv", ["main.py", "diff", old, new, "--output-dir", str(tmp_path)])
+
+        main.main()
+
+        [written] = list(tmp_path.glob("diff-*.json"))
+        assert json.loads(written.read_text())["summary"]["new"] == 1
+
+    def test_diff_rejects_a_non_findings_file(self, monkeypatch, tmp_path):
+        bad = tmp_path / "bad.json"
+        bad.write_text("{}")
+        monkeypatch.setattr("sys.argv", ["main.py", "diff", str(bad), str(bad), "--output-dir", str(tmp_path)])
+        with pytest.raises(SystemExit) as exc:
+            main.main()
+        assert exc.value.code == 1

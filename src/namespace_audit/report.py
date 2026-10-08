@@ -15,9 +15,19 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 import re
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+
+from src.common.findings import (
+    SEVERITY_ORDER,
+    Finding,
+    build_findings_document,
+    coverage_block,
+    display_namespace,
+    finding,
+    run_block,
+    sort_findings,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .main import AuditData, AuditStats
@@ -72,9 +82,6 @@ BUILTIN_AUTH_TYPES = frozenset({"token", "ns_token"})
 # Plugin lifecycle states that mean the mount will stop working at some point.
 DEPRECATED_STATUSES = frozenset({"deprecated", "pending-removal", "removed"})
 
-# High exists for one case only: a license already past its soft expiry.
-SEVERITY_ORDER = ("High", "Medium", "Low", "Info")
-
 # Sentinel's three enforcement levels, ordered strongest first. Only
 # hard-mandatory actually stops a request outright: soft-mandatory can be
 # overridden by a caller holding a sudo-capable token, and advisory merely logs.
@@ -94,20 +101,8 @@ BROAD_EGP_PATHS = frozenset({"*", "/*"})
 LICENSE_EXPIRY_WARNING_DAYS = 90
 
 
-@dataclass(frozen=True)
-class Finding:
-    """One security observation about a single mount, namespace or Sentinel policy.
-
-    ``mount``/``mount_type`` carry the policy name and its kind (``egp``/``rgp``)
-    for the Sentinel checks, which is why the rendered column is headed "Object"
-    rather than "Mount".
-    """
-
-    severity: str
-    namespace: str
-    mount: str
-    mount_type: str
-    detail: str
+# Re-exported so callers keep importing the model from the report module.
+__all__ = ["SEVERITY_ORDER", "Finding", "display_namespace"]
 
 
 def get_tool_version() -> str:
@@ -135,11 +130,6 @@ def _format_multiple(value: int, baseline: int) -> str:
     """How many times larger value is than baseline, e.g. '90x' or '1.5x'."""
     ratio = value / baseline
     return f"{ratio:.0f}x" if abs(ratio - round(ratio)) < 0.05 else f"{ratio:.1f}x"
-
-
-def display_namespace(path: str) -> str:
-    """Render a stored namespace key for humans: root is '/', others keep a slash."""
-    return "/" if path == "" else f"{path.rstrip('/')}/"
 
 
 def md_escape(value: Any) -> str:
@@ -528,6 +518,7 @@ def _collect_sentinel_findings(data: AuditData) -> list[Finding]:
     """Security observations derived from the Sentinel policies collected."""
     findings: list[Finding] = []
     for kind, collection in (("egp", data.egp_policies), ("rgp", data.rgp_policies)):
+        object_kind = f"{kind}_policy"
         for namespace, policies in collection.items():
             for name, policy in policies.items():
                 if not isinstance(policy, dict):
@@ -535,45 +526,54 @@ def _collect_sentinel_findings(data: AuditData) -> list[Finding]:
                 level = policy.get("enforcement_level")
                 if level == "advisory":
                     findings.append(
-                        Finding(
-                            "Low",
+                        finding(
+                            "VT-SNT-001",
                             namespace,
+                            object_kind,
                             name,
                             kind,
                             "Enforcement level is `advisory` — the policy logs violations but never blocks a request.",
+                            enforcement_level=level,
                         )
                     )
                 elif level == "soft-mandatory":
                     findings.append(
-                        Finding(
-                            "Info",
+                        finding(
+                            "VT-SNT-002",
                             namespace,
+                            object_kind,
                             name,
                             kind,
                             "Enforcement level is `soft-mandatory` — a caller with a `sudo`-capable token can override it.",
+                            enforcement_level=level,
                         )
                     )
 
                 paths = policy.get("paths")
                 if kind == "egp" and isinstance(paths, list) and any(p in BROAD_EGP_PATHS for p in paths):
                     findings.append(
-                        Finding(
-                            "Info",
+                        finding(
+                            "VT-SNT-003",
                             namespace,
+                            object_kind,
                             name,
                             kind,
                             "Endpoint path is a wildcard — the policy applies to every request in this namespace.",
+                            paths=sorted(paths),
                         )
                     )
 
-                if _is_trivial_policy(policy.get("policy")):
+                body = policy.get("policy")
+                if _is_trivial_policy(body):
                     findings.append(
-                        Finding(
-                            "Low",
+                        finding(
+                            "VT-SNT-004",
                             namespace,
+                            object_kind,
                             name,
                             kind,
                             "Policy body always evaluates to true — it enforces nothing despite appearing in the policy list.",
+                            line_count=_policy_line_count(body),
                         )
                     )
     return findings
@@ -604,7 +604,7 @@ def collect_findings(
     # Compare against the cluster's real ceiling where available.
     ttl_baseline = system_max_lease_ttl if system_max_lease_ttl else LONG_MAX_LEASE_TTL_SECONDS
 
-    for kind, collection in (("auth", data.auth_methods), ("secrets", data.secret_engines)):
+    for kind, collection in (("auth_mount", data.auth_methods), ("secrets_mount", data.secret_engines)):
         for namespace, mounts in collection.items():
             for mount_path, mount_data in mounts.items():
                 if not isinstance(mount_data, dict):
@@ -615,23 +615,27 @@ def collect_findings(
                 status = (mount_data.get("deprecation_status") or "").lower()
                 if status in DEPRECATED_STATUSES:
                     findings.append(
-                        Finding(
-                            "Medium",
+                        finding(
+                            "VT-MOUNT-001",
                             namespace,
+                            kind,
                             mount_path,
                             mount_type,
                             f"Plugin lifecycle status is `{status}` — plan a migration before it stops working.",
+                            deprecation_status=status,
                         )
                     )
 
-                if kind == "auth" and config.get("listing_visibility") == "unauth":
+                if kind == "auth_mount" and config.get("listing_visibility") == "unauth":
                     findings.append(
-                        Finding(
-                            "Low",
+                        finding(
+                            "VT-AUTH-001",
                             namespace,
+                            kind,
                             mount_path,
                             mount_type,
                             "`listing_visibility: unauth` — this mount is enumerable by unauthenticated callers.",
+                            listing_visibility="unauth",
                         )
                     )
 
@@ -643,19 +647,34 @@ def collect_findings(
                         )
                     else:
                         detail = f"`max_lease_ttl` is {format_ttl(max_ttl)}, above the {format_ttl(LONG_MAX_LEASE_TTL_SECONDS)} review threshold (the cluster system max could not be read)."
-                    findings.append(Finding("Low", namespace, mount_path, mount_type, detail))
+                    findings.append(
+                        finding(
+                            "VT-MOUNT-002",
+                            namespace,
+                            kind,
+                            mount_path,
+                            mount_type,
+                            detail,
+                            max_lease_ttl_seconds=max_ttl,
+                            baseline_seconds=ttl_baseline,
+                            baseline_source="cluster" if system_max_lease_ttl else "fallback",
+                            multiple=round(max_ttl / ttl_baseline, 1),
+                        )
+                    )
 
                 # Built-ins are excluded because cubbyhole is *always* local —
                 # it is per-token storage. Flagging it produced one noise row per
                 # namespace and no signal at all.
                 if mount_data.get("local") is True and mount_type not in BUILTIN_ENGINE_TYPES:
                     findings.append(
-                        Finding(
-                            "Info",
+                        finding(
+                            "VT-MOUNT-003",
                             namespace,
+                            kind,
                             mount_path,
                             mount_type,
                             "Mount is `local` — it is not replicated to performance secondaries or DR.",
+                            local=True,
                         )
                     )
 
@@ -663,12 +682,14 @@ def collect_findings(
         external = {m.get("type") for m in mounts.values() if isinstance(m, dict) and m.get("type") not in BUILTIN_AUTH_TYPES}
         if not external:
             findings.append(
-                Finding(
-                    "Info",
+                finding(
+                    "VT-NS-001",
                     namespace,
-                    "—",
-                    "—",
+                    "namespace",
+                    None,
+                    None,
                     "No auth method beyond the built-in token backend — nothing can log in to this namespace directly.",
+                    auth_types=sorted({m.get("type") for m in mounts.values() if isinstance(m, dict) and m.get("type")}),
                 )
             )
 
@@ -681,12 +702,14 @@ def collect_findings(
         non_builtin = {m.get("type") for m in mounts.values() if isinstance(m, dict) and m.get("type") not in BUILTIN_ENGINE_TYPES}
         if not non_builtin:
             findings.append(
-                Finding(
-                    "Info",
+                finding(
+                    "VT-NS-002",
                     namespace,
-                    "—",
-                    "—",
+                    "namespace",
+                    None,
+                    None,
                     "No secrets engine beyond the Vault built-ins, and no child namespaces — the namespace appears unused.",
+                    secrets_engine_types=sorted({m.get("type") for m in mounts.values() if isinstance(m, dict) and m.get("type")}),
                 )
             )
 
@@ -694,8 +717,7 @@ def collect_findings(
 
     findings.extend(_collect_license_findings(data, now))
 
-    findings.sort(key=lambda f: (SEVERITY_ORDER.index(f.severity), f.namespace, f.mount))
-    return findings
+    return sort_findings(findings)
 
 
 def _collect_license_findings(data: AuditData, now: datetime | None) -> list[Finding]:
@@ -708,16 +730,22 @@ def _collect_license_findings(data: AuditData, now: datetime | None) -> list[Fin
         return []
     if days >= 0:
         detail = f"License expires on {expiry_str[:10]} ({days} day{'s' if days != 1 else ''} remaining) — renew before the grace period ends."
-        return [Finding("Medium", "", "—", "license", detail)]
+        return [finding("VT-LIC-001", "", "cluster", None, "license", detail, days_remaining=days, expiration_time=expiry_str)]
 
     # Past the soft expiry the cluster is running on the grace period, and the
     # date that matters is the hard termination, when Vault stops serving.
     ago = -days
     detail = f"License expired on {expiry_str[:10]} ({ago} day{'s' if ago != 1 else ''} ago)"
-    termination = _parse_license_time(data.license_status.get("termination_time"))
+    termination_time = data.license_status.get("termination_time")
+    termination = _parse_license_time(termination_time)
     if termination is not None:
         detail += f"; Vault stops at termination on {termination.strftime('%Y-%m-%d')}"
-    return [Finding("High", "", "—", "license", detail + " — renew now.")]
+    # Same rule, escalated: a diff then shows this finding worsening rather
+    # than an "expires soon" resolving as an "expired" appears.
+    evidence: dict[str, Any] = {"days_remaining": days, "expiration_time": expiry_str}
+    if termination_time:
+        evidence["termination_time"] = termination_time
+    return [finding("VT-LIC-001", "", "cluster", None, "license", detail + " — renew now.", severity="High", **evidence)]
 
 
 def render_findings(findings: list[Finding]) -> str:
@@ -730,10 +758,12 @@ def render_findings(findings: list[Finding]) -> str:
         group = [f for f in findings if f.severity == severity]
         if not group:
             continue
-        rows = [[display_namespace(f.namespace), f.mount, f.mount_type, f.detail] for f in group]
+        rows = [[f.rule_id, display_namespace(f.namespace), f.mount, f.mount_type, f.detail] for f in group]
         # "Object", not "Mount": the Sentinel checks put a policy name in this
         # column, and findings that name a whole namespace put a dash in it.
-        sections.append(f"#### {severity} ({len(group)})\n\n" + md_table(["Namespace", "Object", "Type", "Observation"], rows))
+        # "Rule" carries the vault-ops catalogue ID, so a row can be looked up
+        # in the skill's rules.md and matched against findings.json.
+        sections.append(f"#### {severity} ({len(group)})\n\n" + md_table(["Rule", "Namespace", "Object", "Type", "Observation"], rows))
     return "\n\n".join(sections)
 
 
@@ -996,3 +1026,60 @@ def build_markdown_report(
         "",
     ]
     return "\n".join(sections)
+
+
+def sentinel_status(sentinel_supported: bool | None) -> str:
+    """The schema's three-way Sentinel state.
+
+    None covers both "--no-sentinel" and "every probe was denied"; the second
+    case is visible in the document's coverage denials, so it is not lost.
+    """
+    if sentinel_supported is True:
+        return "supported"
+    if sentinel_supported is False:
+        return "unsupported"
+    return "skipped"
+
+
+def build_findings_json(
+    cluster_name: str,
+    data: AuditData,
+    stats: AuditStats,
+    *,
+    start_namespace: str = "",
+    vault_addr: str = "",
+    worker_threads: int = 0,
+    generated_at: datetime | None = None,
+    system_lease_ttls: tuple[int, int] | None = None,
+    sentinel_supported: bool | None = None,
+) -> dict[str, Any]:
+    """The namespace audit's findings as a findings.schema.json document.
+
+    Takes the same arguments as build_markdown_report and runs the same
+    collect_findings call, so given one ``generated_at`` the two files cannot
+    disagree about what was found.
+    """
+    generated = generated_at or datetime.now(UTC)
+    system_max = system_lease_ttls[1] if system_lease_ttls else None
+    findings = collect_findings(data, system_max_lease_ttl=system_max, now=generated)
+    started = stats.start_time or generated
+    finished = stats.end_time or generated
+    return build_findings_document(
+        findings,
+        run=run_block(cluster_name, vault_addr, start_namespace, started, finished, worker_threads or None),
+        cluster_context={
+            "vault_version": data.vault_version,
+            "enterprise": data.is_enterprise,
+            "system_max_lease_ttl_seconds": system_max,
+            "system_default_lease_ttl_seconds": system_lease_ttls[0] if system_lease_ttls else None,
+            "sentinel": sentinel_status(sentinel_supported),
+        },
+        coverage=coverage_block(
+            stats.processed_count,
+            stats.forbidden_namespaces,
+            stats.errors,
+            unattributed_denials=stats.forbidden_count - len(stats.forbidden_namespaces),
+            unattributed_errors=stats.error_count - len(stats.errors),
+        ),
+        tool_version=get_tool_version(),
+    )
