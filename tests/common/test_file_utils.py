@@ -6,7 +6,7 @@ import os
 import pytest
 
 from src.common.exceptions import FileProcessingError
-from src.common.file_utils import latest_files, read_csv, read_json, write_csv, write_csv_stream, write_json, write_markdown
+from src.common.file_utils import latest_files, read_csv, read_json, scan_files, write_csv, write_csv_stream, write_json, write_markdown
 
 
 class TestWriteMarkdown:
@@ -192,3 +192,28 @@ class TestLatestFiles:
 
     def test_missing_directory_is_empty(self, tmp_path):
         assert latest_files(str(tmp_path / "missing"), "*") == []
+
+
+class TestScanFiles:
+    def test_matches_with_mtimes_and_skips_directories(self, tmp_path):
+        path = tmp_path / "c-a.json"
+        path.write_text("{}")
+        os.utime(path, (1_800_000_000.0, 1_800_000_000.0))
+        (tmp_path / "c-dir").mkdir()
+        (tmp_path / "other.json").write_text("{}")
+        assert scan_files(str(tmp_path), "c-*") == [(1_800_000_000.0, str(path))]
+
+    def test_file_vanishing_mid_scan_is_skipped(self, tmp_path, monkeypatch):
+        (tmp_path / "c-a.json").write_text("{}")
+        real_scandir = os.scandir
+
+        def scandir(path):
+            entries = list(real_scandir(path))
+            os.remove(entries[0].path)
+            return iter(entries)
+
+        monkeypatch.setattr("src.common.file_utils.os.scandir", scandir)
+        assert scan_files(str(tmp_path), "c-*") == []
+
+    def test_missing_directory_is_empty(self, tmp_path):
+        assert scan_files(str(tmp_path / "missing"), "*") == []

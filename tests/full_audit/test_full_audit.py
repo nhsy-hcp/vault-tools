@@ -1,5 +1,6 @@
 """full-audit orchestration: order, reuse between steps, failure isolation, merging."""
 
+import json
 from datetime import date
 from unittest.mock import MagicMock, Mock, patch
 
@@ -296,7 +297,35 @@ class TestSkip:
         merged = h.run(skip=frozenset(ALL_STEPS[1:]))
         assert h.calls == ["cluster-audit"]
         assert merged["summary"]["by_rule"] == {"VT-AUD-001": 1}
-        assert any("-full-findings-" in p for p in h.written)
+        # A partial run never takes a complete run's file names.
+        assert any("-partial-findings-" in p for p in h.written)
+        assert not any("-full-findings-" in p or "-full-audit-" in p for p in h.written)
+        # No export step ran, so no window was used.
+        assert "Not used (no export step ran)" in h.report
+
+    def test_partial_and_complete_runs_are_never_compared(self, tmp_path):
+        import os
+        import time
+
+        def _previous(name):
+            path = tmp_path / name
+            path.write_text(json.dumps(_doc()))  # empty, so the run's findings read as new
+            stamp = time.time() - 600
+            os.utime(path, (stamp, stamp))
+
+        _previous("c-d33099d9-partial-findings-20261001.json")
+        # A complete run ignores an earlier partial one ...
+        h = Harness(tmp_path)
+        h.run()
+        assert "## Changes since the last run" not in h.report
+        # ... and a partial run ignores an earlier complete one.
+        _previous("c-d33099d9-full-findings-20261001.json")
+        h = Harness(tmp_path)
+        h.run(skip=frozenset({"entity-export"}))
+        assert "## Changes since the last run" not in h.report
+        h = Harness(tmp_path)
+        h.run()
+        assert "## Changes since the last run" in h.report
 
     @pytest.mark.parametrize("bad", ["cluster-audit", "nope"])
     def test_unknown_or_mandatory_step_raises_before_any_call(self, tmp_path, bad):
@@ -312,6 +341,8 @@ class TestSkip:
         h = Harness(tmp_path, cluster=_cluster("sealed"))
         merged = h.run(skip=frozenset({"entity-export"}))
         assert h.calls == ["cluster-audit"]
-        # The node-state reason wins and, as before, does not by itself mark coverage incomplete.
+        # The node-state reason wins, and the skipped steps judged nothing, so
+        # coverage is incomplete and --fail-on-gaps fails the run.
         assert "node is sealed" in h.report and "not selected" not in h.report
-        assert merged["coverage"]["complete"] is True
+        assert merged["coverage"]["complete"] is False
+        assert "4 steps skipped" in h.report

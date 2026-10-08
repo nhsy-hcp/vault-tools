@@ -37,7 +37,7 @@ def pick_latest_pair(output_dir: str) -> tuple[str, str]:
     newest = latest_files(output_dir, FULL_FINDINGS_PATTERN, n=1)
     found = newest
     if newest:
-        prefix = os.path.basename(newest[0]).split("-full-findings-")[0]
+        prefix = os.path.basename(newest[0]).rpartition("-full-findings-")[0]
         found = latest_files(output_dir, f"{glob.escape(prefix)}-full-findings-*.json", n=2)
     if len(found) < 2:
         raise FileProcessingError(

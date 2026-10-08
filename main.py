@@ -17,7 +17,7 @@ import os
 import sys
 import uuid
 from collections.abc import Callable
-from datetime import date
+from datetime import UTC, datetime
 from typing import Any
 
 from rich.console import Console
@@ -37,6 +37,7 @@ from src.common.vault_client import VaultClient
 from src.entity_export.main import run_entity_export
 from src.findings_diff.main import run_diff
 from src.full_audit.main import STEPS as FULL_AUDIT_STEPS
+from src.full_audit.main import WINDOW_STEPS as FULL_AUDIT_WINDOW_STEPS
 from src.full_audit.main import default_window, run_full_audit
 from src.identity_audit.main import run_identity_audit
 from src.namespace_audit.main import NamespaceAuditor
@@ -139,7 +140,8 @@ def resolve_window(args: argparse.Namespace, logger) -> tuple[str, str]:
     if start_date:
         validate_dates(start_date, end_date, logger)
         return start_date, end_date
-    start_date, end_date = default_window(date.today())
+    # UTC, like run_full_audit's own fallback and the report's "Generated" date.
+    start_date, end_date = default_window(datetime.now(UTC).date())
     # console.print, not logger.info: INFO is invisible on a default run.
     Console().print(f"Window: {start_date} → {end_date} (default: last 12 calendar months)")
     return start_date, end_date
@@ -263,7 +265,9 @@ def build_parser() -> argparse.ArgumentParser:
     # cluster-audit always runs: it supplies the cluster name and node state.
     step_choice = parser_full.add_mutually_exclusive_group()
     step_choice.add_argument("--skip", action="append", choices=FULL_AUDIT_STEPS[1:], metavar="STEP", help=f"Skip a step; repeatable. One of: {', '.join(FULL_AUDIT_STEPS[1:])}.")
-    step_choice.add_argument("--only", action="append", choices=FULL_AUDIT_STEPS[1:], metavar="STEP", help="Run only this step (plus cluster-audit); repeatable.")
+    step_choice.add_argument(
+        "--only", action="append", choices=FULL_AUDIT_STEPS, metavar="STEP", help=f"Run only this step (cluster-audit always runs); repeatable. One of: {', '.join(FULL_AUDIT_STEPS)}."
+    )
 
     # Namespace Audit command
     subparsers.add_parser("namespace-audit", description="Audit Vault namespaces.", parents=[common, gating, walk_opts, policy_opts])
@@ -351,8 +355,9 @@ def _full_audit_skip(args: argparse.Namespace) -> frozenset[str]:
 
 
 def _cmd_full_audit(args: argparse.Namespace, vault_client: VaultClient, global_config: GlobalConfig, logger) -> int:
-    start_date, end_date = resolve_window(args, logger)
     skip = _full_audit_skip(args)
+    # Only the exports read the window: don't validate or print one nothing uses.
+    start_date, end_date = (None, None) if skip >= FULL_AUDIT_WINDOW_STEPS else resolve_window(args, logger)
     logger.info("command_execution_started", command="full-audit", workers=args.workers, skip=sorted(skip))
     document = run_full_audit(
         vault_client,

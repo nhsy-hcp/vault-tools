@@ -388,7 +388,8 @@ The other commands, per run:
 - `activity-export`: its three export files plus `activity-findings.json`, `.md`
   and, only when there are findings, `.csv`.
 - `full-audit`: every file its steps write, plus `full-findings.json` and
-  `full-audit.md`.
+  `full-audit.md` — `partial-findings.json` and `partial-audit.md` when
+  `--skip`/`--only` left a step out.
 
 The two ACL files differ from each other on purpose. `acl-policies.json` is
 written whenever a namespace was reached, even if every list is empty: ACL
@@ -775,16 +776,24 @@ unrelated tests. Keep it that way.
   earlier same-day run's files (an identity `--list` file, say) were claimed
   as this run's.
 - A node that rejects authenticated reads runs only cluster-audit; the rest are
-  `skipped` with the reason. If cluster-audit cannot connect at all, full-audit
+  `skipped` with the reason, and coverage is incomplete (exit 2 under
+  `--fail-on-gaps`). If cluster-audit cannot connect at all, full-audit
   returns `None` (exit 1): there is no cluster name to file a report under.
 - Omitted `-s/-e` means the last 12 calendar months (`default_window`). That is
   close to, but not exactly, Vault's billing period. The CLI resolves it
   (`main.py::resolve_window`, shared with both exports) and prints it, so the
   printed window is the one used. `all` was removed in 3.1.0.
 - **`--skip`/`--only`** become `run_full_audit(skip=frozenset)`; names must be
-  in `STEPS[1:]` (cluster-audit always runs). A user-skipped step forces
+  in `STEPS[1:]` (cluster-audit always runs; `--only cluster-audit` skips the
+  rest). Any skipped step, on request or by node state, forces
   `coverage.complete` false but adds nothing to `coverage.errors`, whose
   schema has no room for it and which the report words as failed reads.
+- **A run with `skip` is partial** (`-partial-findings-`, `-partial-audit-`):
+  it must never overwrite or be diffed against a complete run, because
+  `diff_documents` ignores coverage and would read every finding of a skipped
+  step as new or resolved. Without an export step (`WINDOW_STEPS`) there is no
+  window: the CLI neither validates nor prints one, and the report says
+  "Not used". The default window is computed from the UTC date.
 
 ### Enhanced Error Handling
 
