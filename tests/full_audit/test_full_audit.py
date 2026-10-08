@@ -266,7 +266,7 @@ class TestSkip:
         # Not an error: nothing failed.
         assert merged["coverage"]["errors"] == []
         assert f"| {name} | skipped |" in h.report
-        assert f"**{name}** skipped: --skip" in h.report
+        assert f"**{name}** skipped: not selected (--skip/--only)" in h.report
         assert "1 step skipped" in h.report
         # Listed in its normal place, not appended at the end.
         steps = h.report.split("## Steps", 1)[1]
@@ -313,5 +313,5 @@ class TestSkip:
         merged = h.run(skip=frozenset({"entity-export"}))
         assert h.calls == ["cluster-audit"]
         # The node-state reason wins and, as before, does not by itself mark coverage incomplete.
-        assert "node is sealed" in h.report and "skipped: --skip" not in h.report
+        assert "node is sealed" in h.report and "not selected" not in h.report
         assert merged["coverage"]["complete"] is True

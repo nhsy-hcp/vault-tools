@@ -43,7 +43,7 @@ STEPS = ("cluster-audit", "namespace-audit", "identity-audit", "activity-export"
 MAX_REASON_LENGTH = 200
 # The reason on a step the caller left out (``--skip`` / ``--only``), as opposed
 # to one the node's state ruled out.
-USER_SKIP_REASON = "skipped: --skip"
+USER_SKIP_REASON = "skipped: not selected (--skip/--only)"
 
 
 @dataclass
