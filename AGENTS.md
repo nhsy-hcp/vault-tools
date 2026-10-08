@@ -50,7 +50,9 @@ and is where most of these checks were first written.
 │   │   ├── vault_client.py         # Centralized Vault API client
 │   │   ├── config.py               # Configuration management
 │   │   ├── file_utils.py           # File I/O utilities (JSON/CSV/markdown)
+│   │   ├── exceptions.py           # VaultToolsError hierarchy
 │   │   ├── findings.py             # Finding model, rule catalogue, findings.json, diff, exit codes
+│   │   ├── remediation.py          # Per-rule meaning, drafted operator commands, ranking order
 │   │   ├── markdown.py             # md_table, md_escape, findings tables
 │   │   ├── utils.py                # Common utilities
 │   │   ├── audit_logger.py         # Audit logging functionality
@@ -81,7 +83,8 @@ and is where most of these checks were first written.
 │   │   └── main.py           # Entity data extraction
 │   │
 │   ├── full_audit/
-│   │   └── main.py           # Runs every step, merges findings
+│   │   ├── main.py           # Runs every step, merges findings
+│   │   └── report.py         # The combined report, in the vault-ops skill's layout (pure)
 │   │
 │   └── findings_diff/
 │       └── main.py           # `diff` command
@@ -317,7 +320,8 @@ early when they have no rows, the Sentinel pair (`sentinel-policies.json`,
 `summary-sentinel-policies.csv`) is skipped entirely unless policies were
 collected, `license.json` is written only when the license was read, and
 `acl-policy-review.json` only when ACL bodies were read — so a root-only Community
-dev server produces eight. The report's "Output files" index checks existence
+dev server produces nine with the base policy, ten when the token can also read
+ACL bodies. The report's "Output files" index checks existence
 rather than assuming the full set.
 
 The other commands, per run:
@@ -397,6 +401,10 @@ already guarantees each namespace is walked once.
   a policy's capabilities must be proposed to the user and confirmed before it
   is written**, with the endpoint, the reason Vault requires it, and why an
   exact path is not enough.
+- **Never modify `.pre-commit-config.yaml` without the user's confirmation.**
+  That includes adding, removing or re-pinning a hook, even when a plan step
+  seems to cover it ("update `task lint`"). Propose the exact hook change and
+  wait for a yes.
 - **Optional reads live in add-ons**, so the user decides through the token
   what is assessed: policy bodies (ACL, Sentinel) are the current examples.
   Prefer a new add-on over widening `policies/audit-policy.hcl`.
