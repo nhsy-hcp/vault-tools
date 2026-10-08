@@ -218,3 +218,12 @@ class TestAclBodiesFlag:
 
     def test_opt_in(self):
         assert _build_parser().parse_args(["namespace-audit", "--acl-bodies"]).acl_bodies is True
+
+
+class TestIdentityAuditCommand:
+    def test_parses(self):
+        args = _build_parser().parse_args(["identity-audit", "-w", "2", "--list", "--fail-on", "low"])
+        assert (args.command, args.workers, args.list, args.fail_on) == ("identity-audit", 2, True, "low")
+
+    def test_list_off_by_default(self):
+        assert _build_parser().parse_args(["identity-audit"]).list is False

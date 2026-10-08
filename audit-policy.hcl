@@ -369,12 +369,72 @@ path "sys/internal/counters/activity" {
   capabilities = ["read"]
 }
 
+# The month in progress, which the billing period above excludes. Read by
+# identity-audit so a new cluster's entities are compared with real activity.
+path "sys/internal/counters/activity/monthly" {
+  capabilities = ["read"]
+}
+
 # --- entity-export -----------------------------------------------------------
 # Root-only for the same reason as activity-export above -- which matters more
-# here, because this is the one endpoint the tool uses that Vault root-protects:
-# "read" alone returns 403, so "sudo" is required as well. It is the only rule
-# in this policy that needs it. Granting sudo on this path across five levels of
-# namespaces would be real attack surface for no functional benefit.
+# here, because Vault root-protects this endpoint: "read" alone returns 403, so
+# "sudo" is required as well. (The cluster-audit rules for sys/audit and the
+# snapshot-auto config listing are the only others that need it.) Granting sudo
+# on this path across five levels of namespaces would be real attack surface for
+# no functional benefit.
 path "sys/internal/counters/activity/export" {
   capabilities = ["read", "sudo"]
+}
+
+# --- identity-audit: entities ------------------------------------------------
+# LIST identity/entity/id per namespace for the entity IDs, then a read of each
+# for its aliases, policies and group membership. Namespace-local, so one rule
+# per nesting level like the namespace-audit rules. Entities only: groups,
+# aliases-by-ID and the entity write paths are not granted.
+path "identity/entity/id" {
+  capabilities = ["list"]
+}
+
+path "+/identity/entity/id" {
+  capabilities = ["list"]
+}
+
+path "+/+/identity/entity/id" {
+  capabilities = ["list"]
+}
+
+path "+/+/+/identity/entity/id" {
+  capabilities = ["list"]
+}
+
+path "+/+/+/+/identity/entity/id" {
+  capabilities = ["list"]
+}
+
+path "+/+/+/+/+/identity/entity/id" {
+  capabilities = ["list"]
+}
+
+path "identity/entity/id/*" {
+  capabilities = ["read"]
+}
+
+path "+/identity/entity/id/*" {
+  capabilities = ["read"]
+}
+
+path "+/+/identity/entity/id/*" {
+  capabilities = ["read"]
+}
+
+path "+/+/+/identity/entity/id/*" {
+  capabilities = ["read"]
+}
+
+path "+/+/+/+/identity/entity/id/*" {
+  capabilities = ["read"]
+}
+
+path "+/+/+/+/+/identity/entity/id/*" {
+  capabilities = ["read"]
 }
