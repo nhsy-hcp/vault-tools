@@ -190,6 +190,7 @@ class NamespaceAuditor:
         queue_depth_warn_threshold: int = 10_000,
         collect_sentinel: bool = True,
         collect_acl_bodies: bool = False,
+        cluster_health: tuple[dict[str, Any], Any] | None = None,
     ):
         self.vault_client = vault_client
         self.worker_threads = worker_threads
@@ -201,6 +202,9 @@ class NamespaceAuditor:
         self.queue_depth_warn_threshold = queue_depth_warn_threshold
         self.collect_sentinel = collect_sentinel
         self.collect_acl_bodies = collect_acl_bodies
+        # (health, ClusterCoverage) already read by cluster-audit in full-audit,
+        # so the cluster endpoints are not read twice in one run.
+        self.precollected_cluster_health = cluster_health
         self._queue_depth_warned = False
         self.stats = AuditStats()
         self.data = AuditData()
@@ -287,7 +291,7 @@ class NamespaceAuditor:
             self.data.license_status = self._fetch_license_status(info.is_enterprise)
             # Once per run, before the walk: these are cluster-level, and the
             # collector never raises, so a denied sys/audit cannot sink the audit.
-            self.data.cluster_health, self.data.cluster_coverage = collect_cluster_health(self.vault_client)
+            self.data.cluster_health, self.data.cluster_coverage = self.precollected_cluster_health or collect_cluster_health(self.vault_client)
 
             # The queue must stay unbounded: worker threads are also the
             # producers (they enqueue child namespaces from _traverse_namespace),

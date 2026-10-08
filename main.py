@@ -31,6 +31,7 @@ from src.common.utils import validate_date_format
 from src.common.vault_client import VaultClient
 from src.entity_export.main import run_entity_export
 from src.findings_diff.main import run_diff
+from src.full_audit.main import run_full_audit
 from src.identity_audit.main import run_identity_audit
 from src.namespace_audit.main import NamespaceAuditor
 
@@ -213,6 +214,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser_diff.add_argument("old", help="Earlier *-findings-*.json")
     parser_diff.add_argument("new", help="Later *-findings-*.json")
 
+    # Full Audit command: every audit and export, plus one combined report.
+    parser_full = subparsers.add_parser(
+        "full-audit",
+        help="Run every audit and export (cluster, namespace, identity, activity, entity) and write a combined report.",
+        parents=[common, gating],
+    )
+    parser_full.add_argument("-w", "--workers", type=int, default=4, help="Number of worker threads.")
+    parser_full.add_argument("--no-sentinel", action="store_true", help="Skip Sentinel EGP/RGP policy collection during the namespace audit.")
+    parser_full.add_argument("--acl-bodies", action="store_true", help="Also assess ACL policy bodies (needs audit-policy-acl-reader.hcl).")
+    parser_full.add_argument("--list-entities", action="store_true", help="Also write identity entity names, metadata and aliases (confidential).")
+    parser_full.add_argument("-s", "--start-date", type=str, default=None, help="Activity window start (YYYY-MM-DD). Default: the last 12 calendar months.")
+    parser_full.add_argument("-e", "--end-date", type=str, default=None, help="Activity window end (YYYY-MM-DD). Default: today.")
+
     # All command
     parser_all = subparsers.add_parser("all", help="Run all available commands.", parents=[common])
     parser_all.add_argument(
@@ -255,6 +269,7 @@ def main() -> None:
     - activity-export: Export Vault activity logs and usage metrics
     - entity-export: Export Vault entity data
     - diff: Compare two findings.json files
+    - full-audit: Run every audit and export, with a combined report
     - all: Run all available tools in sequence
 
     Exit codes: 0 ok, 1 fatal, 2 coverage gaps (--fail-on-gaps), 3 findings at
@@ -354,6 +369,28 @@ def main() -> None:
                 sys.exit(1)
             exit_code = exit_code_for(document, args.fail_on, args.fail_on_gaps)
             logger.info("command_execution_completed", command="identity-audit", exit_code=exit_code)
+
+        elif args.command == "full-audit":
+            if bool(args.start_date) != bool(args.end_date):
+                sys.stderr.write("Error: pass both --start-date and --end-date, or neither for the last 12 months\n")
+                sys.exit(1)
+            if args.start_date:
+                validate_dates(args.start_date, args.end_date, logger)
+            logger.info("command_execution_started", command="full-audit", workers=args.workers)
+            document = run_full_audit(
+                vault_client,
+                global_config.output_dir,
+                workers=args.workers,
+                collect_sentinel=not args.no_sentinel,
+                collect_acl_bodies=args.acl_bodies,
+                include_entity_list=args.list_entities,
+                start_date=args.start_date,
+                end_date=args.end_date,
+            )
+            if document is None:
+                sys.exit(1)
+            exit_code = exit_code_for(document, args.fail_on, args.fail_on_gaps)
+            logger.info("command_execution_completed", command="full-audit", exit_code=exit_code)
 
         elif args.command == "activity-export":
             validate_dates(args.start_date, args.end_date, logger)
