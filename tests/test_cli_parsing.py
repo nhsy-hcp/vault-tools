@@ -7,8 +7,10 @@ subparser parses last, so an ordinary default would overwrite a value supplied
 before the subcommand. These tests pin both positions.
 """
 
+import argparse
 import json
 import tomllib
+from datetime import date
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -43,24 +45,16 @@ class TestGlobalFlagPositions:
         args = _build_parser().parse_args(["namespace-audit", "-w", "8"])
         assert args.workers == 8
 
-    @pytest.mark.parametrize(
-        "argv",
-        [["namespace-audit"], ["all", "-s", "2026-01-01", "-e", "2026-01-31"]],
-        ids=["namespace-audit", "all"],
-    )
+    @pytest.mark.parametrize("argv", [["namespace-audit"], ["full-audit"]], ids=["namespace-audit", "full-audit"])
     def test_no_sentinel_defaults_to_collecting(self, argv):
         assert _build_parser().parse_args(argv).no_sentinel is False
 
-    @pytest.mark.parametrize(
-        "argv",
-        [["namespace-audit"], ["all", "-s", "2026-01-01", "-e", "2026-01-31"]],
-        ids=["namespace-audit", "all"],
-    )
+    @pytest.mark.parametrize("argv", [["namespace-audit"], ["full-audit"]], ids=["namespace-audit", "full-audit"])
     def test_no_sentinel_parses_on_both_subcommands(self, argv):
         """Both constructions of NamespaceAuditor read this flag."""
         assert _build_parser().parse_args([*argv, "--no-sentinel"]).no_sentinel is True
 
-    @pytest.mark.parametrize("argv", [["namespace-audit", "-n", "team-a/"], ["all", "-s", "2026-01-01", "-e", "2026-01-31", "-n", "team-a/"]])
+    @pytest.mark.parametrize("argv", [["namespace-audit", "-n", "team-a/"], ["full-audit", "-n", "team-a/"]])
     def test_namespace_flag_is_gone(self, argv):
         """--namespace was removed: it only ever scoped the audit, never the exports."""
         with pytest.raises(SystemExit):
@@ -74,9 +68,12 @@ class TestAllSubcommandsAcceptGlobalFlags:
             ["namespace-audit"],
             ["activity-export", "-s", "2026-01-01", "-e", "2026-01-31"],
             ["entity-export", "-s", "2026-01-01", "-e", "2026-01-31"],
-            ["all", "-s", "2026-01-01", "-e", "2026-01-31"],
+            ["full-audit"],
+            ["cluster-audit"],
+            ["identity-audit"],
+            ["diff"],
         ],
-        ids=["namespace-audit", "activity-export", "entity-export", "all"],
+        ids=["namespace-audit", "activity-export", "entity-export", "full-audit", "cluster-audit", "identity-audit", "diff"],
     )
     def test_output_dir_accepted_after_every_subcommand(self, argv):
         args = _build_parser().parse_args([*argv, "--output-dir", "/tmp/x"])
@@ -236,6 +233,14 @@ class TestIdentityAuditCommand:
     def test_list_off_by_default(self):
         assert _build_parser().parse_args(["identity-audit"]).list is False
 
+    def test_list_entities_is_an_alias_of_list(self):
+        """Spelled the same as full-audit's flag."""
+        assert _build_parser().parse_args(["identity-audit", "--list-entities"]).list is True
+
+    def test_has_no_policy_options(self):
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(["identity-audit", "--names-only"])
+
 
 class TestActivityExportGating:
     def test_parses_gating_flags(self):
@@ -286,3 +291,190 @@ class TestCreateVaultClientTls:
         monkeypatch.setenv("VAULT_SKIP_VERIFY", "true")
         monkeypatch.setenv("VAULT_CACERT", str(tmp_path / "missing.pem"))
         assert main.create_vault_client(Mock()).verify is False
+
+
+def _env(monkeypatch, tmp_path, argv):
+    monkeypatch.setenv("VAULT_ADDR", "http://127.0.0.1:8200")
+    monkeypatch.setenv("VAULT_TOKEN", "test-token")
+    monkeypatch.setattr("sys.argv", ["main.py", *argv, "--output-dir", str(tmp_path)])
+
+
+def _subcommands(parser: argparse.ArgumentParser) -> list[str]:
+    [action] = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
+    return list(action.choices)
+
+
+class TestAllSubcommandIsGone:
+    """`all` was a worse subset of full-audit and was removed."""
+
+    def test_rejected_as_invalid_choice(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            _build_parser().parse_args(["all", "-s", "2026-01-01", "-e", "2026-01-31"])
+        assert exc.value.code == 2
+        assert "invalid choice: 'all'" in capsys.readouterr().err
+
+    def test_not_in_commands(self):
+        assert "all" not in main.COMMANDS
+
+
+class TestGroupedHelp:
+    def test_full_audit_is_registered_first(self):
+        assert _subcommands(_build_parser())[0] == "full-audit"
+
+    def test_help_lists_groups(self, capsys):
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(["--help"])
+        out = capsys.readouterr().out
+        assert out.index("Audits:") < out.index("Exports:") < out.index("Utilities:")
+        assert "(recommended)" in out
+
+
+class TestOptionalExportWindow:
+    @pytest.mark.parametrize("command", ["activity-export", "entity-export", "full-audit"])
+    def test_parses_without_dates(self, command):
+        args = _build_parser().parse_args([command])
+        assert (args.start_date, args.end_date) == (None, None)
+
+    @pytest.mark.parametrize("dates", [("2026-01-01", None), (None, "2026-01-31")])
+    def test_resolve_window_rejects_half_a_window(self, dates, capsys):
+        args = argparse.Namespace(start_date=dates[0], end_date=dates[1])
+        with pytest.raises(SystemExit) as exc:
+            main.resolve_window(args, Mock())
+        assert exc.value.code == 1
+        assert "pass both --start-date and --end-date" in capsys.readouterr().err
+
+    def test_resolve_window_keeps_given_dates(self, capsys):
+        args = argparse.Namespace(start_date="2026-01-01", end_date="2026-01-31")
+        assert main.resolve_window(args, Mock()) == ("2026-01-01", "2026-01-31")
+        assert "Window:" not in capsys.readouterr().out
+
+    def test_resolve_window_validates_given_dates(self):
+        args = argparse.Namespace(start_date="2026-02-01", end_date="2026-01-31")
+        with pytest.raises(SystemExit) as exc:
+            main.resolve_window(args, Mock())
+        assert exc.value.code == 1
+
+    def test_resolve_window_defaults_to_last_12_months_and_prints_it(self, capsys):
+        args = argparse.Namespace(start_date=None, end_date=None)
+        with patch("main.date") as fake_date:
+            fake_date.today.return_value = date(2026, 10, 8)
+            assert main.resolve_window(args, Mock()) == ("2025-11-01", "2026-10-08")
+        assert "Window: 2025-11-01 → 2026-10-08 (default: last 12 calendar months)" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("command,target", [("activity-export", "main.run_activity_export"), ("entity-export", "main.run_entity_export")])
+    def test_export_without_dates_uses_default_window(self, command, target, monkeypatch, tmp_path):
+        from src.activity_export.main import ActivityExportResult
+        from src.common.vault_client import ConnectionInfo
+
+        _env(monkeypatch, tmp_path, [command])
+        result = ActivityExportResult([], [], _findings_doc([]))
+        with (
+            patch("main.date") as fake_date,
+            patch("main.VaultClient.validate_connection", return_value=ConnectionInfo("c", "1.20.0+ent", True, "id")),
+            patch(target, return_value=result) as run,
+        ):
+            fake_date.today.return_value = date(2026, 10, 8)
+            main.main()
+        assert run.call_args.args[1:3] == ("2025-11-01", "2026-10-08")
+
+
+class TestFullAuditStepSelection:
+    def test_skip_and_only_default_to_none(self):
+        args = _build_parser().parse_args(["full-audit"])
+        assert (args.skip, args.only) == (None, None)
+
+    def test_skip_is_repeatable(self):
+        args = _build_parser().parse_args(["full-audit", "--skip", "entity-export", "--skip", "identity-audit"])
+        assert args.skip == ["entity-export", "identity-audit"]
+
+    def test_skip_and_only_are_mutually_exclusive(self):
+        with pytest.raises(SystemExit) as exc:
+            _build_parser().parse_args(["full-audit", "--skip", "entity-export", "--only", "namespace-audit"])
+        assert exc.value.code == 2
+
+    def test_cluster_audit_cannot_be_skipped(self):
+        """It supplies the cluster name and node state for every other step."""
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(["full-audit", "--skip", "cluster-audit"])
+
+    @pytest.mark.parametrize(
+        "flags,expected",
+        [
+            ([], frozenset()),
+            (["--skip", "entity-export"], frozenset({"entity-export"})),
+            (["--only", "namespace-audit"], frozenset({"identity-audit", "activity-export", "entity-export"})),
+            (["--only", "namespace-audit", "--only", "entity-export"], frozenset({"identity-audit", "activity-export"})),
+        ],
+        ids=["none", "skip", "only", "only-twice"],
+    )
+    def test_skip_set_passed_to_run_full_audit(self, flags, expected, monkeypatch, tmp_path):
+        _env(monkeypatch, tmp_path, ["full-audit", "-s", "2026-01-01", "-e", "2026-01-31", *flags])
+        with patch("main.run_full_audit", return_value=_findings_doc([])) as run:
+            main.main()
+        kwargs = run.call_args.kwargs
+        assert kwargs["skip"] == expected
+        assert (kwargs["start_date"], kwargs["end_date"]) == ("2026-01-01", "2026-01-31")
+
+    def test_failed_run_exits_1(self, monkeypatch, tmp_path):
+        _env(monkeypatch, tmp_path, ["full-audit"])
+        with patch("main.run_full_audit", return_value=None), pytest.raises(SystemExit) as exc:
+            main.main()
+        assert exc.value.code == 1
+
+
+class TestDiffArguments:
+    def test_zero_args_parse(self):
+        args = _build_parser().parse_args(["diff"])
+        assert (args.old, args.new) == (None, None)
+
+    def test_one_arg_exits_1(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr("sys.argv", ["main.py", "diff", "old.json", "--output-dir", str(tmp_path)])
+        with patch("main.run_diff") as run, pytest.raises(SystemExit) as exc:
+            main.main()
+        assert exc.value.code == 1
+        assert "pass two findings files" in capsys.readouterr().err
+        run.assert_not_called()
+
+    def test_zero_args_passes_none_to_run_diff(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("VAULT_ADDR", raising=False)
+        monkeypatch.delenv("VAULT_TOKEN", raising=False)
+        monkeypatch.setattr("sys.argv", ["main.py", "diff", "--output-dir", str(tmp_path)])
+        with patch("main.run_diff") as run:
+            main.main()
+        run.assert_called_once_with(None, None, str(tmp_path))
+
+
+class TestCommandDispatch:
+    def test_commands_cover_every_vault_subcommand(self):
+        assert set(main.COMMANDS) == {"full-audit", "namespace-audit", "cluster-audit", "identity-audit", "activity-export", "entity-export"}
+
+    def test_parser_choices_are_commands_plus_diff(self):
+        assert set(_subcommands(_build_parser())) == set(main.COMMANDS) | {"diff"}
+
+    @pytest.mark.parametrize(
+        "argv",
+        [["full-audit"], ["namespace-audit"], ["cluster-audit"], ["identity-audit"], ["activity-export"], ["entity-export"]],
+        ids=lambda argv: argv[0],
+    )
+    def test_main_routes_to_the_handler(self, argv, monkeypatch, tmp_path):
+        _env(monkeypatch, tmp_path, argv)
+        handler = Mock(return_value=0)
+        with patch.dict(main.COMMANDS, {argv[0]: handler}):
+            main.main()
+        handler.assert_called_once()
+        args, vault_client, config, _logger = handler.call_args.args
+        assert args.command == argv[0]
+        assert isinstance(vault_client, main.VaultClient)
+        assert config.output_dir == str(tmp_path)
+
+    def test_handler_exit_code_becomes_the_process_exit_code(self, monkeypatch, tmp_path):
+        _env(monkeypatch, tmp_path, ["cluster-audit"])
+        with patch.dict(main.COMMANDS, {"cluster-audit": Mock(return_value=3)}), pytest.raises(SystemExit) as exc:
+            main.main()
+        assert exc.value.code == 3
+
+    def test_identity_handler_passes_list(self, monkeypatch, tmp_path):
+        _env(monkeypatch, tmp_path, ["identity-audit", "--list-entities", "-w", "2"])
+        with patch("main.run_identity_audit", return_value=_findings_doc([])) as run:
+            main.main()
+        assert run.call_args.kwargs == {"workers": 2, "include_list": True}

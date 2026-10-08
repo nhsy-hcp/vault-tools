@@ -243,9 +243,11 @@ def executive_summary(ctx: FullAuditContext, groups: list[FindingGroup], finding
     paragraphs: list[str] = []
     coverage = ctx.merged["coverage"]
     if not coverage["complete"]:
-        paragraphs.append(
-            f"**Coverage is incomplete** ({_plural(len(coverage['denied']), 'denied scope')}, {_plural(len(coverage['errors']), 'error')}), so every conclusion below is partial. See **Not covered**."
-        )
+        counts = [_plural(len(coverage["denied"]), "denied scope"), _plural(len(coverage["errors"]), "error")]
+        skipped = sum(1 for s in ctx.steps if s.status == "skipped")
+        if skipped:
+            counts.append(f"{_plural(skipped, 'step')} skipped")
+        paragraphs.append(f"**Coverage is incomplete** ({', '.join(counts)}), so every conclusion below is partial. See **Not covered**.")
     health = ctx.health or {}
     if health:
         paragraphs.append(_health_sentence(health))
@@ -450,7 +452,9 @@ def not_covered(ctx: FullAuditContext) -> list[str]:
     items: list[str] = []
     for step in ctx.steps:
         if step.status != "ok":
-            items.append(f"**{step.name}** {step.status}: {md_escape(step.reason)}")
+            # Skip reasons already start "skipped: "; don't say it twice.
+            reason = step.reason.removeprefix(f"{step.status}: ")
+            items.append(f"**{step.name}** {step.status}: {md_escape(reason)}")
     acl = ctx.policy_bodies.get("acl")
     if ctx.audit_data is not None and acl in ("not readable", "partial"):
         items.append(

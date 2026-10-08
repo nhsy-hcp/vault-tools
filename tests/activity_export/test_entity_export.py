@@ -5,6 +5,7 @@ from unittest.mock import Mock, mock_open, patch
 import pandas as pd
 import pytest
 
+from src.common.exceptions import VaultPermissionError
 from src.common.file_utils import (
     FileProcessingError,
 )
@@ -70,6 +71,39 @@ class TestEntityExportFunctionality:
         mock_vault_client.get.side_effect = VaultAPIError("API error")
         with pytest.raises(VaultAPIError, match="API error"):
             fetch_entity_export_from_vault(mock_vault_client, "2024-01-01", "2024-01-31")
+
+    def test_fetch_entity_export_permission_denied_is_actionable(self, mock_vault_client):
+        """A 403 names the exact path, the sudo requirement and the docs page."""
+        original = VaultPermissionError("Access denied to sys/internal/counters/activity/export. Check token permissions for this path.")
+        mock_vault_client.get.side_effect = original
+        with pytest.raises(VaultPermissionError) as excinfo:
+            fetch_entity_export_from_vault(mock_vault_client, "2024-01-01", "2024-01-31")
+
+        message = str(excinfo.value)
+        assert "sys/internal/counters/activity/export" in message
+        assert "sudo" in message
+        assert "policies/audit-policy.hcl" in message
+        assert "docs/token-and-policies.md" in message
+        assert "activity-export does not need" in message
+        assert excinfo.value.__cause__ is original
+
+    def test_fetch_entity_export_other_error_unchanged(self, mock_vault_client):
+        """Only the 403 is rewrapped; any other error propagates as raised."""
+        original = VaultAPIError("Vault API error on GET sys/internal/counters/activity/export: 500")
+        mock_vault_client.get.side_effect = original
+        with pytest.raises(VaultAPIError) as excinfo:
+            fetch_entity_export_from_vault(mock_vault_client, "2024-01-01", "2024-01-31")
+
+        assert excinfo.value is original
+
+    def test_run_entity_export_permission_denied_logs_failure_and_reraises(self, mock_vault_client):
+        """run_entity_export still logs the failure and re-raises the actionable error."""
+        mock_vault_client.get.side_effect = VaultPermissionError("Access denied")
+        with patch("src.entity_export.main.get_audit_logger") as mock_get_logger, pytest.raises(VaultPermissionError, match="sudo"):
+            create_entity_export_report(mock_vault_client, "2024-01-01", "2024-01-31", "test-cluster")
+
+        results = [call.kwargs.get("result") for call in mock_get_logger.return_value.log_tool_execution.call_args_list]
+        assert results == ["started", "failure"]
 
     @patch("src.common.file_utils.write_csv")
     @patch("src.common.file_utils.write_json")

@@ -10,6 +10,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from src.common.audit_logger import get_audit_logger
+from src.common.exceptions import VaultPermissionError
 from src.common.file_utils import FileProcessingError, write_csv, write_json
 from src.common.utils import FILE_DATE_FORMAT, file_prefix
 from src.common.vault_client import VaultClient
@@ -29,6 +30,9 @@ REQUIRED_COLUMNS = frozenset({"client_type"})
 # Optional columns used only for the root-namespace display fix-up below.
 NAMESPACE_COLUMNS = ("namespace_id", "namespace_path")
 
+# Root-protected: needs "read" and "sudo" on this exact path (policies/audit-policy.hcl).
+ACTIVITY_EXPORT_PATH = "sys/internal/counters/activity/export"
+
 
 def get_entity_export_data(client: VaultClient, start_date: str, end_date: str) -> list[dict[str, Any]]:
     """Fetch entity export data from Vault.
@@ -46,7 +50,14 @@ def get_entity_export_data(client: VaultClient, start_date: str, end_date: str) 
     params = {"start_time": start_rfc3339, "end_time": end_rfc3339, "format": "json"}
 
     logger.info(f"Fetching entity export data from {start_date} to {end_date}")
-    return client.get("sys/internal/counters/activity/export", params=params)
+    try:
+        return client.get(ACTIVITY_EXPORT_PATH, params=params)
+    except VaultPermissionError as e:
+        raise VaultPermissionError(
+            f"Access denied to {ACTIVITY_EXPORT_PATH}. Vault root-protects this endpoint, so the token needs "
+            f'both "read" and "sudo" on the exact path {ACTIVITY_EXPORT_PATH}, as granted by '
+            "policies/audit-policy.hcl. See docs/token-and-policies.md. activity-export does not need this grant."
+        ) from e
 
 
 def process_entity_export_data(data: list[dict[str, Any]], cluster_name: str, output_dir: str = "outputs") -> pd.DataFrame | None:

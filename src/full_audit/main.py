@@ -14,6 +14,7 @@ secondary) only cluster-audit runs; the rest are marked skipped.
 
 from __future__ import annotations
 
+import glob
 import logging
 import os
 import time
@@ -27,7 +28,7 @@ from rich.table import Table
 
 from src.activity_export.main import NOT_READ, run_activity_export
 from src.cluster_audit.main import run_cluster_audit_full
-from src.common.file_utils import read_json, write_json, write_markdown
+from src.common.file_utils import latest_files, read_json, write_json, write_markdown
 from src.common.findings import SEVERITY_ORDER, diff_documents, get_tool_version, merge_documents, run_block
 from src.common.utils import FILE_DATE_FORMAT
 from src.common.vault_client import VaultClient
@@ -40,6 +41,9 @@ logger = logging.getLogger(__name__)
 
 STEPS = ("cluster-audit", "namespace-audit", "identity-audit", "activity-export", "entity-export")
 MAX_REASON_LENGTH = 200
+# The reason on a step the caller left out (``--skip`` / ``--only``), as opposed
+# to one the node's state ruled out.
+USER_SKIP_REASON = "skipped: --skip"
 
 
 @dataclass
@@ -88,8 +92,18 @@ def run_full_audit(
     start_date: str | None = None,
     end_date: str | None = None,
     console: Console | None = None,
+    skip: frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
-    """Run every step and write the combined files. Returns the merged findings document, or None if Vault was unreachable."""
+    """Run every step and write the combined files. Returns the merged findings document, or None if Vault was unreachable.
+
+    ``skip`` names steps to leave out (any of ``STEPS[1:]``; cluster-audit
+    always runs, as it supplies the cluster name and node state). A skipped step
+    is listed as skipped and makes the merged coverage incomplete; the steps
+    after it fall back to their own reads.
+    """
+    unknown = set(skip) - set(STEPS[1:])
+    if unknown:
+        raise ValueError(f"cannot skip {', '.join(sorted(unknown))}: choose from {', '.join(STEPS[1:])}")
     console = console or Console()
     started = datetime.now(UTC)
     # Wall-clock floor for "written by this run": steps name files by local or
@@ -180,7 +194,12 @@ def run_full_audit(
             return StepResult("entity-export", "ok", "export only — no findings")
 
         for name, fn in (("namespace-audit", namespace_step), ("identity-audit", identity_step), ("activity-export", activity_step), ("entity-export", entity_step)):
-            _run_step(name, results, console, fn)
+            if name in skip:
+                # Not called, so namespaces stays None (identity-audit discovers
+                # its own) and current_month stays NOT_READ (activity reads it).
+                results.append(StepResult(name, "skipped", USER_SKIP_REASON))
+            else:
+                _run_step(name, results, console, fn)
 
     finished = datetime.now(UTC)
     documents = [r.document for r in results if r.document]
@@ -196,6 +215,12 @@ def run_full_audit(
     if any(r.status == "failed" for r in results):
         merged["coverage"]["complete"] = False
         merged["coverage"]["errors"].extend({"namespace": "/", "message": f"{r.name}: {r.reason}"[:MAX_REASON_LENGTH]} for r in results if r.status == "failed")
+    # Nor can one with a step left out on request: it judged nothing either. Not
+    # an error, so coverage.errors is untouched; the report's Steps and Not
+    # covered sections name it. A step the node's state ruled out is left as it
+    # was: cluster-audit's own coverage already records why.
+    if any(r.status == "skipped" and r.reason == USER_SKIP_REASON for r in results):
+        merged["coverage"]["complete"] = False
 
     date_str = finished.strftime(FILE_DATE_FORMAT)
     findings_path = os.path.join(output_dir, f"{cluster.file_prefix}-full-findings-{date_str}.json")
@@ -270,15 +295,8 @@ def files_written_since(output_dir: str, cluster_name: str, since: float, exclud
 
 def latest_previous_findings(output_dir: str, prefix: str, before: float) -> str | None:
     """The newest earlier ``{prefix}-full-findings-*.json`` in the output directory, if any."""
-    candidates = []
-    try:
-        entries = list(os.scandir(output_dir))
-    except OSError:
-        return None
-    for entry in entries:
-        if entry.is_file() and entry.name.startswith(f"{prefix}-full-findings-") and entry.name.endswith(".json") and entry.stat().st_mtime < before - 1:
-            candidates.append((entry.stat().st_mtime, entry.path))
-    return max(candidates)[1] if candidates else None
+    found = latest_files(output_dir, f"{glob.escape(prefix)}-full-findings-*.json", before=before)
+    return found[0] if found else None
 
 
 def _print_summary(console: Console, results: list[StepResult], merged: dict[str, Any]) -> None:

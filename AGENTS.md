@@ -134,6 +134,7 @@ and is where most of these checks were first written.
 │   ├── cluster_audit/        # fakes.py: a fake Vault keyed by path
 │   ├── identity_audit/       # fakes.py: a fake Vault keyed by (namespace, path)
 │   ├── full_audit/           # Orchestration with every step patched
+│   ├── findings_diff/        # diff, including the no-argument auto-pick
 │   ├── entity_export/        # Package marker only; tests live in activity_export/
 │   ├── test_cli_parsing.py   # Argparse-level tests and main() exit codes, no Vault required
 │   └── test_ce.py            # CE smoke tests (marker `ce`), run only by task test:ce
@@ -293,7 +294,7 @@ export VAULT_TOOLS_DEBUG="true"                 # Default: false
 
 These three are the complete set. Everything else is a CLI flag — `--workers`,
 `--output-dir`, `--no-sentinel`, `--start-date`/`--end-date`, `--names-only`,
-`--list`/`--list-entities`, `--fail-on`/`--fail-on-gaps`. Rate limiting uses
+`--list-entities` (`--list` on identity-audit), `--skip`/`--only`, `--fail-on`/`--fail-on-gaps`. Rate limiting uses
 `NamespaceAuditor`'s constructor defaults (batch 100, sleep 3s) and is not
 currently exposed on the CLI.
 
@@ -301,7 +302,12 @@ currently exposed on the CLI.
 
 ### Core Components
 
-1. **Main CLI (`main.py`)**: Unified entry point with subcommands for each tool
+1. **Main CLI (`main.py`)**: Unified entry point with subcommands for each tool.
+   Shared options are parent parsers (`common`, `gating`, `walk_opts`,
+   `policy_opts`, `window_opts`); each Vault-backed subcommand is a
+   `_cmd_<name>` handler in `COMMANDS` returning an exit code, and `diff` runs
+   before a client is created. A new subcommand needs a handler there and a
+   line in `_SUBCOMMANDS_HELP`.
 2. **Common Utilities (`src/common/`)**:
    - `vault_client.py`: Centralized Vault client with connection validation and enhanced error handling
    - `config.py`: Centralized configuration management with environment variable support
@@ -726,7 +732,7 @@ unrelated tests. Keep it that way.
 
 ### Activity usage checks (`src/activity_export/findings.py`)
 
-- Run on every `activity-export` (and `all`/`full-audit`) over the data already
+- Run on every `activity-export` (and `full-audit`) over the data already
   exported. Two extra root reads: `sys/internal/counters/config` always, and
   `activity/monthly` only when the window reaches the current month. Either
   failing leaves the checks unjudged and is recorded; the export never fails
@@ -772,8 +778,13 @@ unrelated tests. Keep it that way.
   `skipped` with the reason. If cluster-audit cannot connect at all, full-audit
   returns `None` (exit 1): there is no cluster name to file a report under.
 - Omitted `-s/-e` means the last 12 calendar months (`default_window`). That is
-  close to, but not exactly, Vault's billing period. `all` is unchanged and
-  kept for compatibility.
+  close to, but not exactly, Vault's billing period. The CLI resolves it
+  (`main.py::resolve_window`, shared with both exports) and prints it, so the
+  printed window is the one used. `all` was removed in 3.1.0.
+- **`--skip`/`--only`** become `run_full_audit(skip=frozenset)`; names must be
+  in `STEPS[1:]` (cluster-audit always runs). A user-skipped step forces
+  `coverage.complete` false but adds nothing to `coverage.errors`, whose
+  schema has no room for it and which the report words as failed reads.
 
 ### Enhanced Error Handling
 
@@ -851,6 +862,16 @@ Counts are deliberately not recorded here — they go stale on every change. Run
 - Add docstrings for public functions and classes
 - Maintain thread safety in concurrent code
 - Handle errors gracefully with specific exception types
+
+### Versioning
+
+- **Ask before bumping the version, for every change.** Propose the new
+  version and the reason (patch, minor or major under semver) and wait for the
+  user's confirmation; never infer it from the size of the change. Approval
+  covers that one change only.
+- A bump touches three places together: `version` in `pyproject.toml`,
+  `_FALLBACK_VERSION` in `main.py`, and `uv.lock` (refresh with `uv lock`).
+  `tests/test_cli_parsing.py` checks `--version` against `pyproject.toml`.
 
 ### Testing Requirements
 

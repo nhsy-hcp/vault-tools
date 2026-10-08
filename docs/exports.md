@@ -3,9 +3,13 @@
 ## Activity Export
 
 Export Vault activity logs and usage metrics, and check them for client
-anti-patterns. Both dates are required:
+anti-patterns. Pass both dates or neither; with neither, the window is the
+last 12 calendar months and is printed before the export starts:
 
 ```bash
+# The last 12 calendar months
+python main.py activity-export
+
 # Export for a specific date range
 python main.py activity-export --start-date 2026-01-01 --end-date 2026-01-31
 
@@ -32,9 +36,10 @@ yet, the month in progress is judged instead.
 
 ## Entity Export
 
-Extract and export Vault entity data. Both dates are required:
+Extract and export Vault entity data. The dates work as for activity-export:
 
 ```bash
+python main.py entity-export
 python main.py entity-export --start-date 2026-01-01 --end-date 2026-01-31
 
 # See all options
@@ -44,14 +49,13 @@ python main.py entity-export --help
 A range with no client records is not an error: Vault answers `204 No Content`
 and the export reports that there is no data and exits successfully.
 
-## All (legacy)
+Vault root-protects `sys/internal/counters/activity/export`, so the token needs
+`read` and `sudo` on that exact path ([token and policies](token-and-policies.md)).
+A 403 names that rule. activity-export does not need it.
 
-Run three subcommands in sequence, sharing one Vault connection.
-`full-audit` is the superset; `all` is kept for compatibility:
+## `all` (removed in 3.1.0)
 
-```bash
-python main.py all -s 2026-01-01 -e 2026-01-31
-
-# Via the task runner
-task run -- all -s 2026-01-01 -e 2026-01-31
-```
+`all` ran namespace-audit and both exports. Use `full-audit`, which runs every
+audit and export, isolates a failing step, honours `--fail-on`/`--fail-on-gaps`
+and writes a combined report. `full-audit --only activity-export --only
+entity-export` runs just the exports (cluster-audit always runs first).

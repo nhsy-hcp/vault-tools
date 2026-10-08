@@ -1,4 +1,5 @@
 import csv
+import fnmatch
 import json
 import logging
 import os
@@ -135,3 +136,30 @@ def read_csv(file_path: str) -> list[dict[str, Any]]:
     except (OSError, csv.Error) as e:
         logger.error(f"Failed to read or parse {file_path}: {e}")
         raise FileProcessingError(f"Failed to read or parse {file_path}") from e
+
+
+def latest_files(output_dir: str, pattern: str, n: int = 1, before: float | None = None) -> list[str]:
+    """Paths of the ``n`` newest regular files in ``output_dir`` whose name matches ``pattern``, newest first.
+
+    ``pattern`` is an ``fnmatch`` pattern matched case-sensitively against the
+    basename. With ``before``, only files modified more than one second before
+    it count: some filesystems store whole-second mtimes, so a file written
+    just after ``before`` could otherwise look older than it is. Never raises:
+    an unreadable directory, or a file that vanishes mid-scan, yields fewer
+    results rather than an error.
+    """
+    candidates = []
+    try:
+        entries = list(os.scandir(output_dir))
+    except OSError:
+        return []
+    for entry in entries:
+        try:
+            if not entry.is_file() or not fnmatch.fnmatchcase(entry.name, pattern):
+                continue
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        if before is None or mtime < before - 1:
+            candidates.append((mtime, entry.path))
+    return [path for _, path in sorted(candidates, reverse=True)[: max(n, 0)]]
