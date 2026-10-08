@@ -8,9 +8,13 @@ A unified CLI tool for comprehensive HashiCorp Vault operations, providing defen
 
 ## Features
 
-- **Namespace Audit**: Multi-threaded namespace traversal with rate limiting, JSON/CSV output and a markdown audit report
-- **Activity Export**: Vault activity log processing and export with flexible date ranges
+- **Namespace Audit**: Multi-threaded namespace traversal with rate limiting, JSON/CSV output and a markdown audit report, plus an opt-in review of what each ACL policy grants
+- **Cluster Audit**: Seal, HA, replication, raft, audit devices, automated snapshots and node metrics — works against a sealed or DR-secondary node too
+- **Identity Audit**: Orphaned, disabled and directly-granted entities, duplicate aliases and entity sprawl
+- **Activity Export**: Vault activity log processing and export with flexible date ranges, plus client-usage checks
 - **Entity Export**: Entity data extraction and CSV/JSON reporting
+- **Full Audit**: Every audit and export in one run, with a combined report
+- **Machine-readable findings**: Every audit writes a `findings.json` compatible with the vault-ops skill, with a `diff` subcommand and CI exit codes
 
 ## Quick Start
 
@@ -62,7 +66,18 @@ pre-commit run --all-files
 
 Run the CLI directly with `python main.py`, through uv as `uv run vault-tools`,
 or via the task runner as `task run -- <args>` (everything after `--` is passed
-straight through). There are four subcommands:
+straight through). The subcommands are:
+
+| Subcommand | What it does |
+| --- | --- |
+| `namespace-audit` | Walks every namespace: mounts, ACL and Sentinel policies, plus cluster health |
+| `cluster-audit` | Cluster-level health only; also works on sealed and DR-secondary nodes |
+| `identity-audit` | Identity entities and aliases in every namespace |
+| `activity-export` | Activity log export plus client-usage checks |
+| `entity-export` | Client entity export |
+| `full-audit` | All of the above, plus a combined report |
+| `all` | `namespace-audit`, `activity-export` and `entity-export` in sequence (kept for compatibility) |
+| `diff` | Compares two `findings.json` files; needs no Vault connection |
 
 ### Namespace Audit
 
@@ -82,13 +97,16 @@ python main.py namespace-audit --workers 8 --output-dir custom-output
 python main.py namespace-audit --help
 ```
 
-Each run writes up to twelve files to the output directory: up to six JSON
-dumps of the raw API responses, up to five CSV summaries, and a markdown report,
-`{cluster-name}-audit-report-{YYYYMMDD}.md`. The report is written on every run —
-there is no flag to enable or suppress it. The two Sentinel files are written
-only on a cluster that has Sentinel policies, `license.json` only when the
-Enterprise license could be read, and the CSV summaries are skipped when they
-would be empty, so a small cluster produces fewer files.
+Each run writes up to fourteen files to the output directory: up to eight JSON
+files, up to five CSV summaries, and a markdown report,
+`{cluster-name}-audit-report-{YYYYMMDD}.md`. The report and
+`{cluster-name}-namespace-findings-{YYYYMMDD}.json` (see
+[Findings, diffs and CI](#findings-diffs-and-ci)) are written on every run.
+The two Sentinel files are written only on a cluster that has Sentinel
+policies, `license.json` only when the Enterprise license could be read,
+`acl-policy-review.json` only with `--acl-bodies`, and the CSV summaries are
+skipped when they would be empty, so a small cluster produces fewer files — eight
+on a root-only Community dev server.
 
 The console shows the run itself — a progress bar, the summary table and the
 list of files written — and nothing else. Per-namespace detail, file-write
@@ -107,6 +125,9 @@ The report is the human-readable view of the audit and contains:
 - **Summary** — total namespaces, maximum nesting depth, mount totals and
   distinct type counts, duration, errors and denials, plus the license expiry
   date and licensed feature count on Enterprise.
+- **Cluster health** — the same section `cluster-audit` writes (see below),
+  read once before the walk: node and seal state, replication, raft, audit
+  devices, automated snapshots and node metrics.
 - **License** — Enterprise only: license ID, issuer, soft-expiry and hard
   termination dates, performance standby count and the licensed features. If
   the license could not be read, the section says why — denied, a server error,
@@ -125,21 +146,30 @@ The report is the human-readable view of the audit and contains:
 - **ACL policies** — the policies each namespace defines, one row per
   namespace. Vault's own `default`, `root` and `default-ceiling` exist in every
   namespace and are excluded, so a namespace showing `0` genuinely defines
-  none of its own. Names only — the tool never reads policy bodies.
+  none of its own. Names only by default; see
+  [ACL policy review](#acl-policy-review) for the opt-in permission check.
 - **Sentinel policies** — the endpoint- and role-governing policies in force per
   namespace, with their enforcement levels, the endpoints an EGP covers and the
   size of each policy body. Vault Enterprise with the Governance & Policy module
   only; see below.
-- **Security observations** — prompts for review derived from mount metadata:
-  deprecated or pending-removal plugins, auth mounts enumerable by
-  unauthenticated callers (`listing_visibility: unauth`), mounts whose
-  `max_lease_ttl` overrides the cluster ceiling, non-replicated `local` mounts,
-  namespaces with no auth method beyond the built-in token backend, leaf
-  namespaces holding nothing but Vault's own built-in engines, Sentinel
-  policies that do not actually block anything (`advisory` or `soft-mandatory`
-  enforcement, a wildcard EGP path, or a rule body that always evaluates to
-  true), and an Enterprise license expiring within 90 days (Medium) or already
-  past its soft expiry (High, with the hard termination date).
+- **Security observations** — prompts for review, each tagged with a rule ID
+  from the vault-ops skill's catalogue (`VT-MOUNT-001` and so on):
+  - Mounts: deprecated or pending-removal plugins, auth mounts enumerable by
+    unauthenticated callers (`listing_visibility: unauth`), a `max_lease_ttl`
+    that overrides the cluster ceiling, a `default_lease_ttl` above 768h,
+    non-replicated `local` mounts, KV version 1, and more than 20 mounts of
+    one type in a namespace.
+  - Namespaces: no auth method beyond the built-in token backend, and leaf
+    namespaces holding nothing but Vault's own built-in engines.
+  - Sentinel: policies that do not actually block anything (`advisory` or
+    `soft-mandatory` enforcement, a wildcard EGP path, or a body that always
+    evaluates to true), a hard-mandatory policy that always denies, an `http`
+    import, and same-named policies whose bodies differ across namespaces.
+  - Cluster: a cluster `default_lease_ttl` above 768h, an Enterprise license
+    expiring within 90 days (Medium) or already past its soft expiry (High,
+    with the hard termination date), and every cluster health check listed
+    under `cluster-audit`.
+  - ACL permissions, with `--acl-bodies` only.
 - **Output files** — an index of the sibling JSON and CSV files from the same run.
 
 These observations are review prompts, not a compliance verdict — informational
@@ -182,9 +212,89 @@ that must produce no finding. Every one of them passes unconditionally, so
 nothing is ever blocked. `task unseed:sentinel` removes them.
 Both accept namespaces: `task seed:sentinel -- team-a/ team-b/`.
 
+#### ACL policy review
+
+`--acl-bodies` also reads every ACL policy body (all but `root`, built-ins
+included, so a widened `default` is caught) and checks what it grants:
+
+- `VT-POL-001`: write or `sudo` on a path that matches everything (`*`, `+/*`, …).
+- `VT-POL-002`: write access to something that controls access: policies,
+  auth methods, mounts, namespaces, token creation or roles, identity.
+- `VT-POL-003`: `sudo` anywhere.
+- `VT-POL-004`: a same-named policy whose body differs across namespaces.
+- `VT-POL-005`: a body that could not be parsed.
+
+It needs the separate [`audit-policy-acl-reader.hcl`](audit-policy-acl-reader.hcl)
+add-on, because reading bodies lets a token reconstruct the cluster's access
+model. Bodies are parsed in memory: only a hash and the flagged rules' paths and
+capabilities are kept, in `{cluster-name}-acl-policy-review-{YYYYMMDD}.json`.
+Policy text and allowed/denied parameter values are never written anywhere.
+Without the add-on each namespace records one access gap naming it. Each rule
+is judged on its own, so a `deny` elsewhere, or another policy on the same
+token, can narrow a flagged rule. Expect `VT-POL-003` on this tool's own
+`audit-policy.hcl`, which needs `sudo` on three exact read-only paths.
+
+```bash
+vault policy write vault-tools-acl-reader audit-policy-acl-reader.hcl
+export VAULT_TOKEN=$(vault token create -policy=vault-tools-audit -policy=vault-tools-acl-reader -ttl=1h -field=token)
+python main.py namespace-audit --acl-bodies
+```
+
+### Cluster Audit
+
+Cluster-level health on its own, without walking namespaces:
+
+```bash
+python main.py cluster-audit
+```
+
+It reads the unauthenticated `sys/health` first, so a **sealed**, uninitialised
+or **DR-secondary** node still gets a report (seal state, or replication status)
+where every other command would fail on token validation. It writes
+`{cluster-name}-cluster-health-{YYYYMMDD}.json`,
+`{cluster-name}-cluster-findings-{YYYYMMDD}.json` and
+`{cluster-name}-cluster-audit-report-{YYYYMMDD}.md`. Checks:
+
+- `VT-HLTH-001`…`006`: node sealed or no active leader, replication unhealthy,
+  Vault older than 1.19, raft autopilot unhealthy, irrevocable leases, more than
+  100,000 leases.
+- `VT-REPL-001`…`005`: peer lag, a secondary with no heartbeat, clock skew, a
+  corrupted merkle tree (High), and performance paths filters.
+- `VT-AUD-001`…`003`: no audit device, only one device, or a device logging raw
+  values or unhashed accessors.
+- `VT-SNAP-001`…`003`: no automated snapshots, a failing or overdue snapshot,
+  and snapshots on the node's local disk.
+- `VT-LIC-001` and `VT-LEASE-001`, as in namespace-audit.
+
+Metrics are the queried node's own gauges, never cluster totals. Addresses,
+cluster IDs, file paths, snapshot URLs and storage credentials are never stored.
+
+### Identity Audit
+
+```bash
+python main.py identity-audit
+python main.py identity-audit --list   # also write names, metadata and aliases
+```
+
+Reads every identity entity in every namespace and checks for:
+
+- `VT-ID-001`: entities with no aliases.
+- `VT-ID-002`: policies attached directly to an entity.
+- `VT-ID-003`: disabled entities.
+- `VT-ID-004`: a namespace with at least 100 entities and more than three times
+  its active entity clients. Only judged when the activity log records something.
+- `VT-ID-005`: the same alias name on several entities.
+
+Entity names, metadata and alias names can hold emails, usernames and AppRole
+role_ids. The findings, the per-namespace CSV and the report therefore identify
+entities by ID only. `--list` writes everything to a separate
+`{cluster-name}-identity-entities-{YYYYMMDD}.json`; treat that file as
+confidential.
+
 ### Activity Export
 
-Export Vault activity logs and usage metrics. Both dates are required:
+Export Vault activity logs and usage metrics, and check them for client
+anti-patterns. Both dates are required:
 
 ```bash
 # Export for a specific date range
@@ -196,6 +306,20 @@ python main.py activity-export -s 2026-01-01 -e 2026-01-31
 # See all options
 python main.py activity-export --help
 ```
+
+Alongside the export, `{cluster-name}-activity-findings-{YYYYMMDD}.json` and
+`.md` (plus `.csv` when there are findings) report:
+
+- `VT-CLI-001`: most of a namespace's clients are token-only.
+- `VT-CLI-002`: sharp growth over recent months.
+- `VT-CLI-003`: a mount where most clients are new each month (identities
+  created per run).
+- `VT-CLI-004`: on Enterprise, most clients in root.
+- `VT-CLI-005`: the activity log is disabled.
+
+When the log is off the report says that every zero count means "not
+recorded", not "no clients". When the window has no completed billing period
+yet, the month in progress is judged instead.
 
 ### Entity Export
 
@@ -211,9 +335,58 @@ python main.py entity-export --help
 A range with no client records is not an error: Vault answers `204 No Content`
 and the export reports that there is no data and exits successfully.
 
+### Full Audit
+
+Every audit and export in one run:
+
+```bash
+python main.py full-audit                          # activity window: the last 12 calendar months
+python main.py full-audit -s 2026-01-01 -e 2026-06-30 --acl-bodies --list-entities
+```
+
+It runs cluster-audit, namespace-audit, identity-audit, activity-export and
+entity-export, in that order. Each step writes its usual files, and cluster
+health and the namespace list are read once and shared between steps. On top
+of those, `{cluster-name}-full-audit-{YYYYMMDD}.md` has:
+
+- one status row per step (ok, failed or skipped, with the reason);
+- every finding ranked by severity, with findings that two steps both report
+  listed once;
+- the merged access gaps;
+- an index of every file the run wrote.
+
+`{cluster-name}-full-findings-{YYYYMMDD}.json` holds the merged findings. A
+failing step does not stop the rest, but it does mark coverage incomplete. On a
+sealed or DR-secondary node only cluster-audit runs.
+
+### Findings, diffs and CI
+
+Every audit writes a `*-findings-*.json` in the vault-ops skill's schema
+([`schemas/findings.schema.json`](schemas/findings.schema.json)). Each finding
+has a stable fingerprint, a rule ID, a severity and structured evidence, and
+the document records coverage: what was denied or errored.
+
+```bash
+# What changed between two runs (no Vault connection needed)
+python main.py diff outputs/old-namespace-findings.json outputs/new-namespace-findings.json
+
+# Gate CI on the results
+python main.py namespace-audit --fail-on medium --fail-on-gaps
+```
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | Completed |
+| 1 | Fatal: connection, token or configuration error, or the audit failed |
+| 2 | `--fail-on-gaps` and coverage was incomplete |
+| 3 | `--fail-on <severity>` and a finding was at or above it (wins over 2) |
+
+`--fail-on` and `--fail-on-gaps` work on every command that writes findings.
+
 ### All
 
-Run all three subcommands in sequence, sharing one Vault connection:
+Run three subcommands in sequence, sharing one Vault connection.
+`full-audit` is the superset; `all` is kept for compatibility:
 
 ```bash
 python main.py all -s 2026-01-01 -e 2026-01-31
@@ -257,7 +430,7 @@ An hour is ample headroom — a full audit typically completes in seconds. Add
 `-explicit-max-ttl=1h` if the token must not be renewable beyond that, or lower
 `-ttl` for CI use.
 
-Two things to know about the policy:
+Things to know about the policy:
 
 - **It must live in the root namespace.** Vault ACL policies are namespace-local,
   and a token does *not* inherit a same-named policy defined in a child
@@ -265,9 +438,12 @@ Two things to know about the policy:
   paths (`+/sys/mounts`, `+/+/sys/mounts`, ...), where `+` matches one namespace
   segment. The policy covers the root namespace plus five levels of nesting; a
   deeper hierarchy needs one more `+/` rule per extra level.
-- **`sys/internal/counters/activity/export` needs `sudo`.** Vault root-protects
-  that endpoint, so `read` alone returns 403 and `entity-export` fails. It is the
-  only rule in the policy requiring `sudo`; everything else is plain `read`/`list`.
+- **Three rules need `sudo`.** Vault root-protects
+  `sys/internal/counters/activity/export` (entity-export), listing `sys/audit`
+  and listing `sys/storage/raft/snapshot-auto/config` (cluster-audit), so
+  `read` alone returns 403. Each is an exact path, which grants nothing below it:
+  devices cannot be enabled or disabled, and snapshot configs, which hold
+  storage credentials, stay unreadable. Everything else is plain `read`/`list`.
 - **`sys/config/state/sanitized` is optional.** It supplies the cluster's lease
   TTLs, which calibrate the audit report's lease findings. Removing the rule
   degrades those findings to a fixed threshold; it does not fail the run.
@@ -275,7 +451,9 @@ Two things to know about the policy:
   names, which is all the ACL inventory needs. `read` would yield the HCL
   bodies, and a token able to read every policy in the tree can reconstruct
   the cluster's whole access model — a large privilege increase for a
-  read-only audit. Removing the rule drops that report section and records
+  read-only audit. Body reads live in the separate opt-in
+  [`audit-policy-acl-reader.hcl`](audit-policy-acl-reader.hcl), for
+  `--acl-bodies` only. Removing the rule drops that report section and records
   the denials; it does not fail the run.
 - **The `sys/policies/egp` and `sys/policies/rgp` rules are optional too.** They
   cover the Sentinel section and are Enterprise-Premium-only, so on any other
@@ -286,6 +464,18 @@ Two things to know about the policy:
   section and expiry findings on Enterprise, and grants nothing on Community.
   Removing the rule makes the License section report the read as denied and
   **Access gaps** note it as a cluster-level read; it does not fail the run.
+- **The cluster health rules are optional.** These cover replication, raft,
+  metrics, audit devices and snapshots. A missing rule empties that block,
+  lists the endpoint under **Cluster-level reads**, and makes `findings.json`
+  coverage incomplete. `sys/health`, `sys/seal-status` and `sys/leader` are
+  unauthenticated and need no rule.
+- **`identity/entity/id` is namespace-local** (`list`, plus `read` on `/*`),
+  with one rule per nesting level, for `identity-audit`.
+  `sys/internal/counters/config` and `activity/monthly` are root-only reads for
+  the usage checks.
+
+Policy files are kept `vault policy fmt`-clean: `task lint` checks it and
+`task fmt:policy` fixes it.
 
 If the token lacks `sys/namespaces` at some level, the audit stops descending
 there and reports the namespaces it did reach. The **Permission Denied (skipped)**
@@ -327,7 +517,10 @@ export VAULT_TOOLS_DEBUG="true"                 # Enable debug logging
 
 Everything else is a CLI flag — see `python main.py <command> --help`. Worker
 count is `--workers`, output directory is `--output-dir` (which overrides
-`VAULT_TOOLS_OUTPUT_DIR`), and the export window is `--start-date`/`--end-date`.
+`VAULT_TOOLS_OUTPUT_DIR`), the export window is `--start-date`/`--end-date`,
+and CI gating is `--fail-on`/`--fail-on-gaps`. The opt-in collections are
+`--acl-bodies` (namespace-audit, full-audit), `--list` (identity-audit) and
+`--list-entities` (full-audit).
 
 ## Testing
 
@@ -373,16 +566,21 @@ task test:gha ACT_ARCH=linux/amd64
 
 ## Architecture
 
-**Modular design** with three main components:
+**Modular design**, one package per subcommand:
 
-- `src/namespace_audit/` - Multi-threaded namespace traversal (`main.py`) and
-  markdown report rendering (`report.py`)
-- `src/activity_export/` - Activity log processing
+- `src/namespace_audit/` - Multi-threaded namespace traversal (`main.py`),
+  markdown report rendering (`report.py`) and the ACL policy review (`acl.py`)
+- `src/cluster_audit/` - Cluster health collection, checks and report
+- `src/identity_audit/` - Entity collection, checks and report
+- `src/activity_export/` - Activity log processing and usage checks
 - `src/entity_export/` - Entity data extraction
-- `src/common/` - Shared utilities (VaultClient, Config, FileUtils)
+- `src/full_audit/` - Runs every step and merges their findings
+- `src/findings_diff/` - The `diff` subcommand
+- `src/common/` - Shared utilities (VaultClient, Config, FileUtils), the
+  findings model and rule catalogue (`findings.py`) and markdown helpers
 
-**Output:** Structured JSON/CSV files in the `outputs/` directory, plus a
-markdown audit report from `namespace-audit`.
+**Output:** Structured JSON/CSV files in the `outputs/` directory, a markdown
+report and a `findings.json` per audit.
 
 ## Contributing
 
