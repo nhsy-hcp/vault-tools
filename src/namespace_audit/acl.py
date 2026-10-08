@@ -1,7 +1,8 @@
 """ACL policy body assessment, ported from the vault-ops skill.
 
-Opt-in only (``namespace-audit --acl-bodies`` plus the read-only
-``audit-policy-acl-reader.hcl`` add-on). Bodies are parsed in memory and
+Runs whenever the token can read policy bodies — it carries the read-only
+``policies/audit-policy-acl-reader.hcl`` add-on — unless ``--names-only`` is set: the
+token is the source of truth. Bodies are parsed in memory and
 reduced to an ``AclAssessment``: a hash, a rule count and the flagged rules'
 paths and capabilities. The body itself — and every allowed/denied parameter
 value inside it — never leaves this module, never reaches AuditData and is
@@ -57,9 +58,6 @@ LEGACY_POLICY_CAPABILITIES = {
     "write": ("create", "read", "update", "delete", "list"),
     "sudo": ("create", "read", "update", "delete", "list", "sudo"),
 }
-
-# The access-gap scope a denied body read records, naming the fix.
-BODY_DENIED_SCOPE = "ACL policy bodies (attach audit-policy-acl-reader)"
 
 _HCL_TOKEN = re.compile(r'\s+|#[^\n]*|//[^\n]*|/\*.*?\*/|"(?:[^"\\]|\\.)*"|[A-Za-z_][\w.-]*|-?\d+(?:\.\d+)?|[{}\[\]=,:]', re.S)
 

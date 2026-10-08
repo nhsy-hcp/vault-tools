@@ -305,17 +305,42 @@ class TestSentinelPolicyCollection:
         # The rest of the namespace was still collected.
         assert "team-a" in auditor.data.auth_methods
 
-    def test_unreadable_policy_keeps_the_name_and_records_one_gap(self, auditor):
-        """40 denied reads in a namespace must not become 40 access-gap rows."""
+    def test_unreadable_bodies_keep_the_names_and_stop_reading(self, auditor):
+        """A token without the Sentinel add-on: names kept, one 403, no gap rows."""
         client = attach(auditor, make_hvac_client(list_egp_policies={"data": {"keys": ["a", "b", "c"]}}))
         client.sys.read_egp_policy.side_effect = hvac.exceptions.Forbidden()
 
         auditor._traverse_namespace("team-a/", queue.Queue())
+        auditor._traverse_namespace("team-b/", queue.Queue())
 
-        assert set(auditor.data.egp_policies["team-a"]) == {"a", "b", "c"}
-        assert "read_error" in auditor.data.egp_policies["team-a"]["a"]
-        gaps = [g for g in auditor.stats.forbidden_namespaces if "policy bodies" in g[1]]
-        assert len(gaps) == 1
+        assert auditor.data.egp_policies["team-a"] == {"a": {"name": "a"}, "b": {"name": "b"}, "c": {"name": "c"}}
+        assert client.sys.read_egp_policy.call_count == 1
+        assert auditor.stats.forbidden_namespaces == []
+        assert auditor._body_status("sentinel") == "not readable"
+
+    def test_bodies_are_reduced_and_never_stored(self, auditor):
+        client = attach(
+            auditor,
+            make_hvac_client(
+                list_egp_policies={"data": {"keys": ["p"]}},
+                read_egp_policy={"data": {"name": "p", "enforcement_level": "advisory", "paths": ["*"], "policy": "main = rule { true }"}},
+            ),
+        )
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        stored = auditor.data.egp_policies["team-a"]["p"]
+        assert "policy" not in stored and stored["always_true"] is True and len(stored["sha256"]) == 16
+        assert client.sys.read_egp_policy.call_count == 1
+
+    def test_names_only_lists_sentinel_without_reading(self, auditor):
+        auditor.names_only = True
+        client = attach(auditor, make_hvac_client(list_egp_policies={"data": {"keys": ["p"]}}))
+
+        auditor._traverse_namespace("team-a/", queue.Queue())
+
+        assert auditor.data.egp_policies["team-a"] == {"p": {"name": "p"}}
+        client.sys.read_egp_policy.assert_not_called()
 
     def test_collection_can_be_disabled(self, auditor):
         auditor.collect_sentinel = False

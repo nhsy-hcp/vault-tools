@@ -365,6 +365,28 @@ def _is_trivial_policy(body: Any) -> bool:
     return ALWAYS_TRUE_MAIN.match(" ".join(meaningful)) is not None
 
 
+def reduce_sentinel_policy(raw: dict[str, Any]) -> dict[str, Any]:
+    """What is kept of a Sentinel policy read: never its source.
+
+    The checks need only these facts about the body, so they are computed here,
+    in memory, and the body is dropped — matching the ACL review and the
+    vault-ops skill. ``sha256`` is what VT-SNT-005 compares across namespaces.
+    """
+    body = raw.get("policy")
+    reduced: dict[str, Any] = {"name": raw.get("name"), "enforcement_level": raw.get("enforcement_level")}
+    if "paths" in raw:
+        reduced["paths"] = raw.get("paths")
+    if isinstance(body, str):
+        reduced.update(
+            sha256=hashlib.sha256(body.encode()).hexdigest()[:16],
+            line_count=_policy_line_count(body),
+            always_true=_is_trivial_policy(body),
+            always_false=_is_always_false_policy(body),
+            imports=_sentinel_imports(body),
+        )
+    return reduced
+
+
 def _sentinel_rows(collection: dict[str, Any], kind: str) -> list[list[Any]]:
     """Flatten a Sentinel collection into sorted table rows."""
     rows: list[list[Any]] = []
@@ -377,7 +399,7 @@ def _sentinel_rows(collection: dict[str, Any], kind: str) -> list[list[Any]]:
             if kind == "egp":
                 paths = policy.get("paths")
                 row.append(", ".join(paths) if isinstance(paths, list) and paths else "—")
-            row.append(_policy_line_count(policy.get("policy")))
+            row.append(policy.get("line_count", "—"))
             rows.append(row)
     return rows
 
@@ -414,14 +436,23 @@ def render_acl_policies(acl_policies: dict[str, list[str]], max_rows: int = MAX_
     return table
 
 
-def render_acl_review_note(acl_assessments: dict[str, dict[str, Any]]) -> str:
+# Why policy bodies were or were not assessed, per status, for both kinds.
+POLICY_BODY_NOTES = {
+    "not readable": "the token cannot read policy bodies, so only names were listed. Attach `{addon}` to the token to assess them",
+    "names only": "only names were listed (`--names-only`)",
+    "none found": "there were no policies to read",
+}
+
+
+def render_acl_review_note(acl_assessments: dict[str, dict[str, Any]], status: str | None = None) -> str:
     """One line on whether bodies were assessed; the findings carry the detail.
 
     No per-policy table: the flagged paths are already in the findings, and a
     table of every assessed policy would repeat the names list above.
     """
     if not acl_assessments:
-        return "_Permissions were not assessed: only policy names were listed. Run with `--acl-bodies` and attach `audit-policy-acl-reader.hcl` to review what each policy grants._"
+        reason = POLICY_BODY_NOTES.get(status or "not readable", POLICY_BODY_NOTES["not readable"]).format(addon="policies/audit-policy-acl-reader.hcl")
+        return f"_Permissions were not assessed: {reason}._"
     total = sum(len(p) for p in acl_assessments.values())
     flagged = sum(1 for p in acl_assessments.values() for a in p.values() if a.flagged)
     unparsed = sum(1 for p in acl_assessments.values() for a in p.values() if not a.parsed)
@@ -434,9 +465,8 @@ def render_acl_review_note(acl_assessments: dict[str, dict[str, Any]]) -> str:
 def render_sentinel_policies(collection: dict[str, Any], kind: str, max_rows: int = MAX_REPORT_NODES) -> str:
     """Table of Sentinel policies of one kind, across every namespace.
 
-    The body itself is deliberately not rendered — a Sentinel policy runs to
-    dozens of lines and there can be one per namespace, so the report reports a
-    line count and the JSON dump carries the source for diffing.
+    The body itself is never rendered or kept — only its line count, from
+    reduce_sentinel_policy. Policies whose bodies were not read show dashes.
     """
     rows = _sentinel_rows(collection, kind)
     headers = ["Namespace", "Policy", "Enforcement"] + (["Paths"] if kind == "egp" else []) + ["Lines"]
@@ -520,8 +550,7 @@ def _collect_sentinel_findings(data: AuditData) -> list[Finding]:
                         )
                     )
 
-                body = policy.get("policy")
-                if _is_trivial_policy(body):
+                if policy.get("always_true"):
                     findings.append(
                         finding(
                             "VT-SNT-004",
@@ -530,11 +559,11 @@ def _collect_sentinel_findings(data: AuditData) -> list[Finding]:
                             name,
                             kind,
                             "Policy body always evaluates to true — it enforces nothing despite appearing in the policy list.",
-                            line_count=_policy_line_count(body),
+                            line_count=policy.get("line_count", 0),
                         )
                     )
 
-                if level == "hard-mandatory" and _is_always_false_policy(body):
+                if level == "hard-mandatory" and policy.get("always_false"):
                     scope = f" on {', '.join(f'`{p}`' for p in paths)}" if kind == "egp" and isinstance(paths, list) and paths else ""
                     evidence: dict[str, Any] = {"enforcement_level": level}
                     if kind == "egp" and isinstance(paths, list):
@@ -551,7 +580,7 @@ def _collect_sentinel_findings(data: AuditData) -> list[Finding]:
                         )
                     )
 
-                imports = _sentinel_imports(body)
+                imports = policy.get("imports") or []
                 if "http" in imports:
                     findings.append(
                         finding(
@@ -574,18 +603,18 @@ def _collect_sentinel_drift_findings(data: AuditData) -> list[Finding]:
 
     Compared by body hash only; enforcement level and paths are left out
     because a deliberately stricter copy is still worth seeing as drift, and the
-    body is where accidental divergence happens. Unreadable bodies (the
-    ``read_error`` placeholders) are skipped — an unknown body is not evidence
-    of a different one.
+    body is where accidental divergence happens. Unread bodies (names only, or
+    a failed read) have no hash and are skipped — an unknown body is not
+    evidence of a different one.
     """
     findings: list[Finding] = []
     for kind, collection in (("egp", data.egp_policies), ("rgp", data.rgp_policies)):
         copies: dict[str, list[tuple[str, str]]] = {}
         for namespace, policies in collection.items():
             for name, policy in policies.items():
-                body = policy.get("policy") if isinstance(policy, dict) else None
-                if isinstance(body, str):
-                    copies.setdefault(name, []).append((namespace, hashlib.sha256(body.encode()).hexdigest()))
+                digest = policy.get("sha256") if isinstance(policy, dict) else None
+                if digest:
+                    copies.setdefault(name, []).append((namespace, digest))
         findings.extend(drift_findings("VT-SNT-005", f"{kind}_policy", kind, copies, label=f"{kind.upper()} "))
     return findings
 
@@ -979,17 +1008,25 @@ def build_markdown_report(
         # never set — so distinguish them from what the denials recorded.
         if any(scope.startswith("sentinel") for _, scope in stats.forbidden_namespaces):
             sentinel_sections.append(
-                "The token was denied access to the Sentinel policy endpoints in every namespace, so none were collected. See **Access gaps** above, and grant the `sys/policies/egp` and `sys/policies/rgp` rules from `audit-policy.hcl`."
+                "The token was denied access to the Sentinel policy endpoints in every namespace, so none were collected. See **Access gaps** above, and grant the `sys/policies/egp` and `sys/policies/rgp` rules from `policies/audit-policy.hcl`."
             )
         else:
             sentinel_sections.append("Sentinel collection was skipped, so this run says nothing about the governing policies in place.")
     else:
         egp_total = sum(len(p) for p in data.egp_policies.values())
         rgp_total = sum(len(p) for p in data.rgp_policies.values())
+        body_status = data.policy_bodies.get("sentinel")
+        body_note = (
+            " Their bodies were not assessed: "
+            + POLICY_BODY_NOTES[body_status].format(addon="policies/audit-policy-sentinel-reader.hcl")
+            + ", so enforcement levels and the VT-SNT checks are unknown."
+            if body_status in ("not readable", "names only")
+            else ""
+        )
         sentinel_sections.extend(
             [
                 f"{egp_total} endpoint governing polic{'y' if egp_total == 1 else 'ies'} and {rgp_total} role governing polic{'y' if rgp_total == 1 else 'ies'} across the namespaces audited. "
-                "Only `hard-mandatory` policies actually block a request.",
+                "Only `hard-mandatory` policies actually block a request." + body_note,
                 "",
                 "### Enforcement levels",
                 "",
@@ -1059,7 +1096,7 @@ def build_markdown_report(
         "",
         render_acl_policies(data.acl_policies),
         "",
-        render_acl_review_note(data.acl_assessments),
+        render_acl_review_note(data.acl_assessments, data.policy_bodies.get("acl")),
         "",
         *sentinel_sections,
         "",
@@ -1136,6 +1173,9 @@ def build_findings_json(
             "system_max_lease_ttl_seconds": system_max,
             "system_default_lease_ttl_seconds": system_default,
             "sentinel": sentinel_status(sentinel_supported),
+            # Whether bodies were read, per kind: the token decides. Not in the
+            # skill's schema, which permits extra cluster_context keys.
+            "policy_bodies": dict(data.policy_bodies),
         },
         coverage=coverage_block(
             stats.processed_count,

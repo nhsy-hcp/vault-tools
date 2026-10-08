@@ -13,8 +13,8 @@
 # Usage:
 #   scripts/check-policy-fmt.sh [--fix] [file.hcl ...]
 #
-# With no files, every *.hcl at the repository root is checked. pre-commit
-# passes the staged .hcl files explicitly.
+# With no files, every policies/*.hcl is checked. pre-commit passes the staged
+# .hcl files explicitly.
 
 set -euo pipefail
 
@@ -35,7 +35,7 @@ fi
 files=("$@")
 if [[ ${#files[@]} -eq 0 ]]; then
   shopt -s nullglob
-  files=(./*.hcl)
+  files=(policies/*.hcl)
   shopt -u nullglob
 fi
 if [[ ${#files[@]} -eq 0 ]]; then

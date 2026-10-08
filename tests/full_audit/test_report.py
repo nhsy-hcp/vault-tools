@@ -112,9 +112,10 @@ class TestSections:
 
     def test_not_covered_names_what_was_skipped(self):
         steps = [StepSummary("cluster-audit", "ok"), StepSummary("identity-audit", "failed", "RuntimeError: boom")]
-        report = build_full_report(_ctx([], steps=steps, merged=_merged([], sentinel="unsupported")))
+        report = build_full_report(_ctx([], steps=steps, merged=_merged([], sentinel="unsupported"), policy_bodies={"acl": "not readable", "sentinel": "none found"}))
         assert "**identity-audit** failed: RuntimeError: boom" in report
-        assert "--acl-bodies" in report
+        assert "Attach `policies/audit-policy-acl-reader.hcl` to the token" in report
+        assert "ACL not readable with this token" in report
         assert "Sentinel:** not available" in report
         assert "no earlier full-audit findings file" in report
 
@@ -193,3 +194,9 @@ def test_single_cluster_finding_does_not_repeat_its_meaning():
     item = report.split("### 1. ")[1].split("###")[0]
     assert CATALOGUE["VT-LIC-001"].meaning not in item
     assert "License expires on 2026-10-31" in item
+
+
+def test_sentinel_listed_but_not_assessed_is_called_out():
+    report = build_full_report(_ctx([], policy_bodies={"acl": "assessed", "sentinel": "not readable"}))
+    assert "**Sentinel policies:** listed, but the token cannot read Sentinel bodies (attach `policies/audit-policy-sentinel-reader.hcl`)" in report
+    assert "ACL assessed; Sentinel not readable with this token" in report
