@@ -220,10 +220,53 @@ def sort_findings(findings: list[Finding]) -> list[Finding]:
     )
 
 
-def _iso(ts: datetime) -> str:
-    # Naive timestamps (AuditStats uses datetime.now()) are local time.
+def iso_utc(ts: datetime) -> str:
+    """RFC 3339 in UTC with a Z suffix. Naive timestamps (AuditStats uses datetime.now()) are local time."""
     aware = ts if ts.tzinfo else ts.astimezone()
     return aware.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def parse_time(timestamp: Any) -> datetime | None:
+    """An ISO 8601 / RFC 3339 timestamp as an aware datetime; no offset means UTC. None if unparseable."""
+    try:
+        parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def drift_findings(rule_id: str, object_kind: str, object_type: str | None, copies: dict[str, list[tuple[str, str]]], label: str = "") -> list[Finding]:
+    """One finding per policy name whose copies have different bodies.
+
+    ``copies`` maps a name to its ``(namespace, body digest)`` pairs. Shared by
+    VT-POL-004 (ACL) and VT-SNT-005 (Sentinel) so the outlier choice and wording
+    cannot drift apart. Anchored on the root namespace, so the fingerprint
+    survives copies being added or removed. ``label`` prefixes the name in the
+    detail, e.g. ``"EGP "``.
+    """
+    findings: list[Finding] = []
+    for name in sorted(copies):
+        variants = Counter(digest for _, digest in copies[name])
+        if len(variants) < 2:
+            continue
+        common = variants.most_common(1)[0][0]
+        outliers = sorted(display_namespace(ns) for ns, digest in copies[name] if digest != common)
+        differ = "differs" if len(outliers) == 1 else "differ"
+        findings.append(
+            finding(
+                rule_id,
+                "",
+                object_kind,
+                name,
+                object_type,
+                f"{label}`{name}` exists in {len(copies[name])} namespaces with {len(variants)} different bodies — copies have drifted; {len(outliers)} {differ} from the most common one.",
+                namespaces=len(copies[name]),
+                variants=len(variants),
+                outliers=len(outliers),
+                examples=outliers[:3],
+            )
+        )
+    return findings
 
 
 def run_block(
@@ -238,8 +281,8 @@ def run_block(
         "cluster_name": cluster_name,
         "vault_addr": vault_addr,
         "start_namespace": display_namespace(start_namespace),
-        "started_at": _iso(started_at),
-        "finished_at": _iso(finished_at),
+        "started_at": iso_utc(started_at),
+        "finished_at": iso_utc(finished_at),
         "duration_seconds": max(round((finished_at - started_at).total_seconds(), 1), 0.0),
     }
     if worker_threads:
@@ -306,16 +349,15 @@ def merge_documents(documents: list[dict[str, Any]], *, run: dict[str, Any], clu
 
     Findings are deduplicated by fingerprint: namespace-audit embeds the
     cluster health, license and lease findings that cluster-audit also
-    reports. Coverage is complete only if every input was.
+    reports. They are rebuilt as Finding objects and passed through
+    build_findings_document, so sorting and the summary stay identical to every
+    per-step document. Coverage is complete only if every input was.
     """
-    seen: dict[str, dict[str, Any]] = {}
+    seen: dict[str, Finding] = {}
     for document in documents:
         for item in document.get("findings", []):
-            seen.setdefault(item["fingerprint"], item)
-    ordered = sorted(
-        seen.values(),
-        key=lambda f: (SEVERITY_ORDER.index(f["severity"].capitalize()), f["namespace"], (f.get("object") or {}).get("path") or "—", f["rule_id"]),
-    )
+            if item["fingerprint"] not in seen:
+                seen[item["fingerprint"]] = finding_from_dict(item)
 
     denied: dict[tuple[str, str], dict[str, str]] = {}
     errors: dict[tuple[str, str], dict[str, str]] = {}
@@ -326,22 +368,18 @@ def merge_documents(documents: list[dict[str, Any]], *, run: dict[str, Any], clu
         for e in coverage.get("errors", []):
             errors.setdefault((e["namespace"], e["message"]), e)
 
-    by_severity = {s.lower(): 0 for s in SEVERITY_ORDER}
-    by_severity.update(Counter(f["severity"] for f in ordered))
-    return {
-        "schema_version": FINDINGS_SCHEMA_VERSION,
-        "tool": {"name": TOOL_NAME, "version": tool_version},
-        "run": run,
-        "cluster_context": cluster_context,
-        "coverage": {
+    return build_findings_document(
+        list(seen.values()),
+        run=run,
+        cluster_context=cluster_context,
+        coverage={
             "namespaces_processed": max((d.get("coverage", {}).get("namespaces_processed", 0) for d in documents), default=0),
             "complete": all(d.get("coverage", {}).get("complete", True) for d in documents),
             "denied": [denied[k] for k in sorted(denied)],
             "errors": [errors[k] for k in sorted(errors)],
         },
-        "summary": {"total": len(ordered), "by_severity": by_severity, "by_rule": dict(sorted(Counter(f["rule_id"] for f in ordered).items()))},
-        "findings": ordered,
-    }
+        tool_version=tool_version,
+    )
 
 
 def finding_from_dict(item: dict[str, Any]) -> Finding:
