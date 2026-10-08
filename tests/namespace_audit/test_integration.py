@@ -201,3 +201,23 @@ class TestPerformanceCharacteristics:
         with patch("src.namespace_audit.main.write_json"), patch("src.namespace_audit.main.write_csv"), patch("os.makedirs"):
             # Should not raise exceptions with large dataset
             auditor._write_reports("large-cluster")
+
+
+class TestClusterHealthEmbedding:
+    def test_audit_collects_cluster_health_once_before_the_walk(self, mock_vault_client, mock_threading):
+        from src.cluster_audit.collector import ClusterCoverage
+
+        auditor = NamespaceAuditor(mock_vault_client, worker_threads=1)
+        health = {"sealed": False, "audit_devices": []}
+        with (
+            patch("src.namespace_audit.main.collect_cluster_health", return_value=(health, ClusterCoverage())) as collect,
+            patch("src.namespace_audit.main.write_json"),
+            patch("src.namespace_audit.main.write_csv"),
+            patch("src.namespace_audit.main.write_markdown"),
+            patch("os.makedirs"),
+        ):
+            document = auditor.audit_cluster()
+
+        collect.assert_called_once_with(mock_vault_client)
+        assert auditor.data.cluster_health is health
+        assert document["summary"]["by_rule"].get("VT-AUD-001") == 1

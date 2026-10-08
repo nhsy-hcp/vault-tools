@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from unittest.mock import MagicMock, Mock
 
+import hvac
 import pytest
 
 from src.common.vault_client import ConnectionInfo, VaultClient
@@ -34,6 +35,9 @@ def make_hvac_client(**overrides):
     }
     for name, value in {**defaults, **overrides}.items():
         getattr(client.sys, name).return_value = value
+    # Raw GETs come from the cluster health collector. 404 everywhere means
+    # "not applicable", so no block is populated and no health finding fires.
+    client.adapter.get.side_effect = hvac.exceptions.InvalidPath()
     return client
 
 
@@ -74,6 +78,8 @@ def mock_vault_client():
     mock_hvac_client.sys.list_rgp_policies.return_value = {"data": {"keys": []}}
     mock_hvac_client.sys.read_egp_policy.return_value = {"data": {}}
     mock_hvac_client.sys.read_rgp_policy.return_value = {"data": {}}
+    # See make_hvac_client: keeps the cluster health collector inert.
+    mock_hvac_client.adapter.get.side_effect = hvac.exceptions.InvalidPath()
 
     mock_context_manager.__enter__.return_value = mock_hvac_client
     mock_context_manager.__exit__.return_value = None

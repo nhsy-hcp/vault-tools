@@ -74,6 +74,64 @@ path "sys/license/status" {
   capabilities = ["read"]
 }
 
+# --- cluster-audit (and namespace-audit's Cluster health section) -----------
+# Read once per run against the root namespace. All optional: a missing rule
+# leaves that block empty and is reported under "Cluster-level reads", and no
+# nested variants are needed because every one of these is cluster-wide.
+#
+# sys/health, sys/seal-status and sys/leader are unauthenticated and need no
+# rule. Nothing below can change Vault.
+
+# Replication mode, state and per-peer link status (addresses are not kept).
+path "sys/replication/status" {
+  capabilities = ["read"]
+}
+
+# Performance paths filters per secondary, read only on a performance primary.
+path "sys/replication/performance/primary/paths-filter/*" {
+  capabilities = ["read"]
+}
+
+path "sys/replication/performance/primary/dynamic-filter/*" {
+  capabilities = ["read"]
+}
+
+# Integrated storage peers and autopilot health.
+path "sys/storage/raft/configuration" {
+  capabilities = ["read"]
+}
+
+path "sys/storage/raft/autopilot/configuration" {
+  capabilities = ["read"]
+}
+
+path "sys/storage/raft/autopilot/state" {
+  capabilities = ["read"]
+}
+
+# Runtime gauges of the queried node; only an allowlist is kept.
+path "sys/metrics" {
+  capabilities = ["read"]
+}
+
+# Listing audit devices is sudo-protected. The exact path (no glob) grants
+# nothing on sys/audit/<path>, so devices cannot be enabled or disabled.
+path "sys/audit" {
+  capabilities = ["read", "sudo"]
+}
+
+# Automated raft snapshots (Enterprise): config names and per-config status
+# only. Listing is sudo-protected; the exact path still leaves
+# snapshot-auto/config/<name> unreadable. Never grant read on
+# snapshot-auto/config/*: it returns storage credentials in plaintext.
+path "sys/storage/raft/snapshot-auto/config" {
+  capabilities = ["list", "sudo"]
+}
+
+path "sys/storage/raft/snapshot-auto/status/*" {
+  capabilities = ["read"]
+}
+
 # --- namespace-audit: auth methods -------------------------------------------
 # list_auth_methods() -> GET sys/auth, once per namespace visited. The traversal
 # scopes each request with get_client(namespace_path), so every nesting level is

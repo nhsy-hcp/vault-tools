@@ -189,3 +189,24 @@ class TestDiffCommand:
         with pytest.raises(SystemExit) as exc:
             main.main()
         assert exc.value.code == 1
+
+
+class TestClusterAuditCommand:
+    def test_parses_with_gating_flags(self):
+        args = _build_parser().parse_args(["cluster-audit", "--fail-on", "medium", "--fail-on-gaps", "--output-dir", "/tmp/x"])
+        assert (args.command, args.fail_on, args.fail_on_gaps, args.output_dir) == ("cluster-audit", "medium", True, "/tmp/x")
+
+    def _run(self, monkeypatch, tmp_path, argv, document):
+        monkeypatch.setenv("VAULT_ADDR", "http://127.0.0.1:8200")
+        monkeypatch.setenv("VAULT_TOKEN", "test-token")
+        monkeypatch.setattr("sys.argv", ["main.py", *argv, "--output-dir", str(tmp_path)])
+        with patch("main.run_cluster_audit", return_value=document):
+            with pytest.raises(SystemExit) as exc:
+                main.main()
+            return exc.value.code
+
+    def test_findings_gate_exit_3(self, monkeypatch, tmp_path):
+        assert self._run(monkeypatch, tmp_path, ["cluster-audit", "--fail-on", "medium"], _findings_doc([{"severity": "medium"}])) == 3
+
+    def test_failed_run_exits_1(self, monkeypatch, tmp_path):
+        assert self._run(monkeypatch, tmp_path, ["cluster-audit"], None) == 1
