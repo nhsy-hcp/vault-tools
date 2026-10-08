@@ -26,8 +26,8 @@ from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import write_csv, write_json, write_markdown
 from src.common.utils import FILE_DATE_FORMAT, file_prefix, normalise_namespace_path
 from src.common.vault_client import VaultClient, VaultConnectionError
-from src.namespace_audit.acl import BODY_DENIED_SCOPE, AclAssessment, assess_policy
-from src.namespace_audit.report import build_findings_json, build_markdown_report
+from src.namespace_audit.acl import AclAssessment, assess_policy
+from src.namespace_audit.report import build_findings_json, build_markdown_report, reduce_sentinel_policy
 
 logger = logging.getLogger(__name__)
 
@@ -149,11 +149,14 @@ class AuditData:
     # "this namespace defines no policies of its own" is a real answer, and on
     # the reference cluster 12 namespaces are in exactly that state.
     acl_policies: dict[str, list[str]] = field(default_factory=dict)
-    # Opt-in (--acl-bodies): namespace -> {policy name: AclAssessment}. Only a
-    # hash and the flagged rules' paths and capabilities — never a body. Covers
-    # every policy except "root", built-ins included: a widened "default" is
-    # exactly the kind of change worth catching. Empty when not collected.
+    # namespace -> {policy name: AclAssessment}, when the token can read bodies.
+    # Only a hash and the flagged rules' paths and capabilities — never a body.
+    # Covers every policy except "root", built-ins included: a widened
+    # "default" is exactly the kind of change worth catching.
     acl_assessments: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Whether policy bodies were assessed, per kind ("acl", "sentinel"): one of
+    # POLICY_BODY_STATUSES. The token decides; see NamespaceAuditor._body_status.
+    policy_bodies: dict[str, str] = field(default_factory=dict)
     # Vault version string from sys/health (e.g. "1.17.0+ent"). None when the
     # health response did not include it (pre-1.9 clusters, or mocked responses).
     vault_version: str | None = None
@@ -189,7 +192,7 @@ class NamespaceAuditor:
         worker_queue_timeout: int = 300,
         queue_depth_warn_threshold: int = 10_000,
         collect_sentinel: bool = True,
-        collect_acl_bodies: bool = False,
+        names_only: bool = False,
         cluster_reads: ClusterReads | None = None,
     ):
         self.vault_client = vault_client
@@ -201,7 +204,15 @@ class NamespaceAuditor:
         self.worker_queue_timeout = worker_queue_timeout
         self.queue_depth_warn_threshold = queue_depth_warn_threshold
         self.collect_sentinel = collect_sentinel
-        self.collect_acl_bodies = collect_acl_bodies
+        # Policy bodies are read whenever the token allows it: the token is the
+        # source of truth. names_only is the opt-out for a token that could
+        # read them but should not this run.
+        self.names_only = names_only
+        # Per kind: did any body read succeed, was any denied. Guarded by
+        # thread_lock. A denial is sticky for the run — the add-on policies
+        # grant uniformly at every level, so the first 403 settles it and the
+        # remaining reads are skipped instead of producing a gap per namespace.
+        self._body_reads: dict[str, dict[str, bool]] = {"acl": {"read": False, "denied": False}, "sentinel": {"read": False, "denied": False}}
         # Everything cluster-audit already read in full-audit (health, license,
         # lease TTLs), so no cluster endpoint is read twice in one run.
         self.cluster_reads = cluster_reads
@@ -239,10 +250,9 @@ class NamespaceAuditor:
         # The findings.json document of the last completed run, or None when the
         # run failed before writing reports. main.py derives the exit code from it.
         self.findings_document: dict[str, Any] | None = None
-        # First-denial-per-namespace guard for the per-policy reads, so a
-        # namespace holding 40 unreadable policies contributes one access-gap
-        # row rather than 40. Keyed by (namespace, kind); guarded by thread_lock.
-        self._sentinel_read_denied: set[tuple[str, str]] = set()
+        # First-error-per-namespace guard for Sentinel body reads that fail for
+        # a reason other than a denial. Keyed by (namespace, kind).
+        self._sentinel_read_errored: set[tuple[str, str]] = set()
 
     def audit_cluster(self, namespace_path: str = "") -> dict[str, Any] | None:
         """Walk the tree and write every report.
@@ -355,6 +365,7 @@ class NamespaceAuditor:
 
             self.stats.finish()
             duration = time.time() - start_time
+            self.data.policy_bodies = {"acl": self._body_status("acl"), "sentinel": self._body_status("sentinel")}
 
             self._write_reports(cluster_name)
             self._log_summary()
@@ -441,16 +452,40 @@ class NamespaceAuditor:
         self.data.license_status = result.status
         return result.status
 
+    def _bodies_wanted(self, kind: str) -> bool:
+        """Whether to try reading this kind's bodies: not opted out, not already denied."""
+        if self.names_only:
+            return False
+        with self.thread_lock:
+            return not self._body_reads[kind]["denied"]
+
+    def _note_body_read(self, kind: str, denied: bool) -> None:
+        with self.thread_lock:
+            first = denied and not self._body_reads[kind]["denied"]
+            self._body_reads[kind]["denied" if denied else "read"] = True
+        if first:
+            logger.info(f"The token cannot read {kind.upper()} policy bodies; listing names only for the rest of the run")
+
+    def _body_status(self, kind: str) -> str:
+        """assessed / partial / not readable / names only / none found, for the reports."""
+        if self.names_only:
+            return "names only"
+        state = self._body_reads[kind]
+        if state["read"] and state["denied"]:
+            return "partial"
+        if state["denied"]:
+            return "not readable"
+        return "assessed" if state["read"] else "none found"
+
     def _fetch_acl_policies(self, client: Any, display_path: str) -> tuple[list[str], dict[str, AclAssessment]]:
-        """List this namespace's own ACL policy names, and assess bodies if opted in.
+        """List this namespace's own ACL policy names, and assess their bodies when the token can read them.
 
-        Returns ``(names, assessments)``. Names exclude the built-ins; the
-        assessments are empty unless ``collect_acl_bodies`` is set.
+        Returns ``(names, assessments)``. Names exclude the built-ins.
 
-        Bodies are read only on request: that needs `read` on
-        sys/policies/acl/*, which lets the token reconstruct the cluster's
-        access model, so it lives in the separate audit-policy-acl-reader.hcl
-        add-on. Listing needs only `list`.
+        Reading bodies needs `read` on sys/policies/acl/*, which lets the token
+        reconstruct the cluster's access model, so it lives in the separate
+        policies/audit-policy-acl-reader.hcl add-on. The token decides: without the
+        add-on the first read is denied and the rest are skipped.
 
         Simpler than the Sentinel collector: sys/policies/acl exists on every
         Vault edition, so there is no capability to probe for and no tri-state.
@@ -473,23 +508,24 @@ class NamespaceAuditor:
             self.stats.increment_errors(display_path, f"ACL policies: {e}")
             return [], {}
 
-        assessments = self._assess_acl_bodies(client, display_path, names) if self.collect_acl_bodies else {}
+        assessments = self._assess_acl_bodies(client, display_path, names) if self._bodies_wanted("acl") else {}
         return sorted(n for n in names if n not in BUILTIN_ACL_POLICIES), assessments
 
     def _assess_acl_bodies(self, client: Any, display_path: str, names: list[str]) -> dict[str, AclAssessment]:
         """Read and assess each body in memory; the body is dropped as soon as it is reduced.
 
         "root" is skipped: it has no body and grants everything by definition.
-        A denial is recorded once per namespace, naming the add-on to attach.
+        A denial is not an access gap — it means the token was not given the
+        add-on, which is a choice — so it stops the reads and is reported once,
+        as "not readable", in the report and findings.json.
         """
         assessments: dict[str, AclAssessment] = {}
-        denied = False
         for name in sorted(n for n in names if n != "root"):
             try:
                 body = (client.sys.read_acl_policy(name).get("data") or {}).get("policy")
             except hvac.exceptions.Forbidden:
-                denied = True
-                continue
+                self._note_body_read("acl", denied=True)
+                break
             except hvac.exceptions.InvalidPath:
                 continue  # deleted between list and read
             except Exception as e:
@@ -498,8 +534,7 @@ class NamespaceAuditor:
                 continue
             if isinstance(body, str):
                 assessments[name] = assess_policy(body)
-        if denied:
-            self.stats.increment_forbidden(display_path, BODY_DENIED_SCOPE)
+                self._note_body_read("acl", denied=False)
         return assessments
 
     def _fetch_sentinel_policies(self, client: Any, display_path: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -573,23 +608,31 @@ class NamespaceAuditor:
 
         self._mark_sentinel_supported()
 
+        # Names are always kept: that a policy exists is worth reporting even
+        # when its body is not read.
+        policies: dict[str, Any] = {name: {"name": name} for name in names}
+        if not self._bodies_wanted("sentinel"):
+            return policies
         reader = client.sys.read_egp_policy if kind == "egp" else client.sys.read_rgp_policy
-        policies: dict[str, Any] = {}
         for name in names:
             try:
-                policies[name] = reader(name)["data"]
+                raw = reader(name)["data"]
+            except hvac.exceptions.Forbidden:
+                # The token lacks policies/audit-policy-sentinel-reader.hcl: a choice,
+                # not a gap. Stop reading; the report says "not readable" once.
+                self._note_body_read("sentinel", denied=True)
+                break
             except Exception as e:
-                # Keep the name: that a policy exists is worth reporting even when
-                # its body is unreadable. One access-gap row per namespace and
-                # kind, not one per policy — a namespace with 40 denied reads
-                # would otherwise swamp the whole section.
                 logger.debug(f"Could not read sentinel {kind.upper()} policy '{name}' in {display_path}: {e}")
-                policies[name] = {"name": name, "read_error": str(e)}
                 with self.thread_lock:
-                    already_recorded = (display_path, kind) in self._sentinel_read_denied
-                    self._sentinel_read_denied.add((display_path, kind))
-                if not already_recorded:
-                    self.stats.increment_forbidden(display_path, f"sentinel {kind.upper()} policy bodies")
+                    first = (display_path, kind) not in self._sentinel_read_errored
+                    self._sentinel_read_errored.add((display_path, kind))
+                if first:
+                    self.stats.increment_errors(display_path, f"sentinel {kind.upper()} policy bodies: {type(e).__name__}")
+                continue
+            # Reduced at once: the source is never stored or written.
+            policies[name] = reduce_sentinel_policy(raw)
+            self._note_body_read("sentinel", denied=False)
         return policies
 
     def _set_progress_description(self, description: str) -> None:
@@ -980,7 +1023,6 @@ class NamespaceAuditor:
         for kind, collection in (("egp", self.data.egp_policies), ("rgp", self.data.rgp_policies)):
             for namespace, policies in collection.items():
                 for name, policy in policies.items():
-                    body = policy.get("policy", "") if isinstance(policy, dict) else ""
                     paths = policy.get("paths") if isinstance(policy, dict) else None
                     rows.append(
                         {
@@ -989,7 +1031,8 @@ class NamespaceAuditor:
                             "name": name,
                             "enforcement_level": policy.get("enforcement_level", "") if isinstance(policy, dict) else "",
                             "paths": ",".join(paths) if isinstance(paths, list) else "",
-                            "policy_lines": len(body.splitlines()) if isinstance(body, str) else 0,
+                            # Blank when the body was not read (names only).
+                            "policy_lines": policy.get("line_count", "") if isinstance(policy, dict) else "",
                         }
                     )
 

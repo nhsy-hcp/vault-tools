@@ -8,7 +8,7 @@ A unified CLI tool for comprehensive HashiCorp Vault operations, providing defen
 
 ## Features
 
-- **Namespace Audit**: Multi-threaded namespace traversal with rate limiting, JSON/CSV output and a markdown audit report, plus an opt-in review of what each ACL policy grants
+- **Namespace Audit**: Multi-threaded namespace traversal with rate limiting, JSON/CSV output and a markdown audit report, plus a review of what each ACL and Sentinel policy grants when the token is allowed to read them
 - **Cluster Audit**: Seal, HA, replication, raft, audit devices, automated snapshots and node metrics — works against a sealed or DR-secondary node too
 - **Identity Audit**: Orphaned, disabled and directly-granted entities, duplicate aliases and entity sprawl
 - **Activity Export**: Vault activity log processing and export with flexible date ranges, plus client-usage checks
@@ -18,10 +18,23 @@ A unified CLI tool for comprehensive HashiCorp Vault operations, providing defen
 
 ## Quick Start
 
-1. **Prerequisites**: Python 3.12+ and access to a HashiCorp Vault instance
+1. **Prerequisites**: Python 3.12+, [uv](https://docs.astral.sh/uv/), the
+   `vault` CLI, and an admin able to write policies in the Vault cluster
 2. **Install**: `uv sync`
-3. **Configure**: Set `VAULT_ADDR` and `VAULT_TOKEN` environment variables
-4. **Run**: `uv run vault-tools --help` or `python main.py --help` to see available commands
+3. **Create a read-only audit token**: see [Create an audit token](#create-an-audit-token)
+4. **Configure**: export `VAULT_ADDR` and `VAULT_TOKEN`, or put them in `.env`
+   (copy [`.env.example`](.env.example))
+5. **Run**: `uv run vault-tools full-audit`, then open the report path it
+   prints under **Combined files**
+
+```bash
+uv sync
+export VAULT_ADDR=https://vault.example.com:8200
+vault policy write vault-tools-audit policies/audit-policy.hcl   # once, by an admin
+export VAULT_TOKEN="$(vault token create -policy=vault-tools-audit -no-default-policy -orphan -ttl=1h -field=token)"
+uv run vault-tools full-audit
+# → outputs/{cluster-name}-{cluster-id-8}-full-audit-{YYYYMMDD}.md
+```
 
 ## Installation
 
@@ -42,9 +55,13 @@ cd vault-tools
 # Sync dependencies (creates virtual environment automatically)
 uv sync
 
+# Load VAULT_ADDR and VAULT_TOKEN (see "Create an audit token" below)
+source .env
+
 # Run the CLI
 uv run vault-tools --help
-uv run vault-tools namespace-audit
+uv run vault-tools full-audit              # every audit and export, plus a combined report
+uv run vault-tools namespace-audit         # or any single subcommand
 
 # Or activate the virtual environment
 source .venv/bin/activate  # On Unix/macOS
@@ -61,6 +78,67 @@ uv run pre-commit install
 # Run manually on all files
 pre-commit run --all-files
 ```
+
+### Create an audit token
+
+The tool is read-only: it only sends GET and LIST requests. The token's policies
+decide what it can see, so mint a dedicated token from the supplied policies
+instead of using a root token. An admin runs this once, in the **root
+namespace** (unset `VAULT_NAMESPACE`):
+
+```bash
+export VAULT_ADDR=https://vault.example.com:8200
+
+# Once per cluster, by an admin
+vault policy write vault-tools-audit           policies/audit-policy.hcl
+vault policy write vault-tools-acl-reader      policies/audit-policy-acl-reader.hcl       # optional add-on
+vault policy write vault-tools-sentinel-reader policies/audit-policy-sentinel-reader.hcl  # optional add-on
+
+# Mint a short-lived token. Choose one line, by what you want assessed:
+# base only: inventory, health, identity, usage; policy names only
+export VAULT_TOKEN="$(vault token create -policy=vault-tools-audit -no-default-policy -orphan -ttl=1h -field=token)"
+# + ACL review (VT-POL): what each ACL policy grants
+export VAULT_TOKEN="$(vault token create -policy=vault-tools-audit -policy=vault-tools-acl-reader -no-default-policy -orphan -ttl=1h -field=token)"
+# + ACL and Sentinel review (VT-POL, VT-SNT): everything
+export VAULT_TOKEN="$(vault token create -policy=vault-tools-audit -policy=vault-tools-acl-reader -policy=vault-tools-sentinel-reader -no-default-policy -orphan -ttl=1h -field=token)"
+
+uv run vault-tools full-audit
+```
+
+To keep the address and token out of your shell history, put them in `.env`
+instead. It is git-ignored, and [`.env.example`](.env.example) is the template.
+Each line uses `export`, so sourcing it sets the variables for the tool. Load
+it into the shell before each run:
+
+```bash
+cp .env.example .env                 # then set VAULT_ADDR and VAULT_TOKEN in it
+source .env
+uv run vault-tools full-audit
+```
+
+Already logged in with the `vault` CLI? You can reuse that session's token
+instead of minting one:
+
+```bash
+export VAULT_TOKEN="$(vault print token)"
+```
+
+That is your own token, usually far broader than the audit token: fine for a
+quick look, but use the audit token above for anything you share or automate.
+
+`task run -- full-audit` loads `.env` by itself, so no `source` is needed there.
+
+- `-no-default-policy` works because `audit-policy.hcl` grants the
+  `auth/token/lookup-self` check itself. `-orphan` keeps the token from
+  disappearing if the admin's own token is revoked first.
+- An hour is ample: a full audit of a 130-namespace cluster takes seconds.
+  Revoke the token when you're done (`vault token revoke <token>`), and drop the
+  add-ons if you only needed them for one policy review.
+- For a self-signed dev server set `VAULT_SKIP_VERIFY=true`.
+- Without an add-on the run still succeeds. The report lists those policies by
+  name and says, under **Not covered**, which add-on to attach. See
+  [Vault Token Permissions](#vault-token-permissions) for what each rule grants
+  and why.
 
 ## Usage
 
@@ -104,7 +182,7 @@ files, up to five CSV summaries, and a markdown report,
 [Findings, diffs and CI](#findings-diffs-and-ci)) are written on every run.
 The two Sentinel files are written only on a cluster that has Sentinel
 policies, `license.json` only when the Enterprise license could be read,
-`acl-policy-review.json` only with `--acl-bodies`, and the CSV summaries are
+`acl-policy-review.json` only when the token could read ACL bodies, and the CSV summaries are
 skipped when they would be empty, so a small cluster produces fewer files — eight
 on a root-only Community dev server.
 
@@ -146,8 +224,8 @@ The report is the human-readable view of the audit and contains:
 - **ACL policies** — the policies each namespace defines, one row per
   namespace. Vault's own `default`, `root` and `default-ceiling` exist in every
   namespace and are excluded, so a namespace showing `0` genuinely defines
-  none of its own. Names only by default; see
-  [ACL policy review](#acl-policy-review) for the opt-in permission check.
+  none of its own. What each policy grants is reviewed too when the token
+  allows it; see [Policy body review](#policy-body-review-acl-and-sentinel).
 - **Sentinel policies** — the endpoint- and role-governing policies in force per
   namespace, with their enforcement levels, the endpoints an EGP covers and the
   size of each policy body. Vault Enterprise with the Governance & Policy module
@@ -169,7 +247,7 @@ The report is the human-readable view of the audit and contains:
     expiring within 90 days (Medium) or already past its soft expiry (High,
     with the hard termination date), and every cluster health check listed
     under `cluster-audit`.
-  - ACL permissions, with `--acl-bodies` only.
+  - ACL permissions, when the token can read policy bodies.
 - **Output files** — an index of the sibling JSON and CSV files from the same run.
 
 These observations are review prompts, not a compliance verdict — informational
@@ -200,10 +278,12 @@ rather than "zero policies found". The two readings mean very different things,
 so the report never collapses them. Pass `--no-sentinel` to skip the collection
 entirely; the section then says so explicitly.
 
-Policy bodies are not rendered into the report — a Sentinel policy runs to dozens
-of lines and there can be one per namespace. The report gives a line count, and
-the full source goes to `{cluster-name}-sentinel-policies-{YYYYMMDD}.json` for
-diffing between runs.
+Enforcement levels, EGP paths and every VT-SNT check need the policy *body*, so
+they are assessed only when the token can read bodies (see below). Without that,
+the report lists the policy names and says they were not assessed. Policy source
+is never written anywhere: `{cluster-name}-sentinel-policies-{YYYYMMDD}.json`
+holds names, enforcement levels, paths, a body hash and import names, so
+compare hashes between runs to spot an edited policy.
 
 To exercise this against a local cluster, `task seed:sentinel` writes five no-op
 policies from [`examples/sentinel/`](examples/sentinel) — one per enforcement
@@ -212,10 +292,27 @@ that must produce no finding. Every one of them passes unconditionally, so
 nothing is ever blocked. `task unseed:sentinel` removes them.
 Both accept namespaces: `task seed:sentinel -- team-a/ team-b/`.
 
-#### ACL policy review
+#### Policy body review (ACL and Sentinel)
 
-`--acl-bodies` also reads every ACL policy body (all but `root`, built-ins
-included, so a widened `default` is caught) and checks what it grants:
+**The token is the source of truth.** There is no flag to turn the review on.
+vault-tools tries to read ACL and Sentinel policy bodies, and the token's
+policies decide what it gets:
+
+| Token carries | ACL permissions (VT-POL) | Sentinel (VT-SNT) |
+| --- | --- | --- |
+| `policies/audit-policy.hcl` only | Names only | Names only |
+| plus [`policies/audit-policy-acl-reader.hcl`](policies/audit-policy-acl-reader.hcl) | Assessed | Names only |
+| plus [`policies/audit-policy-sentinel-reader.hcl`](policies/audit-policy-sentinel-reader.hcl) | Names only | Assessed |
+| plus both add-ons | Assessed | Assessed |
+
+A missing add-on is **not** an access gap and does not fail `--fail-on-gaps`.
+The first denied body read settles it for the run, so the rest are skipped. The
+report's header and **Not covered** section then say which add-on to attach,
+and findings.json records it under `cluster_context.policy_bodies`.
+`--names-only` lists names without reading any body, even when the token could.
+
+With the ACL add-on, every ACL policy body (all but `root`, built-ins included,
+so a widened `default` is caught) is checked for what it grants:
 
 - `VT-POL-001`: write or `sudo` on a path that matches everything (`*`, `+/*`, …).
 - `VT-POL-002`: write access to something that controls access: policies,
@@ -224,20 +321,24 @@ included, so a widened `default` is caught) and checks what it grants:
 - `VT-POL-004`: a same-named policy whose body differs across namespaces.
 - `VT-POL-005`: a body that could not be parsed.
 
-It needs the separate [`audit-policy-acl-reader.hcl`](audit-policy-acl-reader.hcl)
-add-on, because reading bodies lets a token reconstruct the cluster's access
-model. Bodies are parsed in memory: only a hash and the flagged rules' paths and
-capabilities are kept, in `{cluster-name}-acl-policy-review-{YYYYMMDD}.json`.
-Policy text and allowed/denied parameter values are never written anywhere.
-Without the add-on each namespace records one access gap naming it. Each rule
-is judged on its own, so a `deny` elsewhere, or another policy on the same
-token, can narrow a flagged rule. Expect `VT-POL-003` on this tool's own
-`audit-policy.hcl`, which needs `sudo` on three exact read-only paths.
+The add-ons are separate because reading bodies lets a token reconstruct the
+cluster's access model. Grant them for a policy review, then drop them again.
+Bodies are reduced in memory either way. For ACL, only a hash and the flagged
+rules' paths and capabilities are kept, in
+`{cluster-name}-acl-policy-review-{YYYYMMDD}.json`. For Sentinel, only names,
+levels, paths, hash, imports and flagged rules are kept. Policy text and
+allowed/denied parameter values are never written anywhere. Each ACL rule is
+judged on its own, so a `deny` elsewhere, or another policy on the same token,
+can narrow a flagged rule. Expect `VT-POL-003` on this tool's own
+`policies/audit-policy.hcl`, which needs `sudo` on three exact read-only paths.
 
 ```bash
-vault policy write vault-tools-acl-reader audit-policy-acl-reader.hcl
-export VAULT_TOKEN=$(vault token create -policy=vault-tools-audit -policy=vault-tools-acl-reader -ttl=1h -field=token)
-python main.py namespace-audit --acl-bodies
+vault policy write vault-tools-audit policies/audit-policy.hcl
+vault policy write vault-tools-acl-reader policies/audit-policy-acl-reader.hcl
+vault policy write vault-tools-sentinel-reader policies/audit-policy-sentinel-reader.hcl
+# Choose what to assess by choosing the token's policies:
+export VAULT_TOKEN="$(vault token create -policy=vault-tools-audit -policy=vault-tools-acl-reader -policy=vault-tools-sentinel-reader -no-default-policy -orphan -ttl=1h -field=token)"
+python main.py namespace-audit
 ```
 
 ### Cluster Audit
@@ -340,9 +441,16 @@ and the export reports that there is no data and exits successfully.
 Every audit and export in one run:
 
 ```bash
-python main.py full-audit                          # activity window: the last 12 calendar months
-python main.py full-audit -s 2026-01-01 -e 2026-06-30 --acl-bodies --list-entities
+source .env                                            # VAULT_ADDR and VAULT_TOKEN
+uv run vault-tools full-audit                          # activity window: the last 12 calendar months
+uv run vault-tools full-audit -s 2026-01-01 -e 2026-06-30 --list-entities
+uv run vault-tools full-audit --names-only             # policy names only, even if the token can read bodies
+uv run vault-tools full-audit --fail-on medium --fail-on-gaps   # for CI: exit 3 on findings, 2 on gaps
 ```
+
+The report path is printed at the end under **Combined files**. Run it again
+later and the new report gains a **Changes since the last run** section
+comparing against the previous one in the same output directory.
 
 It runs cluster-audit, namespace-audit, identity-audit, activity-export and
 entity-export, in that order. Each step writes its usual files, and cluster
@@ -443,25 +551,9 @@ export VAULT_SKIP_VERIFY="true"  # Optional, for dev environments
 ### Vault Token Permissions
 
 The tool is read-only and never writes to Vault. Rather than running it with a
-root token, use the supplied [`audit-policy.hcl`](audit-policy.hcl), which grants
-only the endpoints the tool actually calls.
-
-Write the policy and mint a short-lived token in the **root namespace**:
-
-```bash
-# Create the policy (root namespace)
-vault policy write vault-tools-audit audit-policy.hcl
-
-# Create a token with a 1 hour TTL
-vault token create -policy=vault-tools-audit -ttl=1h
-
-# Capture just the token and export it for the tool
-export VAULT_TOKEN=$(vault token create -policy=vault-tools-audit -ttl=1h -field=token)
-```
-
-An hour is ample headroom — a full audit typically completes in seconds. Add
-`-explicit-max-ttl=1h` if the token must not be renewable beyond that, or lower
-`-ttl` for CI use.
+root token, use the supplied policies in [`policies/`](policies), which grant
+only the endpoints the tool actually calls; the steps are under
+[Create an audit token](#create-an-audit-token). Lower `-ttl` for CI use.
 
 Things to know about the policy:
 
@@ -484,15 +576,16 @@ Things to know about the policy:
   names, which is all the ACL inventory needs. `read` would yield the HCL
   bodies, and a token able to read every policy in the tree can reconstruct
   the cluster's whole access model — a large privilege increase for a
-  read-only audit. Body reads live in the separate opt-in
-  [`audit-policy-acl-reader.hcl`](audit-policy-acl-reader.hcl), for
-  `--acl-bodies` only. Removing the rule drops that report section and records
-  the denials; it does not fail the run.
-- **The `sys/policies/egp` and `sys/policies/rgp` rules are optional too.** They
-  cover the Sentinel section and are Enterprise-Premium-only, so on any other
-  cluster they grant nothing. Removing them leaves that section empty; denying
-  them mid-run puts the affected namespaces in **Access gaps** rather than
-  failing the audit.
+  read-only audit. Body reads live in the separate add-on
+  [`policies/audit-policy-acl-reader.hcl`](policies/audit-policy-acl-reader.hcl): attach it to
+  the token to assess permissions. Removing the list rule drops that report
+  section and records the denials; it does not fail the run.
+- **The `sys/policies/egp` and `sys/policies/rgp` rules list names only.**
+  Reading Sentinel bodies needs the
+  [`policies/audit-policy-sentinel-reader.hcl`](policies/audit-policy-sentinel-reader.hcl)
+  add-on. The rules are Enterprise-Premium-only, so on any other cluster they
+  grant nothing. A denied listing puts the affected namespaces in **Access
+  gaps** rather than failing the audit.
 - **`sys/license/status` is optional.** It supplies the report's License
   section and expiry findings on Enterprise, and grants nothing on Community.
   Removing the rule makes the License section report the read as denied and
@@ -552,8 +645,9 @@ Everything else is a CLI flag — see `python main.py <command> --help`. Worker
 count is `--workers`, output directory is `--output-dir` (which overrides
 `VAULT_TOOLS_OUTPUT_DIR`), the export window is `--start-date`/`--end-date`,
 and CI gating is `--fail-on`/`--fail-on-gaps`. The opt-in collections are
-`--acl-bodies` (namespace-audit, full-audit), `--list` (identity-audit) and
-`--list-entities` (full-audit).
+`--list` (identity-audit) and `--list-entities` (full-audit). Policy bodies are
+read whenever the token allows; `--names-only` (namespace-audit, full-audit)
+opts out.
 
 ## Testing
 

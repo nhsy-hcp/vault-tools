@@ -165,9 +165,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser_audit = subparsers.add_parser("namespace-audit", help="Audit Vault namespaces.", parents=[common, gating])
     parser_audit.add_argument("-w", "--workers", type=int, default=4, help="Number of worker threads.")
     parser_audit.add_argument(
-        "--acl-bodies",
+        "--names-only",
         action="store_true",
-        help="Also read and assess ACL policy bodies (VT-POL-*). Needs the audit-policy-acl-reader.hcl add-on; bodies are never written out.",
+        help="List policy names without reading ACL or Sentinel bodies, even when the token could. Without it, bodies are read wherever the token's policies allow.",
     )
     parser_audit.add_argument(
         "--no-sentinel",
@@ -222,7 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser_full.add_argument("-w", "--workers", type=int, default=4, help="Number of worker threads.")
     parser_full.add_argument("--no-sentinel", action="store_true", help="Skip Sentinel EGP/RGP policy collection during the namespace audit.")
-    parser_full.add_argument("--acl-bodies", action="store_true", help="Also assess ACL policy bodies (needs audit-policy-acl-reader.hcl).")
+    parser_full.add_argument("--names-only", action="store_true", help="List policy names without reading ACL or Sentinel bodies, even when the token could.")
     parser_full.add_argument("--list-entities", action="store_true", help="Also write identity entity names, metadata and aliases (confidential).")
     parser_full.add_argument("-s", "--start-date", type=str, default=None, help="Activity window start (YYYY-MM-DD). Default: the last 12 calendar months.")
     parser_full.add_argument("-e", "--end-date", type=str, default=None, help="Activity window end (YYYY-MM-DD). Default: today.")
@@ -344,7 +344,7 @@ def main() -> None:
                 worker_threads=args.workers,
                 output_dir=global_config.output_dir,
                 collect_sentinel=not args.no_sentinel,
-                collect_acl_bodies=args.acl_bodies,
+                names_only=args.names_only,
             )
             document = auditor.audit_cluster()
             if document is None:
@@ -382,7 +382,7 @@ def main() -> None:
                 global_config.output_dir,
                 workers=args.workers,
                 collect_sentinel=not args.no_sentinel,
-                collect_acl_bodies=args.acl_bodies,
+                names_only=args.names_only,
                 include_entity_list=args.list_entities,
                 start_date=args.start_date,
                 end_date=args.end_date,

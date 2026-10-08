@@ -53,7 +53,9 @@ class Harness:
             self.calls.append("namespace-audit")
             if "namespace" in self.failures:
                 raise self.failures["namespace"]
-            return _doc([AUD, KV1], sentinel="supported")
+            doc = _doc([AUD, KV1], sentinel="supported")
+            doc["cluster_context"]["policy_bodies"] = {"acl": "assessed", "sentinel": "none found"}
+            return doc
 
         auditor.audit_cluster.side_effect = namespace_audit
 
@@ -90,11 +92,11 @@ class Harness:
 
 def test_runs_every_step_in_order_and_reuses_shared_state(tmp_path):
     h = Harness(tmp_path)
-    merged = h.run(collect_acl_bodies=True, include_entity_list=True)
+    merged = h.run(names_only=True, include_entity_list=True)
 
     assert h.calls == ["cluster-audit", "namespace-audit", "identity-audit", "activity-export", "entity-export"]
     assert h.auditor_kwargs["cluster_reads"] is h.cluster.reads
-    assert h.auditor_kwargs["collect_acl_bodies"] is True
+    assert h.auditor_kwargs["names_only"] is True
     assert h.kwargs["identity-audit"]["namespaces"] == ["", "team-a"]
     assert h.kwargs["identity-audit"]["include_list"] is True
     assert h.kwargs["activity-export"]["is_enterprise"] is True
@@ -103,6 +105,7 @@ def test_runs_every_step_in_order_and_reuses_shared_state(tmp_path):
     # VT-AUD-001 came from both cluster- and namespace-audit: listed once.
     assert merged["summary"]["by_rule"] == {"VT-AUD-001": 1, "VT-ID-001": 1, "VT-MOUNT-006": 1}
     assert merged["cluster_context"]["sentinel"] == "supported"
+    assert "policy_bodies" in merged["cluster_context"]
     assert any(p.endswith(".json") and "-full-findings-" in p for p in h.written)
     assert "## Steps" in h.report and "| entity-export | ok |" in h.report
 
@@ -188,11 +191,11 @@ def test_cli_gates_on_the_merged_document(monkeypatch, tmp_path):
 
     monkeypatch.setenv("VAULT_ADDR", "http://127.0.0.1:8200")
     monkeypatch.setenv("VAULT_TOKEN", "t")
-    monkeypatch.setattr("sys.argv", ["main.py", "full-audit", "--fail-on", "medium", "--acl-bodies", "--output-dir", str(tmp_path)])
+    monkeypatch.setattr("sys.argv", ["main.py", "full-audit", "--fail-on", "medium", "--names-only", "--output-dir", str(tmp_path)])
     with patch("main.run_full_audit", return_value=_doc([AUD])) as run, pytest.raises(SystemExit) as exc:
         main.main()
     assert exc.value.code == 3
-    assert run.call_args.kwargs["collect_acl_bodies"] is True and run.call_args.kwargs["start_date"] is None
+    assert run.call_args.kwargs["names_only"] is True and run.call_args.kwargs["start_date"] is None
 
 
 class TestFilesWrittenSince:

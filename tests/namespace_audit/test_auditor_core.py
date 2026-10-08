@@ -10,6 +10,7 @@ import pytest
 
 from src.common.vault_client import ConnectionInfo, VaultAPIError, VaultConnectionError, VaultPermissionError
 from src.namespace_audit.main import PROGRESS_DESCRIPTION, AuditData, AuditStats, NamespaceAuditor
+from src.namespace_audit.report import reduce_sentinel_policy
 
 from .fixtures import mock_file_operations
 
@@ -323,8 +324,8 @@ class TestReportGeneration:
 
     def test_sentinel_csv_has_one_row_per_policy(self, auditor):
         auditor.data.auth_methods = {"": {"token/": {"type": "token"}}}
-        auditor.data.egp_policies = {"": {"deny-root": {"enforcement_level": "advisory", "paths": ["sys/*", "auth/*"], "policy": "a\nb\nc\n"}}}
-        auditor.data.rgp_policies = {"team-a": {"require-mfa": {"enforcement_level": "hard-mandatory", "policy": "x\n"}}}
+        auditor.data.egp_policies = {"": {"deny-root": reduce_sentinel_policy({"name": "deny-root", "enforcement_level": "advisory", "paths": ["sys/*", "auth/*"], "policy": "a\nb\nc\n"})}}
+        auditor.data.rgp_policies = {"team-a": {"require-mfa": reduce_sentinel_policy({"name": "require-mfa", "enforcement_level": "hard-mandatory", "policy": "x\n"})}}
 
         with mock_file_operations() as (_, mock_write_csv):
             auditor._write_reports("test-cluster")
@@ -344,10 +345,10 @@ class TestReportGeneration:
             # RGP has no paths field at all; the column stays present but empty.
             assert next(r for r in rows if r["kind"] == "rgp")["paths"] == ""
 
-    def test_sentinel_csv_tolerates_an_unreadable_policy(self, auditor):
-        """A denied read stores a placeholder; the summary must still write."""
+    def test_sentinel_csv_tolerates_a_names_only_policy(self, auditor):
+        """A body the token cannot read leaves just the name; the summary must still write."""
         auditor.data.auth_methods = {"": {"token/": {"type": "token"}}}
-        auditor.data.egp_policies = {"": {"denied": {"name": "denied", "read_error": "permission denied"}}}
+        auditor.data.egp_policies = {"": {"unread": {"name": "unread"}}}
 
         with mock_file_operations() as (_, mock_write_csv):
             auditor._write_reports("test-cluster")
@@ -355,7 +356,18 @@ class TestReportGeneration:
             rows = next(c for c in mock_write_csv.call_args_list if "summary-sentinel-policies" in c.args[0]).args[1]
 
             assert rows[0]["enforcement_level"] == ""
-            assert rows[0]["policy_lines"] == 0
+            assert rows[0]["policy_lines"] == ""
+
+    def test_sentinel_json_holds_no_policy_source(self, auditor):
+        auditor.data.auth_methods = {"": {"token/": {"type": "token"}}}
+        auditor.data.egp_policies = {"": {"p": reduce_sentinel_policy({"name": "p", "enforcement_level": "advisory", "paths": ["*"], "policy": 'import "http"\nmain = rule { secret_marker }\n'})}}
+
+        with mock_file_operations() as (mock_write_json, _):
+            auditor._write_reports("test-cluster")
+
+        [dump] = [c.args[1] for c in mock_write_json.call_args_list if "sentinel-policies" in c.args[0]]
+        assert "secret_marker" not in str(dump)
+        assert dump["egp"]["/"]["p"]["imports"] == ["http"] and dump["egp"]["/"]["p"]["line_count"] == 2
 
     def test_write_reports_records_what_it_wrote(self, auditor):
         """The console list is driven by this attribute, not by a return value:

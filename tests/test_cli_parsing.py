@@ -212,12 +212,20 @@ class TestClusterAuditCommand:
         assert self._run(monkeypatch, tmp_path, ["cluster-audit"], None) == 1
 
 
-class TestAclBodiesFlag:
-    def test_off_by_default(self):
-        assert _build_parser().parse_args(["namespace-audit"]).acl_bodies is False
+class TestNamesOnlyFlag:
+    """The token decides what is read; --names-only is the only opt-out."""
 
-    def test_opt_in(self):
-        assert _build_parser().parse_args(["namespace-audit", "--acl-bodies"]).acl_bodies is True
+    @pytest.mark.parametrize("command", ["namespace-audit", "full-audit"])
+    def test_off_by_default(self, command):
+        assert _build_parser().parse_args([command]).names_only is False
+
+    @pytest.mark.parametrize("command", ["namespace-audit", "full-audit"])
+    def test_opt_out(self, command):
+        assert _build_parser().parse_args([command, "--names-only"]).names_only is True
+
+    def test_acl_bodies_flag_is_gone(self):
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(["namespace-audit", "--acl-bodies"])
 
 
 class TestIdentityAuditCommand:

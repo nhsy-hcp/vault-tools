@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.namespace_audit.main import AuditData, AuditStats
+from src.namespace_audit.report import reduce_sentinel_policy
 
 
 def mount(mount_type, **overrides):
@@ -136,7 +137,8 @@ def sentinel_policy(name, **overrides):
         "policy": 'import "time"\n\nmain = rule { time.now.unix > 0 }\n',
     }
     data.update(overrides)
-    return data
+    # The collector stores the reduced form, never the source; so do fixtures.
+    return reduce_sentinel_policy(data)
 
 
 @pytest.fixture

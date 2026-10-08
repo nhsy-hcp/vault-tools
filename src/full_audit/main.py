@@ -83,7 +83,7 @@ def run_full_audit(
     *,
     workers: int = 4,
     collect_sentinel: bool = True,
-    collect_acl_bodies: bool = False,
+    names_only: bool = False,
     include_entity_list: bool = False,
     start_date: str | None = None,
     end_date: str | None = None,
@@ -129,7 +129,7 @@ def run_full_audit(
                 worker_threads=workers,
                 output_dir=output_dir,
                 collect_sentinel=collect_sentinel,
-                collect_acl_bodies=collect_acl_bodies,
+                names_only=names_only,
                 cluster_reads=cluster.reads,
             )
             document = auditor.audit_cluster()
@@ -137,7 +137,12 @@ def run_full_audit(
                 return StepResult("namespace-audit", "failed", "the namespace walk failed — see the message above.")
             namespaces = sorted(auditor.data.auth_methods) or None
             context.update(audit_data=auditor.data, audit_stats=auditor.stats)
-            return StepResult("namespace-audit", "ok", document=document, extra={"sentinel": document["cluster_context"]["sentinel"]})
+            return StepResult(
+                "namespace-audit",
+                "ok",
+                document=document,
+                extra={"sentinel": document["cluster_context"]["sentinel"], "policy_bodies": document["cluster_context"].get("policy_bodies", {})},
+            )
 
         current_month: Any = NOT_READ
 
@@ -180,10 +185,11 @@ def run_full_audit(
     finished = datetime.now(UTC)
     documents = [r.document for r in results if r.document]
     sentinel = next((r.extra["sentinel"] for r in results if "sentinel" in r.extra), "skipped")
+    policy_bodies = next((r.extra["policy_bodies"] for r in results if "policy_bodies" in r.extra), {})
     merged = merge_documents(
         documents,
         run=run_block(cluster.cluster_name, vault_client.vault_addr, "", started, finished, workers),
-        cluster_context={**cluster.document["cluster_context"], "sentinel": sentinel},
+        cluster_context={**cluster.document["cluster_context"], "sentinel": sentinel, "policy_bodies": policy_bodies},
         tool_version=get_tool_version(),
     )
     # A step that failed outright judged nothing, so the run cannot be complete.
@@ -219,7 +225,7 @@ def run_full_audit(
         license_status=reads.license.status if reads.license else None,
         license_reason=reads.license.unavailable_reason if reads.license else None,
         lease_ttls=reads.lease_ttls,
-        acl_bodies=collect_acl_bodies,
+        policy_bodies=dict(context["audit_data"].policy_bodies) if context.get("audit_data") is not None else {},
         previous_diff=previous_diff,
         previous_path=os.path.basename(previous_path) if previous_path else None,
         output_files=step_files,

@@ -58,6 +58,7 @@ def test_cluster_context_carries_lease_ttls_and_edition(clean_data, finished_sta
         "system_max_lease_ttl_seconds": 86400,
         "system_default_lease_ttl_seconds": 3600,
         "sentinel": "unsupported",
+        "policy_bodies": {},
     }
 
 

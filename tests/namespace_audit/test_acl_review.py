@@ -8,7 +8,6 @@ import hvac
 import pytest
 
 from src.namespace_audit.acl import (
-    BODY_DENIED_SCOPE,
     AclRule,
     acl_policy_findings,
     assess_policy,
@@ -123,13 +122,15 @@ class TestFindings:
 
 
 class TestCollection:
-    def _auditor(self, mock_vault_client, **sys_overrides):
-        auditor = NamespaceAuditor(mock_vault_client, collect_acl_bodies=True)
-        client = make_hvac_client(list_acl_policies={"data": {"keys": ["admin", "default", "root"]}}, **sys_overrides)
+    """The token is the source of truth: bodies are read wherever it allows."""
+
+    def _auditor(self, mock_vault_client, **kwargs):
+        auditor = NamespaceAuditor(mock_vault_client, **kwargs)
+        client = make_hvac_client(list_acl_policies={"data": {"keys": ["admin", "default", "root"]}})
         mock_vault_client.get_client.return_value = as_context_manager(client)
         return auditor, client
 
-    def test_bodies_are_assessed_with_root_skipped(self, mock_vault_client):
+    def test_bodies_are_read_by_default_with_root_skipped(self, mock_vault_client):
         auditor, client = self._auditor(mock_vault_client)
         client.sys.read_acl_policy.side_effect = lambda name: {"data": {"name": name, "policy": ADMIN if name == "admin" else READER}}
 
@@ -139,25 +140,29 @@ class TestCollection:
         assert [c.args[0] for c in client.sys.read_acl_policy.call_args_list] == ["admin", "default"]
         # The names list keeps excluding built-ins.
         assert auditor.data.acl_policies["team-a"] == ["admin"]
+        assert auditor._body_status("acl") == "assessed"
 
-    def test_denied_bodies_record_one_gap_naming_the_add_on(self, mock_vault_client):
+    def test_a_denial_stops_reading_and_is_not_an_access_gap(self, mock_vault_client):
+        """A token without the add-on: one 403, then no more reads and no gap rows."""
         auditor, client = self._auditor(mock_vault_client)
         client.sys.read_acl_policy.side_effect = hvac.exceptions.Forbidden()
 
         auditor._traverse_namespace("team-a/", queue.Queue())
+        auditor._traverse_namespace("team-b/", queue.Queue())
 
-        assert auditor.stats.forbidden_namespaces == [("team-a/", BODY_DENIED_SCOPE)]
-        assert "team-a" not in auditor.data.acl_assessments
+        assert client.sys.read_acl_policy.call_count == 1
+        assert auditor.stats.forbidden_namespaces == []
+        assert auditor.data.acl_assessments == {}
+        assert auditor._body_status("acl") == "not readable"
 
-    def test_bodies_are_not_read_by_default(self, mock_vault_client):
-        auditor = NamespaceAuditor(mock_vault_client)
-        client = make_hvac_client(list_acl_policies={"data": {"keys": ["admin"]}})
-        mock_vault_client.get_client.return_value = as_context_manager(client)
+    def test_names_only_reads_no_bodies(self, mock_vault_client):
+        auditor, client = self._auditor(mock_vault_client, names_only=True)
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
         client.sys.read_acl_policy.assert_not_called()
         assert auditor.data.acl_assessments == {}
+        assert auditor._body_status("acl") == "names only"
 
 
 class TestReporting:
@@ -170,8 +175,11 @@ class TestReporting:
         doc = build_findings_json("c", clean_data, finished_stats, generated_at=self.NOW)
         assert doc["summary"]["by_rule"] == {"VT-POL-001": 1}
 
-    def test_default_run_says_permissions_were_not_assessed(self, clean_data, finished_stats):
-        assert "Permissions were not assessed" in build_markdown_report("c", clean_data, finished_stats, generated_at=self.NOW)
+    def test_unreadable_bodies_say_which_add_on_to_attach(self, clean_data, finished_stats):
+        clean_data.policy_bodies = {"acl": "not readable", "sentinel": "none found"}
+        report = build_markdown_report("c", clean_data, finished_stats, generated_at=self.NOW)
+        assert "Permissions were not assessed: the token cannot read policy bodies" in report
+        assert "`policies/audit-policy-acl-reader.hcl`" in report
 
     def test_review_file_holds_no_body(self, auditor):
         from unittest.mock import patch

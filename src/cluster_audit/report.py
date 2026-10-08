@@ -281,7 +281,9 @@ def render_cluster_reads(coverage: ClusterCoverage | None, license_unavailable_r
     parts = []
     if denied:
         parts.append(
-            "**Cluster-level reads:** denied " + ", ".join(f"`{d}`" for d in sorted(set(denied))) + " — the matching sections are incomplete. Check `audit-policy.hcl` is attached to the token."
+            "**Cluster-level reads:** denied "
+            + ", ".join(f"`{d}`" for d in sorted(set(denied)))
+            + " — the matching sections are incomplete. Check `policies/audit-policy.hcl` is attached to the token."
         )
     if coverage and coverage.errors:
         parts.append("**Cluster-level errors:** " + "; ".join(f"`{scope}`: {md_escape(msg)}" for scope, msg in coverage.errors))

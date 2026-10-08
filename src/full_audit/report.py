@@ -66,7 +66,8 @@ class FullAuditContext:
     total_clients: int = 0
     current_month_clients: int | None = None
     activity_namespaces: list[dict[str, Any]] | None = None
-    acl_bodies: bool = False
+    # "acl" / "sentinel" -> assessed, partial, not readable, names only, none found.
+    policy_bodies: dict[str, str] = field(default_factory=dict)
     previous_diff: dict[str, Any] | None = None
     previous_path: str | None = None
     output_files: list[str] = field(default_factory=list)
@@ -115,6 +116,21 @@ def _severity_line(by_severity: dict[str, int]) -> str:
 # --------------------------------------------------------------------------- header
 
 
+_BODY_LABELS = {
+    "assessed": "assessed",
+    "partial": "partly assessed",
+    "not readable": "not readable with this token",
+    "names only": "names only (`--names-only`)",
+    "none found": "none to read",
+}
+
+
+def _bodies_line(policy_bodies: dict[str, str]) -> str:
+    if not policy_bodies:
+        return "Not collected"
+    return f"ACL {_BODY_LABELS.get(policy_bodies.get('acl', ''), 'unknown')}; Sentinel {_BODY_LABELS.get(policy_bodies.get('sentinel', ''), 'unknown')}"
+
+
 def _header(ctx: FullAuditContext) -> str:
     coverage = ctx.merged["coverage"]
     namespaces = len(ctx.audit_data.auth_methods) if ctx.audit_data is not None else coverage.get("namespaces_processed", 0)
@@ -138,7 +154,7 @@ def _header(ctx: FullAuditContext) -> str:
         ["Start namespace / workers", f"`/` (whole tree) / {ctx.workers}"],
         ["Coverage", coverage_text],
         ["Sentinel", sentinel],
-        ["ACL permissions", "Assessed (`--acl-bodies`)" if ctx.acl_bodies else "Not assessed (names only)"],
+        ["Policy bodies", _bodies_line(ctx.policy_bodies)],
         ["Activity window", f"{ctx.window[0]} to {ctx.window[1]}"],
         ["Findings", f"**{summary['total']}**: {_severity_line(summary['by_severity'])}"],
         ["Tool", f"vault-tools {get_tool_version()}"],
@@ -434,9 +450,24 @@ def not_covered(ctx: FullAuditContext) -> list[str]:
     for step in ctx.steps:
         if step.status != "ok":
             items.append(f"**{step.name}** {step.status}: {md_escape(step.reason)}")
-    if ctx.audit_data is not None and not ctx.acl_bodies:
-        items.append("**ACL permissions:** policy bodies were not read, so VT-POL rules were not judged. Run with `--acl-bodies` and attach `audit-policy-acl-reader.hcl`.")
+    acl = ctx.policy_bodies.get("acl")
+    if ctx.audit_data is not None and acl in ("not readable", "partial"):
+        items.append(
+            "**ACL permissions:** the token cannot read "
+            + ("some " if acl == "partial" else "")
+            + "policy bodies, so VT-POL rules were not judged there. Attach `policies/audit-policy-acl-reader.hcl` to the token to assess them."
+        )
+    elif ctx.audit_data is not None and acl == "names only":
+        items.append("**ACL permissions:** `--names-only` was set, so VT-POL rules were not judged.")
+    sentinel_bodies = ctx.policy_bodies.get("sentinel")
     sentinel = ctx.merged["cluster_context"].get("sentinel")
+    if ctx.audit_data is not None and sentinel == "supported" and sentinel_bodies in ("not readable", "partial", "names only"):
+        why = (
+            "`--names-only` was set"
+            if sentinel_bodies == "names only"
+            else "the token cannot read " + ("some " if sentinel_bodies == "partial" else "") + "Sentinel bodies (attach `policies/audit-policy-sentinel-reader.hcl`)"
+        )
+        items.append(f"**Sentinel policies:** listed, but {why}, so enforcement levels and VT-SNT rules were not judged.")
     if ctx.audit_data is not None and sentinel == "unsupported":
         items.append("**Sentinel:** not available on this cluster (Community, or Enterprise without Governance & Policy), so VT-SNT rules do not apply.")
     elif ctx.audit_data is not None and sentinel == "skipped":
@@ -448,7 +479,7 @@ def not_covered(ctx: FullAuditContext) -> list[str]:
     coverage = ctx.merged["coverage"]
     if coverage["denied"]:
         scopes = Counter(d["scope"] for d in coverage["denied"])
-        items.append("**Denied reads:** " + ", ".join(f"{scope} ({_plural(n, 'namespace')})" for scope, n in scopes.most_common(5)) + ". Check the token carries `audit-policy.hcl`.")
+        items.append("**Denied reads:** " + ", ".join(f"{scope} ({_plural(n, 'namespace')})" for scope, n in scopes.most_common(5)) + ". Check the token carries `policies/audit-policy.hcl`.")
     if coverage["errors"]:
         items.append(f"**Errors:** {_plural(len(coverage['errors']), 'read')} failed, e.g. {md_escape(coverage['errors'][0]['message'])}.")
     if ctx.previous_diff is None:

@@ -5,7 +5,7 @@
 Vault Tools is a unified CLI tool for interacting with HashiCorp Vault. Its
 subcommands:
 
-- **Namespace Audit** (`namespace-audit`): Comprehensive auditing of Vault namespaces, auth methods, secret engines, ACL and Sentinel policies, with a markdown audit report; `--acl-bodies` adds an opt-in ACL permission review
+- **Namespace Audit** (`namespace-audit`): Comprehensive auditing of Vault namespaces, auth methods, secret engines, ACL and Sentinel policies, with a markdown audit report; ACL and Sentinel bodies are assessed whenever the token's policies allow it
 - **Cluster Audit** (`cluster-audit`): Seal, HA, replication, raft, audit devices, snapshots and node metrics; works on sealed and DR-secondary nodes
 - **Identity Audit** (`identity-audit`): Identity entities and aliases
 - **Activity Export** (`activity-export`): Export Vault activity logs and usage metrics, plus client-usage checks
@@ -36,8 +36,10 @@ and is where most of these checks were first written.
 ├── AGENTS.md                 # AI agent guidelines (this file)
 ├── LICENSE                   # Project license
 ├── README.md                 # Project documentation
-├── audit-policy.hcl          # Least-privilege token policy for every subcommand
-├── audit-policy-acl-reader.hcl # Opt-in add-on: read ACL policy bodies (--acl-bodies)
+├── policies/                 # Vault token policies (templates to `vault policy write`)
+│   ├── audit-policy.hcl                  # Least-privilege base policy for every subcommand
+│   ├── audit-policy-acl-reader.hcl       # Add-on: read ACL policy bodies (VT-POL)
+│   └── audit-policy-sentinel-reader.hcl  # Add-on: read Sentinel EGP/RGP bodies (VT-SNT)
 ├── schemas/
 │   └── findings.schema.json  # Vendored from the vault-ops skill
 ├── scripts/
@@ -209,8 +211,8 @@ Formatting, import sorting, and secret scanning are all pre-commit hooks
 (`ruff-format`, `ruff`'s `I` rules, and `gitleaks`), so they run automatically
 on every commit rather than from a separate task.
 
-Vault policy files (`*.hcl`, e.g. `audit-policy.hcl` and
-`audit-policy-acl-reader.hcl`) are formatted with **`vault policy fmt`**: two-space
+Vault policy files (`*.hcl`, e.g. `policies/audit-policy.hcl` and
+`policies/audit-policy-acl-reader.hcl`) are formatted with **`vault policy fmt`**: two-space
 indent, `key = value` spacing, and a blank line between consecutive `path`
 blocks. The `vault-policy-fmt` pre-commit hook (`scripts/check-policy-fmt.sh`)
 checks this as part of `task lint`. It formats a copy in `.tmp/` and fails with a
@@ -239,7 +241,7 @@ export VAULT_TOOLS_DEBUG="true"                 # Default: false
 ```
 
 These three are the complete set. Everything else is a CLI flag — `--workers`,
-`--output-dir`, `--no-sentinel`, `--start-date`/`--end-date`, `--acl-bodies`,
+`--output-dir`, `--no-sentinel`, `--start-date`/`--end-date`, `--names-only`,
 `--list`/`--list-entities`, `--fail-on`/`--fail-on-gaps`. Rate limiting uses
 `NamespaceAuditor`'s constructor defaults (batch 100, sleep 3s) and is not
 currently exposed on the CLI.
@@ -314,7 +316,7 @@ them. The count is a maximum, not a guarantee: the CSV summary writers return
 early when they have no rows, the Sentinel pair (`sentinel-policies.json`,
 `summary-sentinel-policies.csv`) is skipped entirely unless policies were
 collected, `license.json` is written only when the license was read, and
-`acl-policy-review.json` only under `--acl-bodies` — so a root-only Community
+`acl-policy-review.json` only when ACL bodies were read — so a root-only Community
 dev server produces eight. The report's "Output files" index checks existence
 rather than assuming the full set.
 
@@ -368,24 +370,63 @@ It reported `Hits: 0 | Misses: 1` on every run. Reinstating one only makes sense
 alongside a call path that actually re-reads something — note the `visited` set
 already guarantees each namespace is walked once.
 
+### Vault token policies: read-only, least privilege
+
+- **The tool issues only GET and LIST requests.** Every Vault call goes
+  through hvac's `read_*`/`list_*`/`is_*` helpers or raw GETs (`RawReader`,
+  `VaultClient.get`). `VaultClient.post()` exists but is unused; do not start
+  using it, and never add a call that writes, tunes, enables, revokes or
+  deletes anything in Vault.
+- **Policy files grant `read` and `list` only.** That covers `policies/audit-policy.hcl`
+  and the add-ons `policies/audit-policy-acl-reader.hcl` and
+  `policies/audit-policy-sentinel-reader.hcl`. Never `create`, `update`, `patch` or
+  `delete`. Every `path` rule must map to a request the tool actually issues,
+  with a comment saying which.
+- **`sudo` is kept to the minimum, and widening it needs the user's
+  confirmation.** `sudo` lets a token call a root-protected endpoint with the
+  methods its other capabilities allow; it is not a write grant. Today it is
+  used on exactly three **exact** paths (no glob), each because Vault
+  root-protects a read:
+  - `sys/internal/counters/activity/export` (`read`, `sudo`): entity-export.
+  - `sys/audit` (`read`, `sudo`): cluster-audit, listing audit devices.
+  - `sys/storage/raft/snapshot-auto/config` (`list`, `sudo`): cluster-audit,
+    listing snapshot config names. The configs themselves are never read: they
+    hold storage credentials.
+
+  **Any new `sudo` rule, any glob on a `sudo` path, or any change that widens
+  a policy's capabilities must be proposed to the user and confirmed before it
+  is written**, with the endpoint, the reason Vault requires it, and why an
+  exact path is not enough.
+- **Optional reads live in add-ons**, so the user decides through the token
+  what is assessed: policy bodies (ACL, Sentinel) are the current examples.
+  Prefer a new add-on over widening `policies/audit-policy.hcl`.
+
 ### ACL policy collection
 
 `NamespaceAuditor._fetch_acl_policies()` lists `sys/policies/acl` once per
 namespace via hvac's `list_acl_policies()` and stores the sorted names on
 `AuditData.acl_policies`.
 
-- **Names only by default, and `audit-policy.hcl` grants `list` not `read`.**
-  Bodies need `read` on `sys/policies/acl/*`, which lets the token reconstruct
-  the cluster's entire access model. That grant lives only in the separate
-  `audit-policy-acl-reader.hcl` add-on, used with `--acl-bodies`. Never add it to
-  `audit-policy.hcl`.
-- **`--acl-bodies` (`namespace_audit/acl.py`)** reads every body except `root`,
+- **The token is the source of truth for policy bodies.** `policies/audit-policy.hcl`
+  grants `list` only. Bodies need `read` on `sys/policies/acl/*`, which lets
+  the token reconstruct the cluster's access model, so that grant lives only in
+  the separate `policies/audit-policy-acl-reader.hcl` add-on. Never add it to
+  `policies/audit-policy.hcl`. There is no flag: the auditor always tries to read
+  bodies, and the token's policies decide (`--names-only` is the one opt-out).
+- **A denied body read is not an access gap.** It means the token was not given
+  the add-on, which is a choice. The first 403 per kind (`acl`, `sentinel`)
+  marks that kind denied for the run (`_note_body_read`), and the rest are
+  skipped, so a base token costs one extra call, not one per policy, and adds
+  no gap rows. The outcome is `AuditData.policy_bodies` (`assessed`, `partial`,
+  `not readable`, `names only`, `none found`), shown in the reports and in
+  findings.json's `cluster_context.policy_bodies`. It never makes
+  `coverage.complete` false.
+- **Assessment (`namespace_audit/acl.py`)** covers every body except `root`,
   built-ins included, and reduces each to an `AclAssessment`: a sha256, a rule
   count and the flagged rules' paths and capabilities. The body and every
   allowed/denied parameter value are dropped inside `_assess_acl_bodies`. They
   must never reach `AuditData`, a finding or a file, and a test plants a
-  parameter value to check that. A denied body read records one access gap per
-  namespace whose scope names the add-on (`BODY_DENIED_SCOPE`). The HCL parser
+  parameter value to check that. The HCL parser
   is the skill's: it keeps `path` blocks, `capabilities` and the legacy
   `policy = "read|write|sudo|deny"` attribute (expanded the way Vault expands
   it), and returns `None` (VT-POL-005) instead of raising.
@@ -397,7 +438,7 @@ namespace via hvac's `list_acl_policies()` and stores the sorted names on
   direction and so misses grants on one named policy, mount or role.
 - **`sudo` on a match-everything path is VT-POL-001 alone**, never VT-POL-003
   as well. Reporting both doubled every copy of an `admin` policy. Expect VT-POL-003 on this tool's own
-  `audit-policy.hcl`, which needs `sudo` on three exact paths. That is expected
+  `policies/audit-policy.hcl`, which needs `sudo` on three exact paths. That is expected
   and deliberately not special-cased.
 - **No tri-state.** Unlike Sentinel, `sys/policies/acl` exists on every Vault
   edition, so there is nothing to probe for and no `"unsupported path"`
@@ -438,10 +479,15 @@ block as the auth and engine collectors, using hvac's native
 - **Cost on a non-Sentinel cluster is one API call for the whole run**: the EGP
   probe fails, `sentinel_supported` goes `False`, the RGP probe in the same call
   is skipped, and every later namespace short-circuits before the request.
-- **Per-policy read failures store a placeholder** `{"name", "read_error"}` so
-  the name still reaches the report, and `increment_forbidden` fires only on the
-  first denial per `(namespace, kind)`. A namespace with 40 unreadable policies
-  must produce one access-gap row, not 40.
+- **Names are always kept; bodies only when the token allows.** The LIST rule is
+  in `policies/audit-policy.hcl`; body reads need `policies/audit-policy-sentinel-reader.hcl`,
+  like the skill's `vault-ops-sentinel-reader`. An unread policy is stored as
+  `{"name": ...}`. A read body is reduced at once by
+  `report.py::reduce_sentinel_policy` to its name, enforcement level, paths,
+  sha256, line count, `always_true`/`always_false` and import names. The
+  source is never stored or written, so `sentinel-policies.json` carries no
+  policy text. A 403 follows the same one-probe rule as ACL bodies; any other
+  read failure records one error per `(namespace, kind)`.
 - **Namespaces with no policies get no dict entry at all**, or every table would
   carry a blank row per namespace.
 - `examples/sentinel/` plus `task seed:sentinel` write five no-op policies

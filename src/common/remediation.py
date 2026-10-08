@@ -296,7 +296,7 @@ CATALOGUE: dict[str, Remediation] = {
         "The policy grants `sudo`, unlocking root-protected endpoints on those paths.",
         ("vault policy read {nsflag}{name}",),
         "Remove `sudo` unless the path is root-protected and the holder needs it.",
-        "`sudo` on exact read-only paths (vault-tools' own `audit-policy.hcl`) is expected and low risk.",
+        "`sudo` on exact read-only paths (vault-tools' own `policies/audit-policy.hcl`) is expected and low risk.",
     ),
     "VT-POL-004": Remediation(
         "A policy name exists in several namespaces with different bodies: copies have drifted.",
