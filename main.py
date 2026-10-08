@@ -408,6 +408,7 @@ def main() -> None:
                 info.cluster_name,
                 output_dir=global_config.output_dir,
                 is_enterprise=info.is_enterprise,
+                cluster_id=info.cluster_id,
             )
             exit_code = exit_code_for(result.findings_document, args.fail_on, args.fail_on_gaps)
             logger.info("command_execution_completed", command="activity-export", exit_code=exit_code)
@@ -420,13 +421,14 @@ def main() -> None:
                 start_date=args.start_date,
                 end_date=args.end_date,
             )
-            cluster_name = vault_client.validate_connection().cluster_name
+            info = vault_client.validate_connection()
             run_entity_export(
                 vault_client,
                 args.start_date,
                 args.end_date,
-                cluster_name,
+                info.cluster_name,
                 output_dir=global_config.output_dir,
+                cluster_id=info.cluster_id,
             )
             logger.info("command_execution_completed", command="entity-export")
 
@@ -463,6 +465,7 @@ def main() -> None:
                 cluster_name,
                 output_dir=global_config.output_dir,
                 is_enterprise=info.is_enterprise,
+                cluster_id=info.cluster_id,
             )
             logger.info("subcommand_completed", subcommand="activity-export")
 
@@ -474,6 +477,7 @@ def main() -> None:
                 args.end_date,
                 cluster_name,
                 output_dir=global_config.output_dir,
+                cluster_id=info.cluster_id,
             )
             logger.info("subcommand_completed", subcommand="entity-export")
 

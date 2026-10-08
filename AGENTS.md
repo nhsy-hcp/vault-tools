@@ -299,7 +299,12 @@ All tools write to configurable output directory (default: `outputs/`) with cons
 - CSV files: Processed summaries for analysis
 - Markdown file: Human-readable report (every audit; not the two exports)
 - `*-findings-*.json`: Machine-readable findings (every audit, and activity-export)
-- Filename pattern: `{cluster-name}-{data-type}-{YYYYMMDD}.{ext}`
+- Filename pattern: `{cluster-name}-{cluster-id-8}-{data-type}-{YYYYMMDD}.{ext}`,
+  built by `common/utils.py::file_prefix`. The first eight hex characters of
+  the cluster ID keep two clusters with the same name from overwriting each
+  other's files. The ID is not appended again when the name already ends with
+  it (Vault's default `vault-cluster-<8 hex>` names), and is omitted when
+  unknown (a sealed node reports none). Use `file_prefix` in every new writer.
 - **Configurable**: Set `VAULT_TOOLS_OUTPUT_DIR` environment variable
 
 `namespace-audit` writes up to fourteen files per run: up to eight JSON, up to

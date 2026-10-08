@@ -24,7 +24,7 @@ from rich.table import Table
 from src.cluster_audit.collector import ClusterReads, LicenseResult, collect_cluster_health, fetch_license_status, fetch_system_lease_ttls
 from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import write_csv, write_json, write_markdown
-from src.common.utils import FILE_DATE_FORMAT, normalise_namespace_path
+from src.common.utils import FILE_DATE_FORMAT, file_prefix, normalise_namespace_path
 from src.common.vault_client import VaultClient, VaultConnectionError
 from src.namespace_audit.acl import BODY_DENIED_SCOPE, AclAssessment, assess_policy
 from src.namespace_audit.report import build_findings_json, build_markdown_report
@@ -776,6 +776,7 @@ class NamespaceAuditor:
 
     def _write_reports(self, cluster_name: str):
         date_str = datetime.now().strftime(FILE_DATE_FORMAT)
+        prefix = file_prefix(cluster_name, self.data.cluster_id)
         # One clock for every rendered file, so time-based findings (license
         # expiry) agree between the markdown and findings.json.
         generated_at = datetime.now(UTC)
@@ -792,7 +793,7 @@ class NamespaceAuditor:
             return converted
 
         def path_for(kind: str, extension: str) -> str:
-            return f"{self.output_dir}/{cluster_name}-{kind}-{date_str}.{extension}"
+            return f"{self.output_dir}/{prefix}-{kind}-{date_str}.{extension}"
 
         # Write JSON files
         logger.debug(f"Writing namespaces JSON with {len(self.data.namespaces)} namespaces")

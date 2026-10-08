@@ -74,3 +74,12 @@ def test_denied_reads_make_coverage_incomplete(tmp_path):
     assert document["coverage"]["denied"] == [{"namespace": "/", "scope": "sys/audit"}]
     assert document["coverage"]["complete"] is False
     assert "`sys/audit`" in markdown
+
+
+def test_file_names_carry_the_short_cluster_id(tmp_path):
+    routes = enterprise_routes()
+    routes["sys/health"] = {**HEALTHY, "cluster_name": "vault-cluster", "cluster_id": "d33099d9-206e-53c2-4e50-44fb62ac69a6"}
+    client = _connected(routes)
+    client.validate_connection.return_value = ConnectionInfo("vault-cluster", "1.20.1+ent", True, "d33099d9-206e-53c2-4e50-44fb62ac69a6")
+    _, written, _ = _run(client, tmp_path)
+    assert written and all(Path(p).name.startswith("vault-cluster-d33099d9-") for p in written)

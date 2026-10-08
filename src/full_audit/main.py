@@ -151,11 +151,12 @@ def run_full_audit(
                 output_dir=output_dir,
                 is_enterprise=cluster.health.get("enterprise"),
                 current_month=current_month,
+                cluster_id=cluster.health.get("cluster_id"),
             )
             return StepResult("activity-export", "ok", document=result.findings_document)
 
         def entity_step() -> StepResult:
-            run_entity_export(vault_client, start_date, end_date, cluster.cluster_name, output_dir=output_dir)
+            run_entity_export(vault_client, start_date, end_date, cluster.cluster_name, output_dir=output_dir, cluster_id=cluster.health.get("cluster_id"))
             return StepResult("entity-export", "ok", "export only — no findings")
 
         for name, fn in (("namespace-audit", namespace_step), ("identity-audit", identity_step), ("activity-export", activity_step), ("entity-export", entity_step)):
@@ -176,10 +177,10 @@ def run_full_audit(
         merged["coverage"]["errors"].extend({"namespace": "/", "message": f"{r.name}: {r.reason}"[:MAX_REASON_LENGTH]} for r in results if r.status == "failed")
 
     date_str = finished.strftime(FILE_DATE_FORMAT)
-    findings_path = os.path.join(output_dir, f"{cluster.cluster_name}-full-findings-{date_str}.json")
-    report_path = os.path.join(output_dir, f"{cluster.cluster_name}-full-audit-{date_str}.md")
+    findings_path = os.path.join(output_dir, f"{cluster.file_prefix}-full-findings-{date_str}.json")
+    report_path = os.path.join(output_dir, f"{cluster.file_prefix}-full-audit-{date_str}.md")
     write_json(findings_path, merged)
-    step_files = files_written_since(output_dir, cluster.cluster_name, started_epoch, exclude={report_path})
+    step_files = files_written_since(output_dir, cluster.file_prefix, started_epoch, exclude={report_path})
     try:
         write_markdown(
             report_path,

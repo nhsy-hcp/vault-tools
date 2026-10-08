@@ -16,7 +16,7 @@ from src.common.exceptions import VaultPermissionError
 from src.common.file_utils import FileProcessingError, write_csv, write_json, write_markdown
 from src.common.findings import Finding, build_findings_document, coverage_block, get_tool_version, run_block, sort_findings
 from src.common.markdown import md_table, render_findings_table
-from src.common.utils import FILE_DATE_FORMAT
+from src.common.utils import FILE_DATE_FORMAT, file_prefix
 from src.common.vault_client import VaultAPIError, VaultClient
 
 logger = logging.getLogger(__name__)
@@ -144,6 +144,7 @@ def assess_activity(
     is_enterprise: bool | None = None,
     started_at: datetime | None = None,
     current_month: Any = NOT_READ,
+    name_prefix: str | None = None,
 ) -> dict[str, Any]:
     """Run the VT-CLI checks over exported activity and write their findings files.
 
@@ -179,7 +180,7 @@ def assess_activity(
     )
 
     date_str = datetime.now().strftime(FILE_DATE_FORMAT)
-    base = os.path.join(output_dir, f"{cluster_name}-activity-findings-{date_str}")
+    base = os.path.join(output_dir, f"{name_prefix or cluster_name}-activity-findings-{date_str}")
     written = [f"{base}.json"]
     write_json(f"{base}.json", document)
     if findings:
@@ -281,8 +282,10 @@ def run_activity_export(
     output_dir: str = "outputs",
     is_enterprise: bool | None = None,
     current_month: Any = NOT_READ,
+    cluster_id: str | None = None,
 ) -> ActivityExportResult:
     console = Console()
+    prefix = file_prefix(cluster_name, cluster_id)
     started_at = datetime.now(UTC)
     audit_logger = get_audit_logger()
     start_time = time.time()
@@ -319,11 +322,11 @@ def run_activity_export(
                 console.print("[green]✓[/green] Activity data retrieved")
 
             task = progress.add_task("[cyan]Processing and writing reports...", total=None)
-            namespaces_data, mounts_data = process_activity_data(data, cluster_name, output_dir)
+            namespaces_data, mounts_data = process_activity_data(data, prefix, output_dir)
             progress.update(task, completed=True)
 
             task = progress.add_task("[cyan]Checking client usage patterns...", total=None)
-            findings_document = assess_activity(client, data, cluster_name, start_date, end_date, output_dir, is_enterprise, started_at, current_month)
+            findings_document = assess_activity(client, data, cluster_name, start_date, end_date, output_dir, is_enterprise, started_at, current_month, prefix)
             progress.update(task, completed=True)
 
         duration = time.time() - start_time
@@ -366,7 +369,7 @@ def run_activity_export(
         audit_logger.log_data_export(
             export_type="activity",
             record_count=len(namespaces_data) + len(mounts_data),
-            output_file=f"{output_dir}/{cluster_name}-activity-*.csv",
+            output_file=f"{output_dir}/{prefix}-activity-*.csv",
             filters={"start_date": start_date, "end_date": end_date},
         )
 

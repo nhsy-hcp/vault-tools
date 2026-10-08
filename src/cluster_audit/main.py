@@ -29,7 +29,7 @@ from src.cluster_audit.report import build_cluster_findings_json, build_cluster_
 from src.common.exceptions import VaultConnectionError
 from src.common.file_utils import write_json, write_markdown
 from src.common.findings import SEVERITY_ORDER
-from src.common.utils import FILE_DATE_FORMAT
+from src.common.utils import FILE_DATE_FORMAT, file_prefix
 from src.common.vault_client import VaultClient
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,8 @@ class ClusterAuditResult(NamedTuple):
     health: dict[str, Any]
     coverage: ClusterCoverage
     cluster_name: str
+    # Start of every output file name: cluster name plus the short cluster ID.
+    file_prefix: str
     # "sealed", "uninitialized" or "dr_secondary" when the node rejects
     # authenticated reads; None when it serves them.
     unavailable_reason: str | None
@@ -98,9 +100,10 @@ def run_cluster_audit_full(vault_client: VaultClient, output_dir: str, console: 
 
     os.makedirs(output_dir, exist_ok=True)
     date_str = generated.strftime(FILE_DATE_FORMAT)
+    prefix = file_prefix(cluster_name, health_status.get("cluster_id"))
 
     def path_for(kind: str, extension: str) -> str:
-        return os.path.join(output_dir, f"{cluster_name}-{kind}-{date_str}.{extension}")
+        return os.path.join(output_dir, f"{prefix}-{kind}-{date_str}.{extension}")
 
     document = build_cluster_findings_json(
         cluster_name,
@@ -145,7 +148,7 @@ def run_cluster_audit_full(vault_client: VaultClient, output_dir: str, console: 
     console.print(f"\n[bold]Output files[/bold] → [cyan]{output_dir}/[/cyan]")
     for path in written:
         console.print(f"  [green]✓[/green] {os.path.basename(path)}")
-    return ClusterAuditResult(document, health, coverage, cluster_name, reason, ClusterReads(health, coverage, license_result, lease_ttls))
+    return ClusterAuditResult(document, health, coverage, cluster_name, prefix, reason, ClusterReads(health, coverage, license_result, lease_ttls))
 
 
 def _print_summary(console: Console, health: dict[str, Any], document: dict[str, Any]) -> None:

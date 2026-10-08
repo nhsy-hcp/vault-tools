@@ -33,7 +33,7 @@ ORPHAN = finding("VT-ID-001", "team-a", "entity", "e1", None, "orphan", entity_i
 def _cluster(reason=None):
     health, coverage = {"enterprise": True, "version": "1.20.1+ent"}, ClusterCoverage()
     reads = ClusterReads(health, coverage, LicenseResult(None, None, True), (3600, 86400))
-    return ClusterAuditResult(_doc([AUD]), health, coverage, "c", reason, reads)
+    return ClusterAuditResult(_doc([AUD]), health, coverage, "c", "c-d33099d9", reason, reads)
 
 
 class Harness:
@@ -227,3 +227,9 @@ class TestFilesWrittenSince:
 
     def test_missing_directory_is_empty(self, tmp_path):
         assert files_written_since(str(tmp_path / "nope"), "c", 0) == []
+
+
+def test_combined_files_use_the_cluster_id_prefix(tmp_path):
+    h = Harness(tmp_path)
+    h.run()
+    assert all("/c-d33099d9-full-findings-" in p for p in h.written)

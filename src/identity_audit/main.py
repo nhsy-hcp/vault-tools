@@ -14,7 +14,7 @@ from rich.table import Table
 from src.common.exceptions import VaultConnectionError
 from src.common.file_utils import write_csv, write_json, write_markdown
 from src.common.findings import SEVERITY_ORDER, sort_findings
-from src.common.utils import FILE_DATE_FORMAT
+from src.common.utils import FILE_DATE_FORMAT, file_prefix
 from src.common.vault_client import VaultClient
 from src.identity_audit.collector import IdentityCoverage, active_entity_clients, collect_entities, discover_namespaces, read_activity
 from src.identity_audit.findings import entity_findings
@@ -89,7 +89,7 @@ def run_identity_audit_full(
     date_str = generated.strftime(FILE_DATE_FORMAT)
 
     def path_for(kind: str, extension: str) -> str:
-        return os.path.join(output_dir, f"{info.cluster_name}-{kind}-{date_str}.{extension}")
+        return os.path.join(output_dir, f"{file_prefix(info.cluster_name, info.cluster_id)}-{kind}-{date_str}.{extension}")
 
     written: list[str] = []
     write_json(path_for("identity-findings", "json"), document)
