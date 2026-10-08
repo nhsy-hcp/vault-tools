@@ -39,7 +39,7 @@ from src.namespace_audit.main import NamespaceAuditor
 # distribution is not installed and importlib.metadata cannot be the only
 # source. The literal is the fallback for that mode and is pinned to
 # pyproject.toml by a test, so the two cannot drift.
-_FALLBACK_VERSION = "2.0.1"
+_FALLBACK_VERSION = "3.0.0"
 
 try:
     __version__ = importlib.metadata.version("vault-tools")
