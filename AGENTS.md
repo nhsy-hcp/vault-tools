@@ -2,11 +2,21 @@
 
 ## Project Overview
 
-Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providing three main capabilities:
+Vault Tools is a unified CLI tool for interacting with HashiCorp Vault. Its
+subcommands:
 
-- **Namespace Audit**: Comprehensive auditing of Vault namespaces, auth methods, and secret engines, with a markdown audit report
-- **Activity Export**: Export Vault activity logs and usage metrics
-- **Entity Export**: Export Vault entity data
+- **Namespace Audit** (`namespace-audit`): Comprehensive auditing of Vault namespaces, auth methods, secret engines, ACL and Sentinel policies, with a markdown audit report; `--acl-bodies` adds an opt-in ACL permission review
+- **Cluster Audit** (`cluster-audit`): Seal, HA, replication, raft, audit devices, snapshots and node metrics; works on sealed and DR-secondary nodes
+- **Identity Audit** (`identity-audit`): Identity entities and aliases
+- **Activity Export** (`activity-export`): Export Vault activity logs and usage metrics, plus client-usage checks
+- **Entity Export** (`entity-export`): Export Vault entity data
+- **Full Audit** (`full-audit`): Every audit and export in one run, with a combined report
+- **Diff** (`diff`): Compare two `findings.json` files
+
+Every audit writes a `findings.json` in the vault-ops Claude skill's schema
+(`schemas/findings.schema.json`), and its rule IDs (`VT-MOUNT-001`, …) come
+from the skill's catalogue. The skill lives at `~/Projects/ai/vault-ops-skill`
+and is where most of these checks were first written.
 
 ## Project Structure
 
@@ -26,31 +36,62 @@ Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providin
 ├── AGENTS.md                 # AI agent guidelines (this file)
 ├── LICENSE                   # Project license
 ├── README.md                 # Project documentation
+├── audit-policy.hcl          # Least-privilege token policy for every subcommand
+├── audit-policy-acl-reader.hcl # Opt-in add-on: read ACL policy bodies (--acl-bodies)
+├── schemas/
+│   └── findings.schema.json  # Vendored from the vault-ops skill
+├── scripts/
+│   ├── check-policy-fmt.sh   # vault policy fmt check (pre-commit hook)
+│   └── seed-sentinel-policies.sh
 ├── src/
 │   ├── common/
 │   │   ├── vault_client.py         # Centralized Vault API client
 │   │   ├── config.py               # Configuration management
 │   │   ├── file_utils.py           # File I/O utilities (JSON/CSV/markdown)
+│   │   ├── findings.py             # Finding model, rule catalogue, findings.json, diff, exit codes
+│   │   ├── markdown.py             # md_table, md_escape, findings tables
 │   │   ├── utils.py                # Common utilities
 │   │   ├── audit_logger.py         # Audit logging functionality
 │   │   └── logging_config.py       # Logging configuration
 │   │
 │   ├── namespace_audit/
 │   │   ├── main.py           # Multi-threaded namespace traversal
-│   │   └── report.py         # Markdown audit report rendering (pure functions)
+│   │   ├── report.py         # Markdown audit report rendering (pure functions)
+│   │   └── acl.py            # Opt-in ACL policy body assessment (pure functions)
+│   │
+│   ├── cluster_audit/
+│   │   ├── collector.py      # Cluster health reads (allowlisted, never raises)
+│   │   ├── findings.py       # Health, replication, audit, snapshot, license, lease rules
+│   │   ├── report.py         # Cluster health section and report (pure functions)
+│   │   └── main.py           # `cluster-audit` command
+│   │
+│   ├── identity_audit/
+│   │   ├── collector.py      # Namespace discovery and entity reads
+│   │   ├── findings.py       # VT-ID rules
+│   │   ├── report.py         # Report, CSV rows, findings.json (pure functions)
+│   │   └── main.py           # `identity-audit` command
 │   │
 │   ├── activity_export/
-│   │   └── main.py           # Activity log processing
+│   │   ├── main.py           # Activity log processing and the usage findings files
+│   │   └── findings.py       # VT-CLI rules (pure functions)
 │   │
-│   └── entity_export/
-│       └── main.py           # Entity data extraction
+│   ├── entity_export/
+│   │   └── main.py           # Entity data extraction
+│   │
+│   ├── full_audit/
+│   │   └── main.py           # Runs every step, merges findings
+│   │
+│   └── findings_diff/
+│       └── main.py           # `diff` command
 │
 ├── tests/
-│   ├── common/               # Tests for shared utilities
 │   ├── namespace_audit/      # Threading & mocking tests
 │   │   ├── conftest.py       # Pytest configuration
 │   │   ├── fixtures.py       # Test fixtures
 │   │   ├── report_fixtures.py # Realistic AuditData for report tests
+│   │   ├── test_acl_review.py
+│   │   ├── test_findings_json.py
+│   │   ├── test_mount_and_sentinel_rules.py
 │   │   ├── test_auditor_core.py
 │   │   ├── test_data_classes.py
 │   │   ├── test_namespace_traversal.py
@@ -59,6 +100,7 @@ Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providin
 │   │   ├── test_integration_simple.py
 │   │   ├── test_integration.py
 │   │   └── test_default.py
+│   ├── common/               # includes test_findings.py (model, diff, exit codes)
 │   ├── activity_export/      # Tests for API & data processing
 │   │   ├── conftest.py
 │   │   ├── fixtures.py
@@ -66,9 +108,13 @@ Vault Tools is a unified CLI tool for interacting with HashiCorp Vault, providin
 │   │   ├── test_vault_api.py
 │   │   ├── test_entity_export.py   # entity_export is tested from here
 │   │   ├── test_integration.py
+│   │   ├── test_usage_findings.py  # VT-CLI rules
 │   │   └── test_default.py
+│   ├── cluster_audit/        # fakes.py: a fake Vault keyed by path
+│   ├── identity_audit/       # fakes.py: a fake Vault keyed by (namespace, path)
+│   ├── full_audit/           # Orchestration with every step patched
 │   ├── entity_export/        # Package marker only; tests live in activity_export/
-│   └── test_cli_parsing.py   # Argparse-level tests, no Vault required
+│   └── test_cli_parsing.py   # Argparse-level tests and main() exit codes, no Vault required
 ├── inputs/                   # Input files for scripts
 └── outputs/                  # Generated reports (configurable)
     ├── _archive/             # Archived reports
@@ -98,8 +144,12 @@ python main.py --help
 
 # Subcommand help
 python main.py namespace-audit --help
+python main.py cluster-audit --help
+python main.py identity-audit --help
 python main.py activity-export --help
 python main.py entity-export --help
+python main.py full-audit --help
+python main.py diff --help
 
 # Using task runner
 task run -- namespace-audit --help
@@ -189,7 +239,8 @@ export VAULT_TOOLS_DEBUG="true"                 # Default: false
 ```
 
 These three are the complete set. Everything else is a CLI flag — `--workers`,
-`--output-dir`, `--no-sentinel`, `--start-date`/`--end-date`. Rate limiting uses
+`--output-dir`, `--no-sentinel`, `--start-date`/`--end-date`, `--acl-bodies`,
+`--list`/`--list-entities`, `--fail-on`/`--fail-on-gaps`. Rate limiting uses
 `NamespaceAuditor`'s constructor defaults (batch 100, sleep 3s) and is not
 currently exposed on the CLI.
 
@@ -206,10 +257,20 @@ currently exposed on the CLI.
      failures in `FileProcessingError`; never let a bare `OSError` escape.
    - `utils.py`: Common utilities across modules
 
+   - `findings.py`: The `Finding` model, the `RULES` catalogue, the
+     findings.json builders, `diff_documents`, `merge_documents` and
+     `exit_code_for`. Pure.
+   - `markdown.py`: `md_table`, `md_escape` and `render_findings_table`, shared
+     by every report.
+
 3. **Module Structure**: Each tool is organized as a separate module under `src/`:
    - `namespace_audit/`: Multi-threaded namespace traversal with rate limiting
-   - `activity_export/`: Vault activity log processing and export
+   - `cluster_audit/`: Cluster health collection and checks
+   - `identity_audit/`: Identity entity collection and checks
+   - `activity_export/`: Vault activity log processing and export, plus usage checks
    - `entity_export/`: Entity data extraction and export
+   - `full_audit/`: Runs the others in order and merges their findings
+   - `findings_diff/`: Compares two findings documents
 
 ### Key Design Patterns
 
@@ -236,18 +297,33 @@ All tools write to configurable output directory (default: `outputs/`) with cons
 
 - JSON files: Raw API responses for programmatic access
 - CSV files: Processed summaries for analysis
-- Markdown file: Human-readable report (`namespace-audit` only)
+- Markdown file: Human-readable report (every audit; not the two exports)
+- `*-findings-*.json`: Machine-readable findings (every audit, and activity-export)
 - Filename pattern: `{cluster-name}-{data-type}-{YYYYMMDD}.{ext}`
 - **Configurable**: Set `VAULT_TOOLS_OUTPUT_DIR` environment variable
 
-`namespace-audit` writes up to twelve files per run: up to six JSON, up to five
-CSV, and `{cluster-name}-audit-report-{YYYYMMDD}.md`. The report is always
-written; there is no flag to enable or suppress it. The count is a maximum, not a
-guarantee: the CSV summary writers return early when they have no rows, the
-Sentinel pair (`sentinel-policies.json`, `summary-sentinel-policies.csv`) is
-skipped entirely unless policies were collected, and `license.json` is written
-only when the license was read — so a root-only Community cluster produces six. The report's "Output files" index checks existence rather
-than assuming the full set.
+`namespace-audit` writes up to fourteen files per run: up to eight JSON, up to
+five CSV, and `{cluster-name}-audit-report-{YYYYMMDD}.md`. The report and
+`namespace-findings.json` are always written; there is no flag to suppress
+them. The count is a maximum, not a guarantee: the CSV summary writers return
+early when they have no rows, the Sentinel pair (`sentinel-policies.json`,
+`summary-sentinel-policies.csv`) is skipped entirely unless policies were
+collected, `license.json` is written only when the license was read, and
+`acl-policy-review.json` only under `--acl-bodies` — so a root-only Community
+dev server produces eight. The report's "Output files" index checks existence
+rather than assuming the full set.
+
+The other commands, per run:
+
+- `cluster-audit`: three files (`cluster-health.json`, `cluster-findings.json`,
+  `cluster-audit-report.md`).
+- `identity-audit`: up to four (`identity-findings.json`,
+  `identity-summary.csv` when any namespace was read, `identity-entities.json`
+  under `--list` only, `identity-audit-report.md`).
+- `activity-export`: its three export files plus `activity-findings.json`, `.md`
+  and, only when there are findings, `.csv`.
+- `full-audit`: every file its steps write, plus `full-findings.json` and
+  `full-audit.md`.
 
 The two ACL files differ from each other on purpose. `acl-policies.json` is
 written whenever a namespace was reached, even if every list is empty: ACL
@@ -293,9 +369,22 @@ already guarantees each namespace is walked once.
 namespace via hvac's `list_acl_policies()` and stores the sorted names on
 `AuditData.acl_policies`.
 
-- **Names only, and the ACL rule grants `list` not `read`.** Bodies would need
-  `read` on `sys/policies/acl/*`, which lets the audit token reconstruct the
-  cluster's entire access model. Do not add that grant to widen a report.
+- **Names only by default, and `audit-policy.hcl` grants `list` not `read`.**
+  Bodies need `read` on `sys/policies/acl/*`, which lets the token reconstruct
+  the cluster's entire access model. That grant lives only in the separate
+  `audit-policy-acl-reader.hcl` add-on, used with `--acl-bodies`. Never add it to
+  `audit-policy.hcl`.
+- **`--acl-bodies` (`namespace_audit/acl.py`)** reads every body except `root`,
+  built-ins included, and reduces each to an `AclAssessment`: a sha256, a rule
+  count and the flagged rules' paths and capabilities. The body and every
+  allowed/denied parameter value are dropped inside `_assess_acl_bodies`. They
+  must never reach `AuditData`, a finding or a file, and a test plants a
+  parameter value to check that. A denied body read records one access gap per
+  namespace whose scope names the add-on (`BODY_DENIED_SCOPE`). The HCL parser
+  is the skill's: it keeps `path` blocks and `capabilities` only, and returns
+  `None` (VT-POL-005) instead of raising. Expect VT-POL-003 on this tool's own
+  `audit-policy.hcl`, which needs `sudo` on three exact paths. That is expected
+  and deliberately not special-cased.
 - **No tri-state.** Unlike Sentinel, `sys/policies/acl` exists on every Vault
   edition, so there is nothing to probe for and no `"unsupported path"`
   heuristic. `Forbidden` still logs at debug for the reason given below.
@@ -325,9 +414,10 @@ block as the auth and engine collectors, using hvac's native
   `_mark_sentinel_supported()`, which makes `False` sticky — the flag describes
   the cluster, so a later success is not evidence against it, and letting `True`
   win a race would restart the probing the flag exists to stop.
-- **The `"unsupported path"` string check is a deliberate heuristic.** Vault
-  returns 404 both for "this build has no Sentinel" and for "this namespace has
-  zero policies", and only the error body separates them. If Vault ever reworks
+- **The `SENTINEL_UNSUPPORTED_MARKERS` string check is a deliberate heuristic.**
+  Vault returns 404 both for "this build has no Sentinel" and for "this namespace
+  has zero policies", and only the error body separates them: `"unsupported
+  path"` on Vault 1.x Community, `"enterprise-only feature"` on 2.x. If Vault ever reworks
   the message the short-circuit stops firing and every namespace re-probes to an
   empty result — benign, which is why the heuristic is acceptable. Do not
   "harden" it into something that fails closed.
@@ -349,7 +439,9 @@ block as the auth and engine collectors, using hvac's native
 `validate_connection()` reads `sys/health` once and returns `ConnectionInfo`;
 the auditor copies `vault_version`, `cluster_id` and `is_enterprise` onto
 `AuditData`. `NamespaceAuditor._fetch_license_status()` then reads
-`sys/license/status` once per run and stores the `autoloaded` sub-dict.
+`sys/license/status` once per run and stores the `autoloaded` sub-dict. It
+delegates to `cluster_audit.collector.fetch_license_status`, which
+`cluster-audit` uses too, so the tri-state rules below live in one place.
 
 - **`is_enterprise` is tri-state.** `True`/`False` from the `+ent` version
   suffix, `None` when `sys/health` omits the version. The suffix check lives
@@ -366,9 +458,11 @@ the auditor copies `vault_version`, `cluster_id` and `is_enterprise` onto
   `increment_forbidden`: that list means "the tree is incomplete below this
   namespace", and a cluster-level read says nothing about coverage. Access
   gaps shows it on its own "Cluster-level reads" line instead.
-- **Expiry findings**: within `LICENSE_EXPIRY_WARNING_DAYS` (90) is Medium;
-  already past the soft expiry is High — the only High finding — and cites
-  `termination_time`, when Vault actually stops serving. Timestamps without an
+- **Expiry findings** (`cluster_audit/findings.py::license_findings`): within
+  `LICENSE_EXPIRY_WARNING_DAYS` (90) is VT-LIC-001 at Medium; already past the
+  soft expiry is the same rule escalated to High, citing `termination_time`, when
+  Vault actually stops serving. It stays one rule so a `diff` shows the finding
+  worsening, not one resolving and another appearing. Timestamps without an
   offset are read as UTC.
 
 ### Markdown Report (`src/namespace_audit/report.py`)
@@ -381,10 +475,13 @@ Rendering is deliberately separated from collection:
   its `AuditData`/`AuditStats` annotations behind `TYPE_CHECKING` and defers them
   with `from __future__ import annotations`. Never add a runtime
   `from .main import ...` here.
-- **No new dependencies**: `md_table()` is hand-rolled because
-  `DataFrame.to_markdown()` requires `tabulate`, which the project does not
-  depend on. The tool version comes from `importlib.metadata`, not from
-  `main.__version__`.
+- **No new dependencies**: `md_table()` (now in `src/common/markdown.py`) is
+  hand-rolled because `DataFrame.to_markdown()` requires `tabulate`, which the
+  project does not depend on. The tool version comes from `importlib.metadata`
+  (`common/findings.py::get_tool_version`), not from `main.__version__`.
+- **Import direction**: `namespace_audit.report` imports `cluster_audit.report`
+  and `cluster_audit.findings` (for the health section, the license and lease
+  rules), never the reverse. Shared pieces go in `src/common/`.
 - **`AuditData` is the single source**: every section reads the same `data`
   object. Do not add kwargs to `build_markdown_report` that duplicate an
   `AuditData` field — the license section once took its data from a kwarg while
@@ -427,7 +524,107 @@ When adding a per-namespace collector, add its endpoint to
 `tests/namespace_audit/fixtures.py::make_hvac_client` as well. The mock hvac
 client is a bare `Mock`, which has no `__getitem__`, so an unstubbed call makes
 the collector's subscript raise `TypeError` and every traversal test records a
-spurious error rather than failing where the gap is.
+spurious error rather than failing where the gap is. Both that fixture and
+`mock_vault_client` set `adapter.get.side_effect = InvalidPath()`, so the
+cluster health collector's raw GETs find nothing and raise no finding in
+unrelated tests. Keep it that way.
+
+### Findings model and findings.json (`src/common/findings.py`)
+
+- **Rule IDs are permanent and come from the skill.** `RULES` holds each ID's
+  default severity, category and title. The fingerprint is
+  `sha256(rule|namespace|kind|path)[:16]`, identical to the skill's (a test pins
+  two values), so a rename reads as "resolved" plus "new" in every diff. Add a
+  rule to `RULES` before emitting it; `finding()` raises `KeyError` otherwise.
+- **Severity may escalate per finding** (`finding(..., severity="High")`), as
+  VT-LIC-001 does once a license has expired. Title case in markdown, lower case
+  in JSON.
+- **The schema is vendored, not imported.** Re-vendor
+  `schemas/findings.schema.json` from the skill and bump
+  `FINDINGS_SCHEMA_VERSION` together. Tests validate every producer's output
+  against it (`jsonschema` is a dev dependency only).
+- **Coverage in findings.json is stricter than "Access gaps" in markdown.**
+  Cluster-level denials (`sys/audit`, `sys/license/status`, …) are not listed as
+  namespace gaps in the report, but they do make `coverage.complete` false. A
+  CI gate asking "was anything not judged?" has to see them. Unattributed
+  failures count too.
+- **Exit codes**: 0 ok, 1 fatal (including a failed audit — namespace-audit used
+  to exit 0 after printing the error), 2 `--fail-on-gaps` with incomplete
+  coverage, 3 `--fail-on` with a finding at or above the severity. 3 wins over 2.
+- **`merge_documents`** (full-audit) dedupes by fingerprint, because
+  namespace-audit embeds cluster findings that cluster-audit also reports.
+
+### Cluster health collection (`src/cluster_audit/`)
+
+- **`collect_cluster_health` never raises.** Every read is optional. A 403 goes
+  to `ClusterCoverage.denied` (by endpoint path) and other failures to `errors`,
+  recorded as exception class plus HTTP status only, because hvac messages can
+  echo URLs. A 404 means "not applicable". The block then stays `None`, and the
+  finding checks never judge `None`.
+- **Allowlist, don't copy.** No addresses (leader, peers, audit sockets), cluster
+  IDs, file paths, snapshot URLs, storage credentials, error text or metric
+  labels leave `collector.py`, and a test asserts it. Snapshot configs are
+  listed but never read: a read returns storage credentials in plaintext.
+- **Node state decides what is read.** A sealed or uninitialised node answers
+  only `sys/health` (queried with `HEALTH_PARAMS` so it returns 200) and
+  `sys/seal-status`. A DR secondary answers only the unauthenticated endpoints.
+  `cluster-audit` reads `sys/health` before validating the token for exactly
+  this reason. That is why it, alone, works on a sealed node.
+- **Time-based checks use the node's clock** (`server_time_utc`), not ours, so
+  a long namespace walk or host clock skew does not read as replication lag.
+- **namespace-audit embeds it**: one `collect_cluster_health` call before the
+  walk, stored on `AuditData.cluster_health` / `cluster_coverage`, and
+  `health_findings` joins `collect_findings`. full-audit passes cluster-audit's
+  result in through `NamespaceAuditor(cluster_health=...)` so nothing is read
+  twice.
+- **Thresholds are the skill's heuristics** (100,000 leases, 60s lag, 2s skew,
+  25h snapshot grace, `MIN_SUPPORTED_VERSION` 1.19, which goes stale). None has
+  been measured against the reference cluster yet.
+
+### Identity audit (`src/identity_audit/`)
+
+- **Privacy is the design constraint.** Entity names, metadata and alias names
+  can hold emails, usernames and AppRole role_ids. Findings, the CSV and the
+  report identify entities **by ID only**; `--list` writes everything else to a
+  separate `identity-entities.json`. Because the skill uses the name as the
+  object path, VT-ID-001..003 fingerprints do not match the skill's. VT-ID-005
+  reports counts only, never the shared alias names.
+- **A denied entity body is counted but not judged**: the entity still appears
+  (from the LIST), VT-ID-001 is skipped for it, and the namespace gets one
+  access-gap row.
+- **Discovery is its own LIST-only walk** (`discover_namespaces`), not
+  `NamespaceAuditor`'s. That walk also collects mounts and policies and drives
+  the progress bar and rate limiting. full-audit passes the namespace list the
+  walk already found (stored keys, `""` for root), so the tree is listed once.
+- **VT-ID-004 is judged only when the activity log records something**: the
+  higher of the billing period and the current month, at least 100 entities
+  and more than 3x the active entity clients.
+
+### Activity usage checks (`src/activity_export/findings.py`)
+
+- Run on every `activity-export` (and `all`/`full-audit`) over the data already
+  exported. Two extra root reads: `sys/internal/counters/config` always, and
+  `activity/monthly` only when the window reaches the current month. Either
+  failing leaves the checks unjudged and is recorded; the export never fails
+  because of them.
+- **A disabled log (VT-CLI-005) must never read as "no clients"**: the report
+  says every zero is "not recorded". With no completed billing period yet, the
+  month in progress is judged instead (`evidence.source`).
+- `run_activity_export` returns `ActivityExportResult(namespaces, mounts,
+  findings_document)`, not a bare tuple.
+
+### Full audit (`src/full_audit/`)
+
+- Order: cluster-audit, namespace-audit, identity-audit, activity-export,
+  entity-export. Each step is wrapped by `_run_step`, so an exception becomes a
+  `failed` row and the next step runs. A failed step forces
+  `coverage.complete` to false.
+- A node that rejects authenticated reads runs only cluster-audit; the rest are
+  `skipped` with the reason. If cluster-audit cannot connect at all, full-audit
+  returns `None` (exit 1): there is no cluster name to file a report under.
+- Omitted `-s/-e` means the last 12 calendar months (`default_window`). That is
+  close to, but not exactly, Vault's billing period. `all` is unchanged and
+  kept for compatibility.
 
 ### Enhanced Error Handling
 
@@ -452,8 +649,13 @@ spurious error rather than failing where the gap is.
 Counts are deliberately not recorded here — they go stale on every change. Run
 `task test` for the current total.
 
-- **common**: VaultClient, config, logging and file I/O
-- **namespace_audit**: threading, mocking, report rendering and integration
+- **common**: VaultClient, config, logging, file I/O, and the findings model,
+  diff and exit codes
+- **namespace_audit**: threading, mocking, report rendering, finding rules, ACL
+  review and integration
+- **cluster_audit** / **identity_audit**: collectors against small fake Vaults
+  (`fakes.py`), every rule, and the no-leak assertions
+- **full_audit**: orchestration with every step patched
 - **activity_export**: API interaction and data processing (this directory also
   holds the entity_export tests)
 - **test_cli_parsing.py**: argparse-level tests, no Vault required
