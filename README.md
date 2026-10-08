@@ -66,6 +66,7 @@ Run with `uv run vault-tools <subcommand>` (or `python main.py`, or
 | [Findings, diffs and CI](docs/findings-and-ci.md) | `findings.json`, `diff` and exit codes |
 | [Configuration](docs/configuration.md) | Environment variables, flags and output file names |
 | [Development](docs/development.md) | Pre-commit, tests, CI, architecture and contributing |
+| [Dev stack](docs/dev-stack.md) | Local Vault Enterprise (optional DR and performance secondaries) and Community servers to test against |
 
 ## License
 

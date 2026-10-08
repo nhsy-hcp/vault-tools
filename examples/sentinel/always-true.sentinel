@@ -1,0 +1,2 @@
+# Trivial policy: trips VT-SNT-004 (always evaluates true).
+main = rule { true }

@@ -55,7 +55,9 @@ quick look, but use the audit token above for anything you share or automate.
 - An hour is ample: a full audit of a 130-namespace cluster takes seconds.
   Revoke the token when you're done (`vault token revoke <token>`), and drop the
   add-ons if you only needed them for one policy review.
-- For a self-signed dev server set `VAULT_SKIP_VERIFY=true`.
+- For a server with a private CA set `VAULT_CACERT` to its PEM bundle (see
+  [Configuration](configuration.md)); `VAULT_SKIP_VERIFY=true` is for
+  throwaway servers only.
 - Without an add-on the run still succeeds. The report lists those policies by
   name and says, under **Not covered**, which add-on to attach. See
   [Vault token permissions](#vault-token-permissions) for what each rule grants

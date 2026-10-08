@@ -69,6 +69,39 @@ class TestVaultClientInit:
             mock_dw.assert_called_once()
 
 
+class TestTlsVerification:
+    """VAULT_SKIP_VERIFY and VAULT_CACERT must reach the requests that hvac sends.
+
+    hvac swaps its own `verify` argument for a supplied session's whenever that
+    is truthy, and a new Session's is True, so a value passed only to
+    hvac.Client was silently replaced and skip-verify never took effect.
+    """
+
+    @pytest.mark.parametrize(
+        "skip,cacert,expected",
+        [
+            (False, None, True),
+            (True, None, False),
+            (False, "/tmp/ca.pem", "/tmp/ca.pem"),
+            (True, "/tmp/ca.pem", False),
+        ],
+    )
+    def test_verify_reaches_the_adapter(self, skip, cacert, expected):
+        c = VaultClient(vault_addr="https://vault.example.com", vault_token="s.test", vault_skip_verify=skip, vault_cacert=cacert)
+        assert c.verify == expected
+        assert c.session.verify == expected
+        with c.get_client() as hvac_client:
+            assert hvac_client.adapter._kwargs["verify"] == expected
+
+    def test_request_is_sent_with_verify(self):
+        c = VaultClient(vault_addr="https://vault.example.com", vault_token="s.test", vault_skip_verify=True)
+        with patch.object(c.session, "request") as request:
+            request.return_value = Mock(status_code=200, ok=True, headers={}, json=lambda: {}, text="{}")
+            with c.get_client() as hvac_client:
+                hvac_client.adapter.get("/v1/sys/health")
+        assert request.call_args.kwargs["verify"] is False
+
+
 # ---------------------------------------------------------------------------
 # get_client context manager
 # ---------------------------------------------------------------------------

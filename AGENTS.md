@@ -28,7 +28,11 @@ and is where most of these checks were first written.
 ├── uv.lock                   # UV package manager lock file
 ├── pytest.ini                # Pytest configuration
 ├── Taskfile.yml              # Task automation definitions
-├── .env.example              # Environment variable template
+├── .env.example              # Environment variable template (defaults target the dev stack)
+├── compose.yaml              # Dev stack: Vault Enterprise primary, optional DR/PR secondaries (docs/dev-stack.md)
+├── compose.ce.yaml           # Throwaway Vault Community dev server (task up:ce, task test:ce)
+├── compose/
+│   └── vault.hcl             # Shared node config (a server config, not a policy)
 ├── .gitignore                # Git ignore patterns
 ├── .gitleaks.toml            # Secret scanning configuration
 ├── .markdownlint.json        # Markdown linting rules
@@ -42,9 +46,21 @@ and is where most of these checks were first written.
 │   └── audit-policy-sentinel-reader.hcl  # Add-on: read Sentinel EGP/RGP bodies (VT-SNT)
 ├── schemas/
 │   └── findings.schema.json  # Vendored from the vault-ops skill
+├── examples/
+│   └── sentinel/             # No-op Sentinel bodies for seed:sentinel and seed:findings
 ├── scripts/
-│   ├── check-policy-fmt.sh   # vault policy fmt check (pre-commit hook)
-│   └── seed-sentinel-policies.sh
+│   ├── check-policy-fmt.sh   # vault policy fmt check (pre-commit hook; policies/ only)
+│   ├── seed-sentinel-policies.sh
+│   ├── check-deps.sh         # task deps
+│   ├── gen-tls.sh            # Dev stack CA and leaf cert in .tmp/vault/tls
+│   ├── vault-up.sh / vault-down.sh   # Start (init, unseal, token root) / stop a node
+│   ├── dr-enable.sh / pr-enable.sh   # Optional replication
+│   ├── seed-vault.py         # task seed (PEP 723 script, from the vault-ops skill)
+│   ├── seed-findings.sh      # task seed:findings
+│   ├── audit-token.sh        # task token:audit / token:policies / token:pr
+│   ├── audit-dev.sh          # task audit:dev
+│   ├── test-ce.sh            # task test:ce
+│   └── e2e.sh                # task test:e2e
 ├── src/
 │   ├── common/
 │   │   ├── vault_client.py         # Centralized Vault API client
@@ -119,7 +135,8 @@ and is where most of these checks were first written.
 │   ├── identity_audit/       # fakes.py: a fake Vault keyed by (namespace, path)
 │   ├── full_audit/           # Orchestration with every step patched
 │   ├── entity_export/        # Package marker only; tests live in activity_export/
-│   └── test_cli_parsing.py   # Argparse-level tests and main() exit codes, no Vault required
+│   ├── test_cli_parsing.py   # Argparse-level tests and main() exit codes, no Vault required
+│   └── test_ce.py            # CE smoke tests (marker `ce`), run only by task test:ce
 ├── inputs/                   # Input files for scripts
 └── outputs/                  # Generated reports (configurable)
     ├── _archive/             # Archived reports
@@ -171,6 +188,9 @@ task test:all
 
 # Run CI verification pipeline
 task test:ci
+
+# CE smoke tests against a throwaway Community server (Docker; skipped otherwise)
+task test:ce
 
 # Specific test modules
 pytest tests/namespace_audit/ -v
@@ -225,6 +245,26 @@ message without one, which is why CI, having none, still passes. Formatting is
 not the only rule for these files: every `path` rule must still map to a request
 the tool actually issues.
 
+## Dev stack
+
+`compose.yaml` and `compose.ce.yaml` are a port of the vault-ops skill's stack
+(docs/dev-stack.md), on their own ports (8310 primary, 8320 DR, 8340 PR, 8330
+Community) so both can run at once. `task up`, `seed`, `seed:findings`,
+`token:policies`, `audit:dev` is the primary-only loop; `up:dr`/`up:pr`,
+`dr:enable`/`pr:enable` and `token:pr` add the optional secondaries. Enable
+replication before seeding.
+
+- **The stack's tasks pin their target.** `seed`, `seed:findings`, `token:*`
+  and `status` run through the Taskfile's `DEV_ENV`/`DEV_PR_ENV`, which set
+  `VAULT_ADDR`, `VAULT_CACERT` and `VAULT_TOKEN=root` for the local nodes. Keep
+  it that way: a shell exporting a real cluster's address must never receive
+  a seed. These scripts write to Vault; that is fine for the dev stack and is
+  not an exception to the tool's read-only rule.
+- **Never run the dev stack's write scripts against the user's own cluster**
+  without permission.
+- `compose/vault.hcl` is a server config, so `scripts/check-policy-fmt.sh`
+  ignores `.hcl` files outside `policies/`.
+
 ## Environment Variables
 
 ### Required
@@ -232,8 +272,16 @@ the tool actually issues.
 ```bash
 export VAULT_ADDR="https://vault.example.com"
 export VAULT_TOKEN="your-vault-token"
-export VAULT_SKIP_VERIFY="true"  # Optional, for dev environments
+export VAULT_CACERT="/path/to/ca.pem"  # Optional: PEM CA bundle
+export VAULT_SKIP_VERIFY="true"        # Optional: no verification; wins over VAULT_CACERT
 ```
+
+TLS settings are read in `main.py::create_vault_client` and become
+`VaultClient.verify` (`False`, a CA path or `True`). It is set on the pooled
+`requests.Session` as well as passed to hvac. hvac replaces its own `verify`
+argument with a supplied session's whenever that is truthy, and a new Session's
+is `True`, so passing it only to `hvac.Client` silently ignored
+`VAULT_SKIP_VERIFY` (and would ignore a CA bundle). A test pins this.
 
 ### Optional Configuration
 
@@ -426,7 +474,7 @@ namespace via hvac's `list_acl_policies()` and stores the sorted names on
   marks that kind denied for the run (`_note_body_read`), and the rest are
   skipped, so a base token costs one extra call, not one per policy, and adds
   no gap rows. The outcome is `AuditData.policy_bodies` (`assessed`, `partial`,
-  `not readable`, `names only`, `none found`), shown in the reports and in
+  `not readable`, `names only`, `skipped` under `--no-sentinel`, `none found`), shown in the reports and in
   findings.json's `cluster_context.policy_bodies`. It never makes
   `coverage.complete` false.
 - **Assessment (`namespace_audit/acl.py`)** covers every body except `root`,

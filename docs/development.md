@@ -24,7 +24,13 @@ task test:ci
 
 # Run a specific module
 uv run pytest tests/namespace_audit/ -v
+
+# CE smoke tests against a throwaway Community server (needs Docker)
+task test:ce
 ```
+
+For live testing against Vault Enterprise, with optional DR and performance
+replication, see [Dev stack](dev-stack.md).
 
 ### Continuous Integration
 
