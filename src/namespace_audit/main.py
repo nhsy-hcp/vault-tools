@@ -26,6 +26,7 @@ from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import write_csv, write_json, write_markdown
 from src.common.utils import FILE_DATE_FORMAT, normalise_namespace_path
 from src.common.vault_client import VaultClient, VaultConnectionError
+from src.namespace_audit.acl import BODY_DENIED_SCOPE, AclAssessment, assess_policy
 from src.namespace_audit.report import build_findings_json, build_markdown_report
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,11 @@ class AuditData:
     # "this namespace defines no policies of its own" is a real answer, and on
     # the reference cluster 12 namespaces are in exactly that state.
     acl_policies: dict[str, list[str]] = field(default_factory=dict)
+    # Opt-in (--acl-bodies): namespace -> {policy name: AclAssessment}. Only a
+    # hash and the flagged rules' paths and capabilities — never a body. Covers
+    # every policy except "root", built-ins included: a widened "default" is
+    # exactly the kind of change worth catching. Empty when not collected.
+    acl_assessments: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Vault version string from sys/health (e.g. "1.17.0+ent"). None when the
     # health response did not include it (pre-1.9 clusters, or mocked responses).
     vault_version: str | None = None
@@ -183,6 +189,7 @@ class NamespaceAuditor:
         worker_queue_timeout: int = 300,
         queue_depth_warn_threshold: int = 10_000,
         collect_sentinel: bool = True,
+        collect_acl_bodies: bool = False,
     ):
         self.vault_client = vault_client
         self.worker_threads = worker_threads
@@ -193,6 +200,7 @@ class NamespaceAuditor:
         self.worker_queue_timeout = worker_queue_timeout
         self.queue_depth_warn_threshold = queue_depth_warn_threshold
         self.collect_sentinel = collect_sentinel
+        self.collect_acl_bodies = collect_acl_bodies
         self._queue_depth_warned = False
         self.stats = AuditStats()
         self.data = AuditData()
@@ -418,12 +426,16 @@ class NamespaceAuditor:
             self.data.license_unavailable_reason = result.unavailable_reason
         return result.status
 
-    def _fetch_acl_policies(self, client: Any, display_path: str) -> list[str]:
-        """List this namespace's own ACL policy names.
+    def _fetch_acl_policies(self, client: Any, display_path: str) -> tuple[list[str], dict[str, AclAssessment]]:
+        """List this namespace's own ACL policy names, and assess bodies if opted in.
 
-        Names only -- the bodies are deliberately not read. That would need
-        `read` on sys/policies/acl/*, which lets the audit token reconstruct the
-        cluster's entire access model; listing needs only `list`.
+        Returns ``(names, assessments)``. Names exclude the built-ins; the
+        assessments are empty unless ``collect_acl_bodies`` is set.
+
+        Bodies are read only on request: that needs `read` on
+        sys/policies/acl/*, which lets the token reconstruct the cluster's
+        access model, so it lives in the separate audit-policy-acl-reader.hcl
+        add-on. Listing needs only `list`.
 
         Simpler than the Sentinel collector: sys/policies/acl exists on every
         Vault edition, so there is no capability to probe for and no tri-state.
@@ -434,19 +446,46 @@ class NamespaceAuditor:
             # Vault 404s an empty LIST. Every namespace has at least "default",
             # so this is unlikely in practice, but it is not an error.
             logger.debug(f"No ACL policies in {display_path}")
-            return []
+            return [], {}
         except hvac.exceptions.Forbidden:
             # Debug, not warning -- see the note in _list_and_read: one line per
             # namespace would print straight through the live progress bar.
             logger.debug(f"Permission denied listing ACL policies for: {display_path}")
             self.stats.increment_forbidden(display_path, "ACL policies")
-            return []
+            return [], {}
         except Exception as e:
             logger.error(f"Error listing ACL policies for {display_path}: {e}")
             self.stats.increment_errors(display_path, f"ACL policies: {e}")
-            return []
+            return [], {}
 
-        return sorted(n for n in names if n not in BUILTIN_ACL_POLICIES)
+        assessments = self._assess_acl_bodies(client, display_path, names) if self.collect_acl_bodies else {}
+        return sorted(n for n in names if n not in BUILTIN_ACL_POLICIES), assessments
+
+    def _assess_acl_bodies(self, client: Any, display_path: str, names: list[str]) -> dict[str, AclAssessment]:
+        """Read and assess each body in memory; the body is dropped as soon as it is reduced.
+
+        "root" is skipped: it has no body and grants everything by definition.
+        A denial is recorded once per namespace, naming the add-on to attach.
+        """
+        assessments: dict[str, AclAssessment] = {}
+        denied = False
+        for name in sorted(n for n in names if n != "root"):
+            try:
+                body = (client.sys.read_acl_policy(name).get("data") or {}).get("policy")
+            except hvac.exceptions.Forbidden:
+                denied = True
+                continue
+            except hvac.exceptions.InvalidPath:
+                continue  # deleted between list and read
+            except Exception as e:
+                logger.debug(f"Could not read ACL policy '{name}' in {display_path}: {e}")
+                self.stats.increment_errors(display_path, f"ACL policy body {name}: {type(e).__name__}")
+                continue
+            if isinstance(body, str):
+                assessments[name] = assess_policy(body)
+        if denied:
+            self.stats.increment_forbidden(display_path, BODY_DENIED_SCOPE)
+        return assessments
 
     def _fetch_sentinel_policies(self, client: Any, display_path: str) -> tuple[dict[str, Any], dict[str, Any]]:
         """Collect this namespace's Sentinel EGP and RGP policies.
@@ -640,7 +679,7 @@ class NamespaceAuditor:
                 secret_engines = client.sys.list_mounted_secrets_engines()["data"]
                 logger.debug(f"Found {len(secret_engines)} secret engines for namespace: {display_path}")
 
-                acl_policies = self._fetch_acl_policies(client, display_path)
+                acl_policies, acl_assessments = self._fetch_acl_policies(client, display_path)
                 egp_policies, rgp_policies = self._fetch_sentinel_policies(client, display_path)
 
                 with self.thread_lock:
@@ -653,6 +692,8 @@ class NamespaceAuditor:
                     # Stored unconditionally, empty list included: a namespace
                     # defining no policies of its own is a real answer.
                     self.data.acl_policies[stored_namespace_path] = acl_policies
+                    if acl_assessments:
+                        self.data.acl_assessments[stored_namespace_path] = acl_assessments
                     # Only recorded where present: an entry per namespace on a
                     # Community cluster would put an empty row in every table.
                     if egp_policies:
@@ -768,6 +809,13 @@ class NamespaceAuditor:
                 },
             )
 
+        # Opt-in: the reduced assessments (hashes and flagged rules, never bodies).
+        if self.data.acl_assessments:
+            write_json(
+                path_for("acl-policy-review", "json"),
+                convert_namespace_keys({ns: {name: a.to_dict() for name, a in policies.items()} for ns, policies in self.data.acl_assessments.items()}),
+            )
+
         # Enterprise-only: written only when license data was successfully read.
         self._write_license(path_for("license", "json"))
 
@@ -793,6 +841,7 @@ class NamespaceAuditor:
                 ("auth-methods", "json"),
                 ("secrets-engines", "json"),
                 ("acl-policies", "json"),
+                ("acl-policy-review", "json"),
                 ("sentinel-policies", "json"),
                 ("license", "json"),
                 ("namespace-findings", "json"),

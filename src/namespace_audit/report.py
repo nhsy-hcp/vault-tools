@@ -42,6 +42,7 @@ from src.common.findings import (
     sort_findings,
 )
 from src.common.markdown import md_escape, md_table, render_findings_table
+from src.namespace_audit.acl import acl_policy_findings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .main import AuditData, AuditStats
@@ -410,6 +411,23 @@ def render_acl_policies(acl_policies: dict[str, list[str]], max_rows: int = MAX_
     if len(acl_policies) > max_rows:
         table += f"\n\n_Showing {max_rows} of {len(acl_policies)} namespaces — see the ACL policies summary CSV for the full list._"
     return table
+
+
+def render_acl_review_note(acl_assessments: dict[str, dict[str, Any]]) -> str:
+    """One line on whether bodies were assessed; the findings carry the detail.
+
+    No per-policy table: the flagged paths are already in the findings, and a
+    table of every assessed policy would repeat the names list above.
+    """
+    if not acl_assessments:
+        return "_Permissions were not assessed: only policy names were listed. Run with `--acl-bodies` and attach `audit-policy-acl-reader.hcl` to review what each policy grants._"
+    total = sum(len(p) for p in acl_assessments.values())
+    flagged = sum(1 for p in acl_assessments.values() for a in p.values() if a.flagged)
+    unparsed = sum(1 for p in acl_assessments.values() for a in p.values() if not a.parsed)
+    note = f"Permissions assessed for {total} polic{'y' if total == 1 else 'ies'} (built-ins included, `root` excluded): {flagged} with flagged rules"
+    if unparsed:
+        note += f", {unparsed} could not be parsed"
+    return note + ". Each rule is judged on its own — a `deny` elsewhere, or another policy on the same token, can narrow it. See **Security observations**."
 
 
 def render_sentinel_policies(collection: dict[str, Any], kind: str, max_rows: int = MAX_REPORT_NODES) -> str:
@@ -784,6 +802,8 @@ def collect_findings(
 
     findings.extend(_collect_license_findings(data, now))
 
+    findings.extend(acl_policy_findings(data.acl_assessments))
+
     # Judged against the node's own clock at collection, not ``now``: the walk
     # can take minutes, and that must not read as replication lag.
     findings.extend(health_findings(data.cluster_health))
@@ -1058,6 +1078,8 @@ def build_markdown_report(
         "Policies defined in each namespace. Vault's own `default`, `root` and `default-ceiling` are present everywhere and are excluded.",
         "",
         render_acl_policies(data.acl_policies),
+        "",
+        render_acl_review_note(data.acl_assessments),
         "",
         *sentinel_sections,
         "",

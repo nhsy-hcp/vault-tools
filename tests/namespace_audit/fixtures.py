@@ -32,6 +32,7 @@ def make_hvac_client(**overrides):
         "list_rgp_policies": {"data": {"keys": []}},
         "read_egp_policy": {"data": {}},
         "read_rgp_policy": {"data": {}},
+        "read_acl_policy": {"data": {"name": "", "policy": ""}},
     }
     for name, value in {**defaults, **overrides}.items():
         getattr(client.sys, name).return_value = value

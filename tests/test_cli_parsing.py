@@ -210,3 +210,11 @@ class TestClusterAuditCommand:
 
     def test_failed_run_exits_1(self, monkeypatch, tmp_path):
         assert self._run(monkeypatch, tmp_path, ["cluster-audit"], None) == 1
+
+
+class TestAclBodiesFlag:
+    def test_off_by_default(self):
+        assert _build_parser().parse_args(["namespace-audit"]).acl_bodies is False
+
+    def test_opt_in(self):
+        assert _build_parser().parse_args(["namespace-audit", "--acl-bodies"]).acl_bodies is True
