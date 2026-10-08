@@ -32,7 +32,7 @@ tasks:
       - echo "Checking virtual environment..."
       - test -d .venv || (echo "❌ Virtual environment not found. Run 'task init'" && exit 1)
       - echo "Checking vault binary..."
-      - command -v vault >/dev/null 2>&1 || echo "⚠️  vault binary not found. Install from https://www.vaultproject.io/downloads"
+      - command -v vault >/dev/null 2>&1 || echo "⚠️  vault binary not found. Install from https://www.vaultproject.io/downloads (needed for the dev server and the policy format check in task lint)"
       - echo "✅ All dependencies satisfied"
 
   up:
@@ -82,6 +82,11 @@ tasks:
       - echo "Running pre-commit hooks..."
       - uv run pre-commit run --all-files
       - echo "✅ All linting checks passed"
+
+  fmt:policy:
+    desc: "Format the Vault policy files (*.hcl) in place with vault policy fmt"
+    cmds:
+      - ./scripts/check-policy-fmt.sh --fix {{.CLI_ARGS}}
 
   test:
     desc: "Execute the local unit and integration test suite"
