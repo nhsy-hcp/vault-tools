@@ -172,7 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser_audit.add_argument(
         "--no-sentinel",
         action="store_true",
-        help="Skip Sentinel EGP/RGP policy collection. Costs one LIST plus one read per policy per namespace on Vault Enterprise; a no-op elsewhere.",
+        help="Skip Sentinel EGP/RGP policy collection. Costs one LIST per namespace on Vault Enterprise, plus one read per policy when the token can read bodies; a no-op elsewhere.",
     )
 
     # Cluster Audit command

@@ -62,11 +62,40 @@ command -v vault >/dev/null 2>&1 || {
 # the exit status alone proves nothing -- only the message separates "no
 # Sentinel here" from "no policies yet", which is the same ambiguity the audit
 # tool itself has to work around.
-probe="$(vault list sys/policies/egp 2>&1 || true)"
-if [[ "$probe" == *"unsupported path"* ]]; then
+#
+# Vault 1.x Community answers "unsupported path"; Vault 2.x Community answers
+# "enterprise-only feature". Match both, as the audit's own probe does
+# (SENTINEL_UNSUPPORTED_MARKERS in src/namespace_audit/main.py).
+#
+# On Vault 2.x the CLI hides that body for a LIST or read 404 ("No value
+# found"), so this probe only catches 1.x. The write below catches 2.x: its
+# error does carry the body, and on such a cluster nothing is written.
+sentinel_unavailable() {
+  [[ "$1" == *"unsupported path"* || "$1" == *"enterprise-only feature"* ]]
+}
+
+not_available() {
   echo "❌ Sentinel EGP/RGP is not available on this cluster." >&2
   echo "   It requires Vault Enterprise with the Governance & Policy module." >&2
   exit 1
+}
+
+# Run a vault command quietly; on failure explain a missing Sentinel, or show
+# Vault's own error.
+run_vault() {
+  local output
+  if ! output="$("$@" 2>&1)"; then
+    if sentinel_unavailable "$output"; then
+      not_available
+    fi
+    echo "$output" >&2
+    exit 1
+  fi
+}
+
+probe="$(vault list sys/policies/egp 2>&1 || true)"
+if sentinel_unavailable "$probe"; then
+  not_available
 fi
 
 for namespace in "${NAMESPACES[@]}"; do
@@ -78,20 +107,20 @@ for namespace in "${NAMESPACES[@]}"; do
 
     if [[ "$DELETE" == true ]]; then
       echo "  - deleting ${kind}/${name} in ${label}"
-      vault delete "sys/policies/${kind}/${name}" >/dev/null
+      run_vault vault delete "sys/policies/${kind}/${name}"
       continue
     fi
 
     echo "  - writing ${kind}/${name} (${level}) in ${label}"
     if [[ "$kind" == "egp" ]]; then
-      vault write "sys/policies/${kind}/${name}" \
+      run_vault vault write "sys/policies/${kind}/${name}" \
         "policy=@${POLICY_DIR}/${file}" \
         "enforcement_level=${level}" \
-        "paths=${paths}" >/dev/null
+        "paths=${paths}"
     else
-      vault write "sys/policies/${kind}/${name}" \
+      run_vault vault write "sys/policies/${kind}/${name}" \
         "policy=@${POLICY_DIR}/${file}" \
-        "enforcement_level=${level}" >/dev/null
+        "enforcement_level=${level}"
     fi
   done
 done
@@ -102,6 +131,7 @@ if [[ "$DELETE" == true ]]; then
   echo "✅ Removed ${#POLICIES[@]} Sentinel policies from ${#NAMESPACES[@]} namespace(s)"
 else
   echo "✅ Seeded ${#POLICIES[@]} no-op Sentinel policies into ${#NAMESPACES[@]} namespace(s)"
-  echo "   Run the audit and check the '## Sentinel policies' report section:"
-  echo "     python main.py namespace-audit --output-dir .tmp/audit"
+  echo "   Run the audit with a token that can read Sentinel bodies"
+  echo "   (policies/audit-policy-sentinel-reader.hcl) and check the Sentinel findings:"
+  echo "     uv run vault-tools namespace-audit --output-dir .tmp/audit"
 fi
