@@ -28,7 +28,7 @@ from rich.table import Table
 
 from src.activity_export.main import NOT_READ, run_activity_export
 from src.cluster_audit.main import run_cluster_audit_full
-from src.common.file_utils import latest_files, read_json, write_json, write_markdown
+from src.common.file_utils import latest_files, read_json, scan_files, write_json, write_markdown
 from src.common.findings import SEVERITY_ORDER, diff_documents, get_tool_version, merge_documents, run_block
 from src.common.utils import FILE_DATE_FORMAT
 from src.common.vault_client import VaultClient
@@ -44,6 +44,8 @@ MAX_REASON_LENGTH = 200
 # The reason on a step the caller left out (``--skip`` / ``--only``), as opposed
 # to one the node's state ruled out.
 USER_SKIP_REASON = "skipped: not selected (--skip/--only)"
+# The steps that read the activity window.
+WINDOW_STEPS = frozenset({"activity-export", "entity-export"})
 
 
 @dataclass
@@ -109,8 +111,10 @@ def run_full_audit(
     # Wall-clock floor for "written by this run": steps name files by local or
     # UTC date inconsistently, and same-day leftovers share their names.
     started_epoch = time.time()
-    if not (start_date and end_date):
-        start_date, end_date = default_window(started.date())
+    window: tuple[str, str] | None = None
+    if not skip >= WINDOW_STEPS:
+        window = (start_date, end_date) if start_date and end_date else default_window(started.date())
+        start_date, end_date = window
     results: list[StepResult] = []
 
     cluster = None
@@ -215,18 +219,23 @@ def run_full_audit(
     if any(r.status == "failed" for r in results):
         merged["coverage"]["complete"] = False
         merged["coverage"]["errors"].extend({"namespace": "/", "message": f"{r.name}: {r.reason}"[:MAX_REASON_LENGTH]} for r in results if r.status == "failed")
-    # Nor can one with a step left out on request: it judged nothing either. Not
-    # an error, so coverage.errors is untouched; the report's Steps and Not
-    # covered sections name it. A step the node's state ruled out is left as it
-    # was: cluster-audit's own coverage already records why.
-    if any(r.status == "skipped" and r.reason == USER_SKIP_REASON for r in results):
+    # Nor can one with a step skipped, on request or because the node (sealed,
+    # DR secondary) cannot serve authenticated reads: it judged nothing either.
+    # Not an error, so coverage.errors is untouched; the report's Steps and Not
+    # covered sections name it.
+    if any(r.status == "skipped" for r in results):
         merged["coverage"]["complete"] = False
 
     date_str = finished.strftime(FILE_DATE_FORMAT)
-    findings_path = os.path.join(output_dir, f"{cluster.file_prefix}-full-findings-{date_str}.json")
-    report_path = os.path.join(output_dir, f"{cluster.file_prefix}-full-audit-{date_str}.md")
+    # A run with steps left out on request is "partial": its own file names, so
+    # it never replaces a complete run's files, and it is never compared with
+    # one (here or by diff's auto-pick), which would read every finding of a
+    # skipped step as new or resolved.
+    kind = "partial" if skip else "full"
+    findings_path = os.path.join(output_dir, f"{cluster.file_prefix}-{kind}-findings-{date_str}.json")
+    report_path = os.path.join(output_dir, f"{cluster.file_prefix}-{kind}-audit-{date_str}.md")
     # Before writing this run's file, which may replace a same-day earlier one.
-    previous_path = latest_previous_findings(output_dir, cluster.file_prefix, started_epoch)
+    previous_path = None if skip else latest_previous_findings(output_dir, cluster.file_prefix, started_epoch)
     previous_diff = None
     if previous_path:
         try:
@@ -243,7 +252,7 @@ def run_full_audit(
         started_at=started,
         finished_at=finished,
         workers=workers,
-        window=(start_date, end_date),
+        window=window,
         merged=merged,
         steps=[StepSummary(r.name, r.status, r.reason, r.findings, r.duration) for r in results],
         health=cluster.health,
@@ -279,18 +288,8 @@ def files_written_since(output_dir: str, cluster_name: str, since: float, exclud
     than ``since`` and so is never claimed as this run's output.
     """
     exclude = {os.path.abspath(p) for p in exclude or set()}
-    found = []
-    try:
-        entries = list(os.scandir(output_dir))
-    except OSError:
-        return []
-    for entry in entries:
-        if not entry.is_file() or not entry.name.startswith(f"{cluster_name}-") or os.path.abspath(entry.path) in exclude:
-            continue
-        # One second of slack: some filesystems store whole-second mtimes.
-        if entry.stat().st_mtime >= since - 1:
-            found.append(entry.name)
-    return sorted(found)
+    # One second of slack: some filesystems store whole-second mtimes.
+    return sorted(os.path.basename(path) for mtime, path in scan_files(output_dir, f"{glob.escape(cluster_name)}-*") if mtime >= since - 1 and os.path.abspath(path) not in exclude)
 
 
 def latest_previous_findings(output_dir: str, prefix: str, before: float) -> str | None:

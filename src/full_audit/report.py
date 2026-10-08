@@ -50,7 +50,7 @@ class FullAuditContext:
     started_at: datetime
     finished_at: datetime
     workers: int
-    window: tuple[str, str]
+    window: tuple[str, str] | None  # None when no step that reads it ran
     merged: dict[str, Any]
     steps: list[StepSummary]
     health: dict[str, Any] | None = None
@@ -156,7 +156,7 @@ def _header(ctx: FullAuditContext) -> str:
         ["Coverage", coverage_text],
         ["Sentinel", sentinel],
         ["Policy bodies", _bodies_line(ctx.policy_bodies)],
-        ["Activity window", f"{ctx.window[0]} to {ctx.window[1]}"],
+        ["Activity window", f"{ctx.window[0]} to {ctx.window[1]}" if ctx.window else "Not used (no export step ran)"],
         ["Findings", f"**{summary['total']}**: {_severity_line(summary['by_severity'])}"],
         ["Tool", f"vault-tools {get_tool_version()}"],
     ]

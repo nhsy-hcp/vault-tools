@@ -10,7 +10,7 @@ before the subcommand. These tests pin both positions.
 import argparse
 import json
 import tomllib
-from datetime import date
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -356,8 +356,8 @@ class TestOptionalExportWindow:
 
     def test_resolve_window_defaults_to_last_12_months_and_prints_it(self, capsys):
         args = argparse.Namespace(start_date=None, end_date=None)
-        with patch("main.date") as fake_date:
-            fake_date.today.return_value = date(2026, 10, 8)
+        with patch("main.datetime") as fake_dt:
+            fake_dt.now.return_value = datetime(2026, 10, 8, 23, 30, tzinfo=UTC)
             assert main.resolve_window(args, Mock()) == ("2025-11-01", "2026-10-08")
         assert "Window: 2025-11-01 → 2026-10-08 (default: last 12 calendar months)" in capsys.readouterr().out
 
@@ -369,11 +369,11 @@ class TestOptionalExportWindow:
         _env(monkeypatch, tmp_path, [command])
         result = ActivityExportResult([], [], _findings_doc([]))
         with (
-            patch("main.date") as fake_date,
+            patch("main.datetime") as fake_dt,
             patch("main.VaultClient.validate_connection", return_value=ConnectionInfo("c", "1.20.0+ent", True, "id")),
             patch(target, return_value=result) as run,
         ):
-            fake_date.today.return_value = date(2026, 10, 8)
+            fake_dt.now.return_value = datetime(2026, 10, 8, tzinfo=UTC)
             main.main()
         assert run.call_args.args[1:3] == ("2025-11-01", "2026-10-08")
 
@@ -398,22 +398,31 @@ class TestFullAuditStepSelection:
             _build_parser().parse_args(["full-audit", "--skip", "cluster-audit"])
 
     @pytest.mark.parametrize(
-        "flags,expected",
+        "flags,expected,window",
         [
-            ([], frozenset()),
-            (["--skip", "entity-export"], frozenset({"entity-export"})),
-            (["--only", "namespace-audit"], frozenset({"identity-audit", "activity-export", "entity-export"})),
-            (["--only", "namespace-audit", "--only", "entity-export"], frozenset({"identity-audit", "activity-export"})),
+            ([], frozenset(), ("2026-01-01", "2026-01-31")),
+            (["--skip", "entity-export"], frozenset({"entity-export"}), ("2026-01-01", "2026-01-31")),
+            (["--only", "namespace-audit"], frozenset({"identity-audit", "activity-export", "entity-export"}), (None, None)),
+            (["--only", "namespace-audit", "--only", "entity-export"], frozenset({"identity-audit", "activity-export"}), ("2026-01-01", "2026-01-31")),
+            (["--only", "cluster-audit"], frozenset({"namespace-audit", "identity-audit", "activity-export", "entity-export"}), (None, None)),
         ],
-        ids=["none", "skip", "only", "only-twice"],
+        ids=["none", "skip", "only", "only-twice", "only-cluster"],
     )
-    def test_skip_set_passed_to_run_full_audit(self, flags, expected, monkeypatch, tmp_path):
+    def test_skip_set_passed_to_run_full_audit(self, flags, expected, window, monkeypatch, tmp_path):
         _env(monkeypatch, tmp_path, ["full-audit", "-s", "2026-01-01", "-e", "2026-01-31", *flags])
         with patch("main.run_full_audit", return_value=_findings_doc([])) as run:
             main.main()
         kwargs = run.call_args.kwargs
         assert kwargs["skip"] == expected
-        assert (kwargs["start_date"], kwargs["end_date"]) == ("2026-01-01", "2026-01-31")
+        # The window goes only to runs with an export step.
+        assert (kwargs["start_date"], kwargs["end_date"]) == window
+
+    def test_window_is_not_validated_or_printed_without_an_export_step(self, monkeypatch, tmp_path, capsys):
+        _env(monkeypatch, tmp_path, ["full-audit", "--only", "namespace-audit", "-s", "2025-13-01", "-e", "2025-12-31"])
+        with patch("main.run_full_audit", return_value=_findings_doc([])) as run:
+            main.main()
+        run.assert_called_once()
+        assert "Window:" not in capsys.readouterr().out
 
     def test_failed_run_exits_1(self, monkeypatch, tmp_path):
         _env(monkeypatch, tmp_path, ["full-audit"])

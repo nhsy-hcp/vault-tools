@@ -66,6 +66,27 @@ def test_no_paths_pairs_only_the_newest_files_cluster(tmp_path):
     assert f"new: {os.path.basename(newest)}" in text
 
 
+def test_cluster_name_containing_the_infix_keeps_its_own_prefix(tmp_path):
+    name = "x-full-findings-y"
+    older = _write(tmp_path / f"{name}-full-findings-20261001.json", [], age=300)
+    # A cluster called "x" must not be paired with it.
+    _write(tmp_path / "x-full-findings-20261005.json", [ITEM], age=200)
+    newest = _write(tmp_path / f"{name}-full-findings-20261008.json", [ITEM], age=100)
+    console = _console()
+
+    run_diff(None, None, str(tmp_path), console=console)
+
+    text = console.export_text()
+    assert f"old: {os.path.basename(older)}" in text and f"new: {os.path.basename(newest)}" in text
+
+
+def test_partial_runs_are_never_auto_picked(tmp_path):
+    _write(tmp_path / "c-full-findings-20261001.json", [], age=300)
+    _write(tmp_path / "c-partial-findings-20261008.json", [ITEM], age=100)
+    with pytest.raises(FileProcessingError, match="found 1"):
+        run_diff(None, None, str(tmp_path), console=Console(quiet=True))
+
+
 def test_newest_cluster_with_one_run_is_an_error(tmp_path):
     _write(tmp_path / "dev-full-findings-20261001.json", [], age=300)
     _write(tmp_path / "dev-full-findings-20261002.json", [], age=200)

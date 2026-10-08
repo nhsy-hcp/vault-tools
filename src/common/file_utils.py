@@ -138,6 +138,27 @@ def read_csv(file_path: str) -> list[dict[str, Any]]:
         raise FileProcessingError(f"Failed to read or parse {file_path}") from e
 
 
+def scan_files(output_dir: str, pattern: str) -> list[tuple[float, str]]:
+    """``(mtime, path)`` for each regular file in ``output_dir`` whose name matches ``pattern``.
+
+    ``pattern`` is an ``fnmatch`` pattern matched case-sensitively against the
+    basename. Never raises: an unreadable directory, or a file that vanishes
+    mid-scan, yields fewer results rather than an error.
+    """
+    found = []
+    try:
+        entries = list(os.scandir(output_dir))
+    except OSError:
+        return []
+    for entry in entries:
+        try:
+            if entry.is_file() and fnmatch.fnmatchcase(entry.name, pattern):
+                found.append((entry.stat().st_mtime, entry.path))
+        except OSError:
+            continue
+    return found
+
+
 def latest_files(output_dir: str, pattern: str, n: int = 1, before: float | None = None) -> list[str]:
     """Paths of the ``n`` newest regular files in ``output_dir`` whose name matches ``pattern``, newest first.
 
@@ -148,18 +169,5 @@ def latest_files(output_dir: str, pattern: str, n: int = 1, before: float | None
     an unreadable directory, or a file that vanishes mid-scan, yields fewer
     results rather than an error.
     """
-    candidates = []
-    try:
-        entries = list(os.scandir(output_dir))
-    except OSError:
-        return []
-    for entry in entries:
-        try:
-            if not entry.is_file() or not fnmatch.fnmatchcase(entry.name, pattern):
-                continue
-            mtime = entry.stat().st_mtime
-        except OSError:
-            continue
-        if before is None or mtime < before - 1:
-            candidates.append((mtime, entry.path))
+    candidates = [(mtime, path) for mtime, path in scan_files(output_dir, pattern) if before is None or mtime < before - 1]
     return [path for _, path in sorted(candidates, reverse=True)[: max(n, 0)]]

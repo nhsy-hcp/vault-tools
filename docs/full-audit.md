@@ -10,12 +10,17 @@ uv run vault-tools full-audit --names-only             # policy names only, even
 uv run vault-tools full-audit --fail-on medium --fail-on-gaps   # for CI: exit 3 on findings, 2 on gaps
 uv run vault-tools full-audit --skip entity-export     # token without the entity-export sudo rule
 uv run vault-tools full-audit --only namespace-audit   # cluster-audit always runs as well
+uv run vault-tools full-audit --only cluster-audit     # just cluster health, with the combined report
 ```
 
 `--skip` and `--only` are repeatable and mutually exclusive; cluster-audit
 cannot be skipped, because every other step needs what it reads. A step left
 out is listed as skipped in the report and makes `coverage.complete` false,
-since nothing in it was judged.
+since nothing in it was judged. Such a run is **partial**: it writes
+`{cluster-name}-partial-findings-{YYYYMMDD}.json` and `-partial-audit-….md`
+instead, so it never replaces a complete run's files, and it is never compared
+with one (no "Changes since the last run", and `diff` never auto-picks it). The
+activity window is only read, validated and printed when an export step runs.
 
 The report path is printed at the end under **Combined files**. Run it again
 later and the new report gains a **Changes since the last run** section
@@ -57,4 +62,5 @@ ranked findings. vault-tools never runs the drafted commands.
 
 `{cluster-name}-full-findings-{YYYYMMDD}.json` holds the merged findings. A
 failing step does not stop the rest, but it does mark coverage incomplete. On a
-sealed or DR-secondary node only cluster-audit runs.
+sealed or DR-secondary node only cluster-audit runs, and the skipped steps mark
+coverage incomplete too, so `--fail-on-gaps` exits 2 there.
