@@ -83,6 +83,11 @@ RULES: dict[str, Rule] = {
     "VT-SNAP-001": Rule("Medium", "backup", "No automated Raft snapshots configured"),
     "VT-SNAP-002": Rule("Medium", "backup", "Automated snapshot failing or overdue"),
     "VT-SNAP-003": Rule("Info", "backup", "Automated snapshots stored on the node's local disk"),
+    "VT-POL-001": Rule("Medium", "access", "ACL policy grants write or sudo on every path"),
+    "VT-POL-002": Rule("Medium", "access", "ACL policy can change access control"),
+    "VT-POL-003": Rule("Low", "access", "ACL policy grants sudo"),
+    "VT-POL-004": Rule("Low", "access", "Same-named ACL policy differs across namespaces"),
+    "VT-POL-005": Rule("Info", "access", "ACL policy could not be parsed"),
 }
 
 

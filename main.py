@@ -163,6 +163,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser_audit = subparsers.add_parser("namespace-audit", help="Audit Vault namespaces.", parents=[common, gating])
     parser_audit.add_argument("-w", "--workers", type=int, default=4, help="Number of worker threads.")
     parser_audit.add_argument(
+        "--acl-bodies",
+        action="store_true",
+        help="Also read and assess ACL policy bodies (VT-POL-*). Needs the audit-policy-acl-reader.hcl add-on; bodies are never written out.",
+    )
+    parser_audit.add_argument(
         "--no-sentinel",
         action="store_true",
         help="Skip Sentinel EGP/RGP policy collection. Costs one LIST plus one read per policy per namespace on Vault Enterprise; a no-op elsewhere.",
@@ -309,6 +314,7 @@ def main() -> None:
                 worker_threads=args.workers,
                 output_dir=global_config.output_dir,
                 collect_sentinel=not args.no_sentinel,
+                collect_acl_bodies=args.acl_bodies,
             )
             document = auditor.audit_cluster()
             if document is None:
