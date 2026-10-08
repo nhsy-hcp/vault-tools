@@ -4,7 +4,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import hvac
@@ -25,7 +25,7 @@ from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import write_csv, write_json, write_markdown
 from src.common.utils import FILE_DATE_FORMAT, normalise_namespace_path
 from src.common.vault_client import VaultClient, VaultConnectionError, VaultPermissionError
-from src.namespace_audit.report import build_markdown_report
+from src.namespace_audit.report import build_findings_json, build_markdown_report
 
 logger = logging.getLogger(__name__)
 
@@ -212,12 +212,20 @@ class NamespaceAuditor:
         # an attribute that stays empty prints nothing, where a return value
         # would hand the printer a Mock to iterate.
         self.output_files: list[str] = []
+        # The findings.json document of the last completed run, or None when the
+        # run failed before writing reports. main.py derives the exit code from it.
+        self.findings_document: dict[str, Any] | None = None
         # First-denial-per-namespace guard for the per-policy reads, so a
         # namespace holding 40 unreadable policies contributes one access-gap
         # row rather than 40. Keyed by (namespace, kind); guarded by thread_lock.
         self._sentinel_read_denied: set[tuple[str, str]] = set()
 
-    def audit_cluster(self, namespace_path: str = ""):
+    def audit_cluster(self, namespace_path: str = "") -> dict[str, Any] | None:
+        """Walk the tree and write every report.
+
+        Returns the findings.json document, or None when the audit failed — the
+        failure itself is already reported on the console by then.
+        """
         start_time = time.time()
         display_ns = namespace_path if namespace_path else "root"
         self.start_namespace = namespace_path
@@ -335,6 +343,7 @@ class NamespaceAuditor:
                     "forbidden": self.stats.forbidden_count,
                 },
             )
+            return self.findings_document
 
         except VaultConnectionError as e:
             error_msg = str(e)
@@ -350,6 +359,7 @@ class NamespaceAuditor:
                 duration_seconds=time.time() - start_time,
                 error=error_msg,
             )
+            return None
         except Exception as e:
             error_msg = str(e)
             logger.exception(f"An unexpected error occurred during the audit: {error_msg}")
@@ -364,6 +374,7 @@ class NamespaceAuditor:
                 duration_seconds=time.time() - start_time,
                 error=error_msg,
             )
+            return None
 
     def _fetch_system_lease_ttls(self) -> tuple[int, int] | None:
         """Read the cluster's default and max lease TTLs.
@@ -729,6 +740,9 @@ class NamespaceAuditor:
 
     def _write_reports(self, cluster_name: str):
         date_str = datetime.now().strftime(FILE_DATE_FORMAT)
+        # One clock for every rendered file, so time-based findings (license
+        # expiry) agree between the markdown and findings.json.
+        generated_at = datetime.now(UTC)
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -777,6 +791,8 @@ class NamespaceAuditor:
         # Enterprise-only: written only when license data was successfully read.
         self._write_license(path_for("license", "json"))
 
+        self._write_findings_json(path_for("namespace-findings", "json"), cluster_name, generated_at)
+
         # Write CSV summaries
         self._write_namespace_summary(path_for("summary-namespaces", "csv"))
         self._write_auth_methods_summary(path_for("summary-auth-methods", "csv"))
@@ -799,6 +815,7 @@ class NamespaceAuditor:
                 ("acl-policies", "json"),
                 ("sentinel-policies", "json"),
                 ("license", "json"),
+                ("namespace-findings", "json"),
                 ("summary-namespaces", "csv"),
                 ("summary-auth-methods", "csv"),
                 ("summary-secrets-engines", "csv"),
@@ -808,7 +825,7 @@ class NamespaceAuditor:
         ]
         sibling_files = [os.path.basename(p) for p in candidates if os.path.exists(p)]
         report_path = path_for("audit-report", "md")
-        self._write_markdown_report(report_path, cluster_name, sibling_files)
+        self._write_markdown_report(report_path, cluster_name, sibling_files, generated_at)
         # The report indexes its siblings, so it is not in that list itself —
         # but the console list is about what landed on disk, and the report is
         # the file most readers want the path to.
@@ -819,6 +836,7 @@ class NamespaceAuditor:
         file_path: str,
         cluster_name: str,
         sibling_files: list[str],
+        generated_at: datetime | None = None,
     ):
         """Render and write the markdown audit report.
 
@@ -835,6 +853,7 @@ class NamespaceAuditor:
                 vault_addr=self.vault_client.vault_addr,
                 worker_threads=self.worker_threads,
                 output_files=sibling_files,
+                generated_at=generated_at,
                 system_lease_ttls=self.system_lease_ttls,
                 sentinel_supported=self.sentinel_supported,
             )
@@ -842,6 +861,25 @@ class NamespaceAuditor:
         except Exception as e:
             logger.exception(f"Failed to write the markdown report: {e}")
             self.console.print(f"[yellow]⚠[/yellow] Markdown report could not be written: {e}")
+
+    def _write_findings_json(self, file_path: str, cluster_name: str, generated_at: datetime) -> None:
+        """Write the machine-readable findings in the vault-ops schema.
+
+        Always written, even with zero findings: an empty list is the result a
+        CI gate or a later ``diff`` needs, and a missing file reads as a failure.
+        """
+        self.findings_document = build_findings_json(
+            cluster_name,
+            self.data,
+            self.stats,
+            start_namespace=self.start_namespace,
+            vault_addr=self.vault_client.vault_addr,
+            worker_threads=self.worker_threads,
+            generated_at=generated_at,
+            system_lease_ttls=self.system_lease_ttls,
+            sentinel_supported=self.sentinel_supported,
+        )
+        write_json(file_path, self.findings_document)
 
     def _print_output_files(self) -> None:
         """List what the run wrote, after the summary table.

@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nhsy-hcp/vault-ops-skill/schemas/findings.schema.json",
+  "title": "vault-ops findings",
+  "type": "object",
+  "required": ["schema_version", "tool", "run", "cluster_context", "coverage", "summary", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"type": "string", "pattern": "^1\\.\\d+\\.\\d+$"},
+    "tool": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {"name": {"type": "string"}, "version": {"type": "string"}}
+    },
+    "run": {
+      "type": "object",
+      "required": ["cluster_name", "vault_addr", "start_namespace", "started_at", "finished_at", "duration_seconds"],
+      "properties": {
+        "cluster_name": {"type": "string"},
+        "vault_addr": {"type": "string"},
+        "start_namespace": {"type": "string"},
+        "started_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": "string", "format": "date-time"},
+        "duration_seconds": {"type": "number", "minimum": 0},
+        "worker_threads": {"type": "integer", "minimum": 1}
+      }
+    },
+    "cluster_context": {
+      "type": "object",
+      "required": ["system_max_lease_ttl_seconds", "system_default_lease_ttl_seconds", "sentinel"],
+      "properties": {
+        "vault_version": {"type": ["string", "null"]},
+        "enterprise": {"type": ["boolean", "null"]},
+        "system_max_lease_ttl_seconds": {"type": ["integer", "null"]},
+        "system_default_lease_ttl_seconds": {"type": ["integer", "null"]},
+        "sentinel": {"enum": ["supported", "unsupported", "skipped"]}
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "required": ["namespaces_processed", "complete", "denied", "errors"],
+      "additionalProperties": false,
+      "properties": {
+        "namespaces_processed": {"type": "integer", "minimum": 0},
+        "complete": {"type": "boolean"},
+        "denied": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["namespace", "scope"],
+            "properties": {"namespace": {"type": "string"}, "scope": {"type": "string"}}
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["namespace", "message"],
+            "properties": {"namespace": {"type": "string"}, "message": {"type": "string", "maxLength": 200}}
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total", "by_severity", "by_rule"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "by_severity": {
+          "type": "object",
+          "required": ["medium", "low", "info"],
+          "additionalProperties": {"type": "integer"}
+        },
+        "by_rule": {"type": "object", "additionalProperties": {"type": "integer"}}
+      }
+    },
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "required": ["fingerprint", "rule_id", "severity", "category", "namespace", "object", "title", "detail", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+        "rule_id": {"type": "string", "pattern": "^VT-[A-Z]+-\\d{3}$"},
+        "severity": {"enum": ["critical", "high", "medium", "low", "info"]},
+        "category": {"enum": ["lifecycle", "exposure", "lease", "replication", "hygiene", "governance", "availability", "identity", "clients", "audit", "backup", "access"]},
+        "namespace": {"type": "string"},
+        "object": {
+          "type": "object",
+          "required": ["kind", "path", "type"],
+          "properties": {
+            "kind": {"enum": ["auth_mount", "secrets_mount", "namespace", "egp_policy", "rgp_policy", "cluster", "entity", "audit_device", "snapshot_config", "acl_policy"]},
+            "path": {"type": ["string", "null"]},
+            "type": {"type": ["string", "null"]}
+          }
+        },
+        "title": {"type": "string"},
+        "detail": {"type": "string"},
+        "evidence": {"type": "object"}
+      }
+    }
+  }
+}

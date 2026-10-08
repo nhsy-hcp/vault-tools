@@ -92,7 +92,7 @@ class TestEndToEndWorkflow:
 
             # Verify the workflow completed
             mock_vault_client.validate_connection.assert_called_once()
-            assert mock_write_json.call_count == 3
+            assert mock_write_json.call_count == 4  # namespaces, auth, secrets, findings
             assert mock_write_csv.call_count == 3
 
     def test_error_recovery_workflow(self, mock_vault_client, mock_threading):

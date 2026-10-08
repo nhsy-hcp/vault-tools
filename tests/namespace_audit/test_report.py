@@ -505,7 +505,7 @@ class TestSentinelFindings:
         """Policy names share the column with mount paths."""
         rendered = render_findings(collect_findings(sentinel_data))
 
-        assert "| Namespace | Object | Type | Observation |" in rendered
+        assert "| Rule | Namespace | Object | Type | Observation |" in rendered
 
 
 class TestAccessGaps:

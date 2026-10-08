@@ -212,7 +212,7 @@ class TestReportGeneration:
             auditor._write_reports("test-cluster")
 
             # Verify files were written
-            assert mock_write_json.call_count == 3
+            assert mock_write_json.call_count == 4  # namespaces, auth, secrets, findings
             assert mock_write_csv.call_count == 3
 
     def test_write_reports_also_writes_the_markdown_report(self, auditor):
