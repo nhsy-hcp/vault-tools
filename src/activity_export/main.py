@@ -1,15 +1,21 @@
 import logging
+import os
 import time
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, NamedTuple
 
+import hvac
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
+from src.activity_export.findings import client_count, parse_activity_config, usage_findings
 from src.common.audit_logger import get_audit_logger
-from src.common.file_utils import FileProcessingError, write_csv, write_json
+from src.common.exceptions import VaultPermissionError
+from src.common.file_utils import FileProcessingError, write_csv, write_json, write_markdown
+from src.common.findings import Finding, build_findings_document, coverage_block, get_tool_version, run_block, sort_findings
+from src.common.markdown import md_table, render_findings_table
 from src.common.utils import FILE_DATE_FORMAT
 from src.common.vault_client import VaultAPIError, VaultClient
 
@@ -39,6 +45,156 @@ def get_activity_data(client: VaultClient, start_date: str, end_date: str) -> di
     except VaultAPIError as e:
         logger.error(f"Vault API request failed: {e}")
         raise
+
+
+class ActivityExportResult(NamedTuple):
+    namespaces: list[dict[str, Any]]
+    mounts: list[dict[str, Any]]
+    # findings.json document for the VT-CLI checks; main.py derives the exit code from it.
+    findings_document: dict[str, Any]
+
+
+FINDINGS_CSV_HEADERS = ["rule_id", "severity", "namespace", "object", "detail"]
+
+
+def _read_optional(client: VaultClient, path: str, denied: list[tuple[str, str]], errors: list[tuple[str, str]]) -> dict[str, Any] | None:
+    """A root-level read that only enriches the checks. {} on 404, None when denied or failed."""
+    try:
+        response = client.get(path)
+        return response.get("data", response) if isinstance(response, dict) else {}
+    except VaultPermissionError:
+        denied.append(("", path))
+    except Exception as e:
+        if isinstance(e.__cause__, hvac.exceptions.InvalidPath):
+            return {}
+        errors.append(("", f"{path}: {type(e).__name__}"))
+    return None
+
+
+def _covers_current_month(end_date: str, now: datetime) -> bool:
+    """The billing-period query excludes the month in progress; read it only if the window reaches it."""
+    return end_date >= now.strftime("%Y-%m-01")
+
+
+def render_activity_findings_report(
+    cluster_name: str,
+    data: dict[str, Any],
+    activity_log: dict[str, Any] | None,
+    findings: list[Finding],
+    denied: list[tuple[str, str]],
+    errors: list[tuple[str, str]],
+    *,
+    start_date: str,
+    end_date: str,
+    generated_at: datetime,
+    current: dict[str, Any] | None,
+    output_files: list[str],
+) -> str:
+    """The client-usage findings report. Pure: everything comes in as arguments."""
+    if activity_log is None:
+        log_state = "unreadable — see access gaps"
+    else:
+        log_state = f"`{activity_log.get('enabled')}`" + ("" if activity_log.get("recording") is not False else " — **nothing is recorded, so every count below reads zero**")
+    rows = [
+        ["Cluster", cluster_name],
+        ["Generated", generated_at.strftime("%Y-%m-%d %H:%M:%S UTC")],
+        ["Tool version", f"vault-tools {get_tool_version()}"],
+        ["Requested window", f"{start_date} to {end_date}"],
+        ["Window Vault reported", f"{(data.get('start_time') or '—')[:10]} to {(data.get('end_time') or '—')[:10]}"],
+        ["Activity log", log_state],
+        ["Clients in window", client_count(data.get("total"))],
+        ["Clients this month (in progress)", "not read" if current is None else client_count(current)],
+    ]
+    gaps = [[scope, "denied"] for _, scope in denied] + [[message, "error"] for _, message in errors]
+    sections = [
+        f"# Vault Client Usage Findings — {cluster_name}",
+        "",
+        md_table(["Field", "Value"], rows),
+        "",
+        "Vault computes client counts on a delay of about 10 minutes after startup, so zero counts with the log recording can just mean a new cluster.",
+        "",
+        "## Access gaps",
+        "",
+        md_table(["Read", "Result"], gaps) if gaps else "None.",
+        "",
+        "## Security observations",
+        "",
+        render_findings_table(findings, "_No observations — no token-only sprawl, sharp growth, per-run identities or root-namespace concentration._"),
+        "",
+        "## Output files",
+        "",
+        md_table(["File"], [[f] for f in output_files]),
+        "",
+    ]
+    return "\n".join(sections)
+
+
+def assess_activity(
+    client: VaultClient,
+    data: dict[str, Any],
+    cluster_name: str,
+    start_date: str,
+    end_date: str,
+    output_dir: str,
+    is_enterprise: bool | None = None,
+    started_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Run the VT-CLI checks over exported activity and write their findings files.
+
+    Never raises for the extra reads: an unreadable counters/config or month in
+    progress leaves those checks unjudged and is recorded in coverage.
+    """
+    started = started_at or datetime.now(UTC)
+    denied: list[tuple[str, str]] = []
+    errors: list[tuple[str, str]] = []
+    activity_log = parse_activity_config(_read_optional(client, "sys/internal/counters/config", denied, errors))
+    current = _read_optional(client, "sys/internal/counters/activity/monthly", denied, errors) if _covers_current_month(end_date, started) else None
+    findings = sort_findings(usage_findings(data, current, is_enterprise, activity_log))
+    generated = datetime.now(UTC)
+
+    document = build_findings_document(
+        findings,
+        run=run_block(cluster_name, client.vault_addr or "", "", started, generated),
+        cluster_context={
+            "vault_version": None,
+            "enterprise": is_enterprise,
+            "system_max_lease_ttl_seconds": None,
+            "system_default_lease_ttl_seconds": None,
+            "sentinel": "skipped",
+        },
+        coverage=coverage_block(len(data.get("by_namespace") or []), denied, errors),
+        tool_version=get_tool_version(),
+    )
+
+    date_str = datetime.now().strftime(FILE_DATE_FORMAT)
+    base = os.path.join(output_dir, f"{cluster_name}-activity-findings-{date_str}")
+    written = [f"{base}.json"]
+    write_json(f"{base}.json", document)
+    if findings:
+        # Only with rows, like the other summary CSVs: a header alone is noise.
+        write_csv(
+            f"{base}.csv",
+            [{"rule_id": f.rule_id, "severity": f.severity, "namespace": f.namespace or "/", "object": f.mount, "detail": f.detail} for f in findings],
+            FINDINGS_CSV_HEADERS,
+        )
+        written.append(f"{base}.csv")
+    write_markdown(
+        f"{base}.md",
+        render_activity_findings_report(
+            cluster_name,
+            data,
+            activity_log,
+            findings,
+            denied,
+            errors,
+            start_date=start_date,
+            end_date=end_date,
+            generated_at=generated,
+            current=current,
+            output_files=[os.path.basename(p) for p in written],
+        ),
+    )
+    return document
 
 
 def process_activity_data(data: dict[str, Any], cluster_name: str, output_dir: str = "outputs"):
@@ -111,8 +267,10 @@ def run_activity_export(
     cluster_name: str,
     data: dict[str, Any] | None = None,
     output_dir: str = "outputs",
-):
+    is_enterprise: bool | None = None,
+) -> ActivityExportResult:
     console = Console()
+    started_at = datetime.now(UTC)
     audit_logger = get_audit_logger()
     start_time = time.time()
 
@@ -151,6 +309,10 @@ def run_activity_export(
             namespaces_data, mounts_data = process_activity_data(data, cluster_name, output_dir)
             progress.update(task, completed=True)
 
+            task = progress.add_task("[cyan]Checking client usage patterns...", total=None)
+            findings_document = assess_activity(client, data, cluster_name, start_date, end_date, output_dir, is_enterprise, started_at)
+            progress.update(task, completed=True)
+
         duration = time.time() - start_time
 
         # Display summary table
@@ -161,6 +323,8 @@ def run_activity_export(
         table.add_row("Namespaces Exported", str(len(namespaces_data)))
         table.add_row("Mounts Exported", str(len(mounts_data)))
         table.add_row("Total Clients", str(data.get("total", {}).get("clients", 0)))
+        by_severity = findings_document["summary"]["by_severity"]
+        table.add_row("Usage findings", ", ".join(f"{n} {s}" for s, n in by_severity.items()))
         table.add_row("Duration", f"{duration:.2f} seconds")
 
         console.print()
@@ -193,7 +357,7 @@ def run_activity_export(
             filters={"start_date": start_date, "end_date": end_date},
         )
 
-        return namespaces_data, mounts_data
+        return ActivityExportResult(namespaces_data, mounts_data, findings_document)
 
     except Exception as e:
         error_msg = str(e)

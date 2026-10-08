@@ -370,8 +370,16 @@ path "sys/internal/counters/activity" {
 }
 
 # The month in progress, which the billing period above excludes. Read by
-# identity-audit so a new cluster's entities are compared with real activity.
+# identity-audit so a new cluster's entities are compared with real activity,
+# and by activity-export's usage checks when the window reaches this month.
 path "sys/internal/counters/activity/monthly" {
+  capabilities = ["read"]
+}
+
+# Activity-log configuration, read by activity-export so "the log is off" is
+# never reported as "no clients" (VT-CLI-005). Configuration only; the write
+# that turns the log on is not granted.
+path "sys/internal/counters/config" {
   capabilities = ["read"]
 }
 
