@@ -1,11 +1,12 @@
 """Tests for src/common/file_utils.py — read/write helpers."""
 
 import csv
+import os
 
 import pytest
 
 from src.common.exceptions import FileProcessingError
-from src.common.file_utils import read_csv, read_json, write_csv, write_csv_stream, write_json, write_markdown
+from src.common.file_utils import latest_files, read_csv, read_json, write_csv, write_csv_stream, write_json, write_markdown
 
 
 class TestWriteMarkdown:
@@ -151,3 +152,43 @@ class TestWriteCsvWrapper:
         target = tmp_path / "out.csv"
         write_csv(str(target), [])
         assert not target.exists()
+
+
+class TestLatestFiles:
+    """latest_files: newest first, fnmatch on the basename, optional mtime ceiling, never raises."""
+
+    NOW = 1_800_000_000.0
+
+    def _touch(self, directory, name, age):
+        path = directory / name
+        path.write_text("{}")
+        os.utime(path, (self.NOW - age, self.NOW - age))
+        return str(path)
+
+    def test_newest_first_and_limited_to_n(self, tmp_path):
+        a = self._touch(tmp_path, "c-full-findings-1.json", 300)
+        b = self._touch(tmp_path, "c-full-findings-2.json", 200)
+        c = self._touch(tmp_path, "c-full-findings-3.json", 100)
+        pattern = "*-full-findings-*.json"
+        assert latest_files(str(tmp_path), pattern) == [c]
+        assert latest_files(str(tmp_path), pattern, n=2) == [c, b]
+        assert latest_files(str(tmp_path), pattern, n=10) == [c, b, a]
+        assert latest_files(str(tmp_path), pattern, n=0) == []
+
+    def test_pattern_matches_the_basename_only_and_skips_directories(self, tmp_path):
+        keep = self._touch(tmp_path, "c-full-findings-1.json", 100)
+        self._touch(tmp_path, "c-namespace-findings-1.json", 50)
+        self._touch(tmp_path, "c-full-findings-1.md", 50)
+        self._touch(tmp_path, "C-FULL-FINDINGS-2.JSON", 10)  # case-sensitive on every OS
+        (tmp_path / "x-full-findings-dir.json").mkdir()
+        assert latest_files(str(tmp_path), "*-full-findings-*.json", n=5) == [keep]
+
+    def test_before_keeps_one_second_of_slack(self, tmp_path):
+        old = self._touch(tmp_path, "f-old.json", 10)
+        self._touch(tmp_path, "f-edge.json", 1)  # mtime == before - 1: excluded
+        self._touch(tmp_path, "f-new.json", 0.5)
+        assert latest_files(str(tmp_path), "f-*.json", n=5, before=self.NOW) == [old]
+        assert len(latest_files(str(tmp_path), "f-*.json", n=5)) == 3
+
+    def test_missing_directory_is_empty(self, tmp_path):
+        assert latest_files(str(tmp_path / "missing"), "*") == []

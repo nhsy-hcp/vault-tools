@@ -81,7 +81,8 @@ Things to know about the policy:
 - **Three rules need `sudo`.** Vault root-protects
   `sys/internal/counters/activity/export` (entity-export), listing `sys/audit`
   and listing `sys/storage/raft/snapshot-auto/config` (cluster-audit), so
-  `read` alone returns 403. Each is an exact path, which grants nothing below it:
+  `read` alone returns 403 (entity-export's error names the missing rule).
+  Each is an exact path, which grants nothing below it:
   devices cannot be enabled or disabled, and snapshot configs, which hold
   storage credentials, stay unreadable. Everything else is plain `read`/`list`.
 - **`sys/config/state/sanitized` is optional.** It supplies the cluster's lease

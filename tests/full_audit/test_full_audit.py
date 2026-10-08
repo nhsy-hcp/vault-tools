@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 from rich.console import Console
 
-from src.activity_export.main import ActivityExportResult
+from src.activity_export.main import NOT_READ, ActivityExportResult
 from src.cluster_audit.collector import ClusterCoverage, ClusterReads, LicenseResult
 from src.cluster_audit.main import ClusterAuditResult
 from src.common.findings import finding, merge_documents
@@ -195,7 +195,10 @@ def test_cli_gates_on_the_merged_document(monkeypatch, tmp_path):
     with patch("main.run_full_audit", return_value=_doc([AUD])) as run, pytest.raises(SystemExit) as exc:
         main.main()
     assert exc.value.code == 3
-    assert run.call_args.kwargs["names_only"] is True and run.call_args.kwargs["start_date"] is None
+    kwargs = run.call_args.kwargs
+    # With no -s/-e the CLI resolves the default window itself and passes it on.
+    assert kwargs["names_only"] is True and kwargs["start_date"] and kwargs["end_date"]
+    assert kwargs["skip"] == frozenset()
 
 
 class TestFilesWrittenSince:
@@ -239,3 +242,76 @@ def test_latest_previous_findings_ignores_this_run(tmp_path):
     (tmp_path / "c-full-findings-20261008.json").write_text("{}")
     assert latest_previous_findings(str(tmp_path), "c", since) == str(old)
     assert latest_previous_findings(str(tmp_path), "other", since) is None
+
+
+def test_latest_previous_findings_treats_the_prefix_literally(tmp_path):
+    (tmp_path / "c-full-findings-20261001.json").write_text("{}")
+    assert latest_previous_findings(str(tmp_path), "[c]", 1e12) is None
+    assert latest_previous_findings(str(tmp_path), "*", 1e12) is None
+
+
+ALL_STEPS = ["cluster-audit", "namespace-audit", "identity-audit", "activity-export", "entity-export"]
+
+
+class TestSkip:
+    """``skip``: the named steps are listed as skipped, never called, and coverage goes incomplete."""
+
+    @pytest.mark.parametrize("name", ALL_STEPS[1:])
+    def test_each_step_can_be_skipped(self, tmp_path, name):
+        h = Harness(tmp_path)
+        merged = h.run(skip=frozenset({name}))
+
+        assert h.calls == [s for s in ALL_STEPS if s != name]
+        assert merged["coverage"]["complete"] is False
+        # Not an error: nothing failed.
+        assert merged["coverage"]["errors"] == []
+        assert f"| {name} | skipped |" in h.report
+        assert f"**{name}** skipped: --skip" in h.report
+        assert "1 step skipped" in h.report
+        # Listed in its normal place, not appended at the end.
+        steps = h.report.split("## Steps", 1)[1]
+        positions = [steps.index(f"| {s} |") for s in ALL_STEPS]
+        assert positions == sorted(positions)
+
+    def test_skipped_namespace_audit_leaves_identity_to_discover(self, tmp_path):
+        h = Harness(tmp_path)
+        h.run(skip=frozenset({"namespace-audit"}))
+        assert h.auditor_kwargs is None
+        assert h.kwargs["identity-audit"]["namespaces"] is None
+
+    def test_skipped_identity_audit_leaves_activity_to_read_the_month(self, tmp_path):
+        h = Harness(tmp_path)
+        h.run(skip=frozenset({"identity-audit"}))
+        assert h.kwargs["activity-export"]["current_month"] is NOT_READ
+
+    def test_only_one_step(self, tmp_path):
+        h = Harness(tmp_path)
+        merged = h.run(skip=frozenset(ALL_STEPS[1:]) - {"activity-export"})
+        assert h.calls == ["cluster-audit", "activity-export"]
+        assert merged["coverage"]["complete"] is False
+        assert h.report.count("| skipped |") == 3
+
+    def test_skipping_everything_still_writes_the_combined_files(self, tmp_path):
+        h = Harness(tmp_path)
+        merged = h.run(skip=frozenset(ALL_STEPS[1:]))
+        assert h.calls == ["cluster-audit"]
+        assert merged["summary"]["by_rule"] == {"VT-AUD-001": 1}
+        assert any("-full-findings-" in p for p in h.written)
+
+    @pytest.mark.parametrize("bad", ["cluster-audit", "nope"])
+    def test_unknown_or_mandatory_step_raises_before_any_call(self, tmp_path, bad):
+        h = Harness(tmp_path)
+        with pytest.raises(ValueError, match=bad):
+            h.run(skip=frozenset({bad, "entity-export"}))
+        assert h.calls == []
+
+    def test_no_skip_keeps_coverage_complete(self, tmp_path):
+        assert Harness(tmp_path).run()["coverage"]["complete"] is True
+
+    def test_node_state_skips_are_unchanged(self, tmp_path):
+        h = Harness(tmp_path, cluster=_cluster("sealed"))
+        merged = h.run(skip=frozenset({"entity-export"}))
+        assert h.calls == ["cluster-audit"]
+        # The node-state reason wins and, as before, does not by itself mark coverage incomplete.
+        assert "node is sealed" in h.report and "skipped: --skip" not in h.report
+        assert merged["coverage"]["complete"] is True

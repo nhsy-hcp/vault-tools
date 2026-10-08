@@ -8,7 +8,14 @@ uv run vault-tools full-audit                          # activity window: the la
 uv run vault-tools full-audit -s 2026-01-01 -e 2026-06-30 --list-entities
 uv run vault-tools full-audit --names-only             # policy names only, even if the token can read bodies
 uv run vault-tools full-audit --fail-on medium --fail-on-gaps   # for CI: exit 3 on findings, 2 on gaps
+uv run vault-tools full-audit --skip entity-export     # token without the entity-export sudo rule
+uv run vault-tools full-audit --only namespace-audit   # cluster-audit always runs as well
 ```
+
+`--skip` and `--only` are repeatable and mutually exclusive; cluster-audit
+cannot be skipped, because every other step needs what it reads. A step left
+out is listed as skipped in the report and makes `coverage.complete` false,
+since nothing in it was judged.
 
 The report path is printed at the end under **Combined files**. Run it again
 later and the new report gains a **Changes since the last run** section

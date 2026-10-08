@@ -9,6 +9,9 @@ the document records coverage: what was denied or errored.
 # What changed between two runs (no Vault connection needed)
 python main.py diff outputs/old-namespace-findings.json outputs/new-namespace-findings.json
 
+# No arguments: the two newest *-full-findings-*.json for the newest file's cluster
+python main.py diff
+
 # Gate CI on the results
 python main.py namespace-audit --fail-on medium --fail-on-gaps
 ```

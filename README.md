@@ -51,7 +51,6 @@ Run with `uv run vault-tools <subcommand>` (or `python main.py`, or
 | `activity-export` | Activity log export plus client-usage checks | [Exports](docs/exports.md) |
 | `entity-export` | Client entity export | [Exports](docs/exports.md) |
 | `diff` | Compare two `findings.json` files; no Vault connection needed | [Findings and CI](docs/findings-and-ci.md) |
-| `all` | Legacy: namespace-audit and both exports | [Exports](docs/exports.md#all-legacy) |
 
 ## Documentation
 

@@ -30,9 +30,10 @@ export VAULT_TOOLS_DEBUG="true"                 # Enable debug logging
 
 Everything else is a CLI flag — see `python main.py <command> --help`. Worker
 count is `--workers`, output directory is `--output-dir` (which overrides
-`VAULT_TOOLS_OUTPUT_DIR`), the export window is `--start-date`/`--end-date`,
-and CI gating is `--fail-on`/`--fail-on-gaps`. The opt-in collections are
-`--list` (identity-audit) and `--list-entities` (full-audit). Policy bodies are
+`VAULT_TOOLS_OUTPUT_DIR`), the export window is `--start-date`/`--end-date` (both or neither; neither
+means the last 12 calendar months), full-audit's steps are chosen with
+`--skip`/`--only`, and CI gating is `--fail-on`/`--fail-on-gaps`. The opt-in collections are
+`--list-entities` (identity-audit, where `--list` is an alias, and full-audit). Policy bodies are
 read whenever the token allows; `--names-only` (namespace-audit, full-audit)
 opts out.
 
