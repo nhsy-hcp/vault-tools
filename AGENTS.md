@@ -637,6 +637,22 @@ unrelated tests. Keep it that way.
 
 ### Full audit (`src/full_audit/`)
 
+- **The report (`report.py`) mirrors the vault-ops skill's audit report**,
+  generated deterministically from a `FullAuditContext`. Every sentence in the
+  executive summary is built from a measured value; add a sentence only when it
+  reads from collected data. Keep the section order (header, executive summary,
+  metrics, cluster health and licence, inventory, findings ranked, summary,
+  changes, steps, not covered, source files).
+- **`src/common/remediation.py` is the catalogue**, ported from the skill's
+  `rules.md`: meaning, drafted command templates and watch-out notes per rule,
+  plus `RANK_ORDER`. A test requires every rule in `RULES` to have an entry, so
+  a new rule needs one too. Take commands from the skill's catalogue and never
+  invent endpoints or flags. A rule with no command gets `action` text instead.
+  Commands are always "for an operator to run": vault-tools never executes them.
+- **Ranking**: High first, then `RANK_ORDER` (cluster-wide before access before
+  narrower before hygiene), then severity, then group size. Ranking by count
+  alone put 120 copies of one `admin` policy above an expiring licence.
+
 - Order: cluster-audit, namespace-audit, identity-audit, activity-export,
   entity-export. Each step is wrapped by `_run_step`, so an exception becomes a
   `failed` row and the next step runs. A failed step forces

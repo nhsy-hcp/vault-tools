@@ -10,7 +10,7 @@ from src.activity_export.main import ActivityExportResult
 from src.cluster_audit.collector import ClusterCoverage, ClusterReads, LicenseResult
 from src.cluster_audit.main import ClusterAuditResult
 from src.common.findings import finding, merge_documents
-from src.full_audit.main import build_full_report, default_window, files_written_since, run_full_audit
+from src.full_audit.main import default_window, files_written_since, latest_previous_findings, run_full_audit
 from src.identity_audit.main import IdentityAuditResult
 
 
@@ -170,18 +170,6 @@ class TestMerge:
         assert [f["rule_id"] for f in merged["findings"]] == ["VT-REPL-004", "VT-MOUNT-006"]
 
 
-def test_report_renders_merged_findings_by_rule():
-    merged = merge_documents([_doc([AUD, KV1])], run={}, cluster_context={}, tool_version="t")
-    from datetime import UTC, datetime
-
-    from src.full_audit.main import StepResult
-
-    report = build_full_report(
-        "c", merged, [StepResult("cluster-audit", "ok", document=_doc([AUD]))], vault_addr="addr", generated_at=datetime(2026, 1, 1, tzinfo=UTC), window=("a", "b"), output_files=["x.json"]
-    )
-    assert "| VT-MOUNT-006 | team-a/ |" in report and "| VT-AUD-001 | / |" in report
-
-
 @pytest.mark.parametrize("argv", [["full-audit", "-s", "2026-01-01"], ["full-audit", "-e", "2026-01-31"]])
 def test_cli_needs_both_dates_or_neither(argv, monkeypatch, tmp_path):
     import main
@@ -233,3 +221,18 @@ def test_combined_files_use_the_cluster_id_prefix(tmp_path):
     h = Harness(tmp_path)
     h.run()
     assert all("/c-d33099d9-full-findings-" in p for p in h.written)
+
+
+def test_latest_previous_findings_ignores_this_run(tmp_path):
+    import os
+    import time
+
+    old = tmp_path / "c-full-findings-20261001.json"
+    older = tmp_path / "c-full-findings-20260901.json"
+    for path, age in ((old, 3600), (older, 7200)):
+        path.write_text("{}")
+        os.utime(path, (time.time() - age, time.time() - age))
+    since = time.time()
+    (tmp_path / "c-full-findings-20261008.json").write_text("{}")
+    assert latest_previous_findings(str(tmp_path), "c", since) == str(old)
+    assert latest_previous_findings(str(tmp_path), "other", since) is None

@@ -170,8 +170,12 @@ def _render_raft(raft: dict[str, Any] | None, dr_secondary: bool) -> str:
         parts.append(f"**Autopilot:** healthy {_value(state.get('healthy'))}, failure tolerance {_value(state.get('failure_tolerance'))}.")
     config = (raft.get("autopilot") or {}).get("configuration")
     if config:
-        parts.append("**Autopilot configuration:** " + ", ".join(f"`{k}`={v}" for k, v in config.items()))
+        parts.append("**Autopilot configuration:** " + ", ".join(f"`{k}={_flag(v)}`" for k, v in config.items()))
     return "\n\n".join(parts) or _NOT_READ
+
+
+# Vault's defaults for the allowlisted audit options; anything else is shown.
+AUDIT_OPTION_DEFAULTS = {"hmac_accessor": True, "log_raw": False, "elide_list_responses": False, "fallback": False, "format": "json"}
 
 
 def _render_audit_devices(devices: list[dict[str, Any]] | None) -> str:
@@ -182,9 +186,13 @@ def _render_audit_devices(devices: list[dict[str, Any]] | None) -> str:
     rows = []
     for device in devices:
         options = device.get("options") or {}
-        extras = ", ".join(f"{k}={_value(v)}" for k, v in options.items() if k not in ("sink",))
-        rows.append([device["path"], device.get("type"), options.get("sink", "—"), _value(device.get("local")), extras or "—"])
-    return md_table(["Path", "Type", "Sink", "Local", "Options"], rows)
+        changed = ", ".join(f"`{k}={_flag(v)}`" for k, v in options.items() if k != "sink" and AUDIT_OPTION_DEFAULTS.get(k) != v)
+        rows.append([f"`{device['path']}`", device.get("type"), options.get("sink", "—"), _value(device.get("local")), changed or "none"])
+    return md_table(["Path", "Type", "Sink", "Local", "Non-default options"], rows)
+
+
+def _flag(value: Any) -> str:
+    return str(value).lower() if isinstance(value, bool) else str(value)
 
 
 def _render_snapshots(snapshots: dict[str, Any] | None, enterprise: bool | None, raft: Any) -> str:
@@ -209,8 +217,8 @@ def _render_snapshots(snapshots: dict[str, Any] | None, enterprise: bool | None,
 
 
 _METRIC_LABELS = {
-    "leases": ("Outstanding leases", "active node only"),
-    "irrevocable_leases": ("Irrevocable leases", "active node only"),
+    "leases": ("Outstanding leases", "active node only; VT-HLTH-006 above 100,000"),
+    "irrevocable_leases": ("Irrevocable leases", "active node only; VT-HLTH-005 above 0"),
     "in_flight_requests": ("In-flight requests", ""),
     "raft_fsm_pending": ("Raft FSM pending", ""),
     "raft_oldest_log_age_ms": ("Raft oldest log age (ms)", "leader only"),

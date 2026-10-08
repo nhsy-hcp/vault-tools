@@ -123,7 +123,7 @@ class TestAssess:
 
     def _assess(self, client, end_date="2026-10-31"):
         with patch("src.activity_export.main.write_json") as wj, patch("src.activity_export.main.write_csv") as wc, patch("src.activity_export.main.write_markdown") as wm:
-            document = assess_activity(client, _activity([_ns("a/", 60, 60)]), "c", "2026-01-01", end_date, "out", True, self.NOW)
+            document = assess_activity(client, _activity([_ns("a/", 60, 60)]), "c", "2026-01-01", end_date, "out", True, self.NOW).document
         return document, wj, wc, wm.call_args.args[1]
 
     def test_document_validates_and_files_are_written(self):

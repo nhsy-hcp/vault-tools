@@ -30,6 +30,8 @@ class IdentityAuditResult(NamedTuple):
     # The activity/monthly read, handed on to activity-export in full-audit.
     # None when unreadable; {} when nothing is recorded.
     current_month: dict[str, Any] | None
+    # Per-namespace counts (report.namespace_rows) for the full-audit report.
+    namespace_rows: list[dict[str, Any]] | None = None
 
 
 def run_identity_audit(vault_client: VaultClient, output_dir: str, **kwargs: Any) -> dict[str, Any] | None:
@@ -135,4 +137,4 @@ def run_identity_audit_full(
     console.print(f"\n[bold]Output files[/bold] → [cyan]{output_dir}/[/cyan]")
     for path in written:
         console.print(f"  [green]✓[/green] {os.path.basename(path)}")
-    return IdentityAuditResult(document, current)
+    return IdentityAuditResult(document, current, rows)

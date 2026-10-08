@@ -47,11 +47,23 @@ def get_activity_data(client: VaultClient, start_date: str, end_date: str) -> di
         raise
 
 
+class ActivityAssessment(NamedTuple):
+    document: dict[str, Any]
+    # Allowlisted counters/config fields, or None when unreadable.
+    activity_log: dict[str, Any] | None
+    # The month in progress, or None when not read or unreadable.
+    current_month: dict[str, Any] | None
+
+
 class ActivityExportResult(NamedTuple):
     namespaces: list[dict[str, Any]]
     mounts: list[dict[str, Any]]
     # findings.json document for the VT-CLI checks; main.py derives the exit code from it.
     findings_document: dict[str, Any]
+    # For the full-audit report's client usage summary.
+    activity_log: dict[str, Any] | None = None
+    total_clients: int = 0
+    current_month_clients: int | None = None
 
 
 FINDINGS_CSV_HEADERS = ["rule_id", "severity", "namespace", "object", "detail"]
@@ -145,7 +157,7 @@ def assess_activity(
     started_at: datetime | None = None,
     current_month: Any = NOT_READ,
     name_prefix: str | None = None,
-) -> dict[str, Any]:
+) -> ActivityAssessment:
     """Run the VT-CLI checks over exported activity and write their findings files.
 
     Never raises for the extra reads: an unreadable counters/config or month in
@@ -207,7 +219,7 @@ def assess_activity(
             output_files=[os.path.basename(p) for p in written],
         ),
     )
-    return document
+    return ActivityAssessment(document, activity_log, current)
 
 
 def process_activity_data(data: dict[str, Any], cluster_name: str, output_dir: str = "outputs"):
@@ -326,7 +338,8 @@ def run_activity_export(
             progress.update(task, completed=True)
 
             task = progress.add_task("[cyan]Checking client usage patterns...", total=None)
-            findings_document = assess_activity(client, data, cluster_name, start_date, end_date, output_dir, is_enterprise, started_at, current_month, prefix)
+            assessment = assess_activity(client, data, cluster_name, start_date, end_date, output_dir, is_enterprise, started_at, current_month, prefix)
+            findings_document = assessment.document
             progress.update(task, completed=True)
 
         duration = time.time() - start_time
@@ -373,7 +386,14 @@ def run_activity_export(
             filters={"start_date": start_date, "end_date": end_date},
         )
 
-        return ActivityExportResult(namespaces_data, mounts_data, findings_document)
+        return ActivityExportResult(
+            namespaces_data,
+            mounts_data,
+            findings_document,
+            assessment.activity_log,
+            client_count(data.get("total")),
+            client_count(assessment.current_month) if assessment.current_month is not None else None,
+        )
 
     except Exception as e:
         error_msg = str(e)
