@@ -14,7 +14,7 @@
 #   scripts/check-policy-fmt.sh [--fix] [file.hcl ...]
 #
 # With no files, every policies/*.hcl is checked. pre-commit passes the staged
-# .hcl files explicitly.
+# .hcl files explicitly; any outside policies/ are ignored.
 
 set -euo pipefail
 
@@ -32,8 +32,13 @@ if ! command -v vault >/dev/null 2>&1; then
   exit 0
 fi
 
-files=("$@")
-if [[ ${#files[@]} -eq 0 ]]; then
+# Only policies/ holds policies. Other .hcl files (compose/vault.hcl, a server
+# config) are passed by the hook too, but `vault policy fmt` cannot parse them.
+files=()
+for file in "$@"; do
+  [[ "$file" == policies/* ]] && files+=("$file")
+done
+if [[ $# -eq 0 ]]; then
   shopt -s nullglob
   files=(policies/*.hcl)
   shopt -u nullglob

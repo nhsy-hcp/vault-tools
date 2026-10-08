@@ -65,6 +65,7 @@ class VaultClient:
         vault_addr: str = None,
         vault_token: str = None,
         vault_skip_verify: bool = False,
+        vault_cacert: str | None = None,
         hvac_timeout: int = 30,
         pool_connections: int = 10,
         pool_maxsize: int = 20,
@@ -72,6 +73,11 @@ class VaultClient:
         self.vault_addr = vault_addr or os.environ.get("VAULT_ADDR")
         self.vault_token = vault_token or os.environ.get("VAULT_TOKEN")
         self.vault_skip_verify = vault_skip_verify
+        self.vault_cacert = vault_cacert or None
+        # What requests' `verify` takes: False skips verification, a path
+        # verifies against that CA bundle, True uses the system store. Skip wins
+        # over a CA bundle, as it does in the vault CLI.
+        self.verify: bool | str = False if vault_skip_verify else (self.vault_cacert or True)
         self.hvac_timeout = hvac_timeout
         self.logger = logging.getLogger(__name__)
 
@@ -83,6 +89,11 @@ class VaultClient:
 
         # Initialize connection pooling session
         self.session = requests.Session()
+        # Set on the session as well as passed to hvac: hvac replaces its own
+        # `verify` argument with a supplied session's whenever that is truthy,
+        # and a new Session's is True, so VAULT_SKIP_VERIFY and a CA bundle were
+        # both silently ignored when only hvac.Client(verify=...) carried them.
+        self.session.verify = self.verify
         # raise_on_status=False is what makes the status codes below surface
         # correctly (V2). With the default, an exhausted retry raises
         # urllib3's MaxRetryError — surfacing as requests.exceptions.RetryError,
@@ -122,7 +133,7 @@ class VaultClient:
             url=self.vault_addr,
             token=self.vault_token,
             namespace=namespace_path,
-            verify=not self.vault_skip_verify,
+            verify=self.verify,
             timeout=self.hvac_timeout if timeout is None else timeout,
             session=self.session,  # Use pooled session
         )

@@ -164,6 +164,12 @@ class TestCollection:
         assert auditor.data.acl_assessments == {}
         assert auditor._body_status("acl") == "names only"
 
+    def test_no_sentinel_marks_sentinel_bodies_skipped(self, mock_vault_client):
+        """--no-sentinel reads nothing, which must not read as "none found"."""
+        auditor, _ = self._auditor(mock_vault_client, collect_sentinel=False)
+        assert auditor._body_status("sentinel") == "skipped"
+        assert auditor._body_status("acl") != "skipped"
+
 
 class TestReporting:
     NOW = datetime(2026, 10, 1, tzinfo=UTC)

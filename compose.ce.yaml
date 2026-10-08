@@ -1,0 +1,27 @@
+# Throwaway Vault Community dev server for the CE smoke tests (`task test:ce`,
+# scripts/test-ce.sh starts and removes it; `task up:ce` for manual runs). In memory, plain HTTP, no licence.
+# Separate project and network from compose.yaml, so it never touches the Enterprise nodes.
+name: vault-tools-ce
+
+services:
+  vault-ce:
+    image: ${VAULT_CE_IMAGE:-docker.io/hashicorp/vault:2.1}
+    container_name: ${COMPOSE_PROJECT_NAME}_vault-ce
+    hostname: vault-ce
+    cap_add:  # Vault 2.x needs both to start
+      - IPC_LOCK
+      - SETFCAP
+    command: ["server", "-dev", "-dev-listen-address=0.0.0.0:8200", "-dev-no-store-token"]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${CE_ROOT_TOKEN:-vault-tools-ce-root}
+    ports:
+      - "127.0.0.1:${CE_PORT:-8330}:8200"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8200/v1/sys/health"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+networks:
+  default:
+    name: ${COMPOSE_PROJECT_NAME}

@@ -7,8 +7,16 @@ Set the following environment variables before running the tool:
 ```bash
 export VAULT_ADDR="https://vault.example.com"
 export VAULT_TOKEN="your-vault-token"
-export VAULT_SKIP_VERIFY="true"  # Optional, for dev environments
+export VAULT_CACERT="/path/to/ca.pem"  # Optional: PEM CA bundle for a private CA
+export VAULT_SKIP_VERIFY="true"        # Optional: no TLS verification (throwaway servers only)
 ```
+
+TLS works as it does in the `vault` CLI. With neither variable set the server
+certificate is checked against the system trust store. `VAULT_CACERT` checks it
+against that bundle instead, and the run stops before any request if the file
+does not exist. `VAULT_SKIP_VERIFY=true` turns verification off and wins over
+`VAULT_CACERT`. The [dev stack](dev-stack.md) sets
+`VAULT_CACERT=.tmp/vault/tls/vault-ca.pem`.
 
 ## Optional Configuration
 

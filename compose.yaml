@@ -1,0 +1,87 @@
+# Local Vault Enterprise dev cluster for testing vault-tools: one Raft node per cluster, TLS,
+# replication over 8201 on the project network (never published). The DR and performance
+# secondaries are optional (profiles dr and pr). Driven by scripts/vault-up.sh (init, unseal,
+# `root` token) via `task up` / `up:dr` / `up:pr` / `up:all`; see docs/dev-stack.md.
+# Raft data lives in a named volume per node (`task clean` runs `compose down -v`), and logs go
+# to stdout (`task logs`). TLS is the exception: generated on the host in .tmp/vault/tls by
+# scripts/gen-tls.sh and bind-mounted read-only.
+name: vault-tools
+
+x-vault: &vault
+  image: ${VAULT_IMAGE:?VAULT_IMAGE must be set in .env}
+  restart: unless-stopped
+  cap_add:  # Vault 2.x needs both to start
+    - IPC_LOCK
+    - SETFCAP
+  command: ["server"]
+  configs:
+    - source: vault-config
+      target: /vault/config/vault.hcl
+  healthcheck:
+    # Up = the API answers, whatever the seal/init/replication state (vault-up.sh does the rest).
+    test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "/dev/null", "https://127.0.0.1:8200/v1/sys/health?uninitcode=200&sealedcode=200&standbycode=200&drsecondarycode=200&performancestandbycode=200"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+    start_period: 5s
+
+services:
+  vault-primary:
+    <<: *vault
+    container_name: ${COMPOSE_PROJECT_NAME}_vault-primary
+    hostname: vault-primary
+    ports:
+      - "${VAULT_HOST_IP:-127.0.0.1}:${VAULT_HOST_PORT:-8310}:8200"
+    environment:
+      VAULT_LICENSE: ${VAULT_LICENSE:?VAULT_LICENSE must be set in .env}
+      VAULT_API_ADDR: https://vault-primary:8200
+      VAULT_CLUSTER_ADDR: https://vault-primary:8201
+      VAULT_RAFT_NODE_ID: vault-primary
+    volumes:
+      - vault-primary-data:/vault/file
+      - ./.tmp/vault/tls:/vault/tls:ro
+
+  vault-dr:
+    <<: *vault
+    profiles: [dr]
+    container_name: ${COMPOSE_PROJECT_NAME}_vault-dr
+    hostname: vault-dr
+    ports:
+      - "${VAULT_HOST_IP:-127.0.0.1}:${VAULT_DR_HOST_PORT:-8320}:8200"
+    environment:
+      VAULT_LICENSE: ${VAULT_LICENSE:?VAULT_LICENSE must be set in .env}
+      VAULT_API_ADDR: https://vault-dr:8200
+      VAULT_CLUSTER_ADDR: https://vault-dr:8201
+      VAULT_RAFT_NODE_ID: vault-dr
+    volumes:
+      - vault-dr-data:/vault/file
+      - ./.tmp/vault/tls:/vault/tls:ro
+
+  vault-pr:
+    <<: *vault
+    profiles: [pr]
+    container_name: ${COMPOSE_PROJECT_NAME}_vault-pr
+    hostname: vault-pr
+    ports:
+      - "${VAULT_HOST_IP:-127.0.0.1}:${VAULT_PR_HOST_PORT:-8340}:8200"
+    environment:
+      VAULT_LICENSE: ${VAULT_LICENSE:?VAULT_LICENSE must be set in .env}
+      VAULT_API_ADDR: https://vault-pr:8200
+      VAULT_CLUSTER_ADDR: https://vault-pr:8201
+      VAULT_RAFT_NODE_ID: vault-pr
+    volumes:
+      - vault-pr-data:/vault/file
+      - ./.tmp/vault/tls:/vault/tls:ro
+
+configs:
+  vault-config:
+    file: ./compose/vault.hcl
+
+networks:
+  default:
+    name: ${COMPOSE_PROJECT_NAME}
+
+volumes:
+  vault-primary-data:
+  vault-dr-data:
+  vault-pr-data:

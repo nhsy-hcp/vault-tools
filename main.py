@@ -65,6 +65,14 @@ def create_vault_client(logger) -> VaultClient:
     # constructor argument and never consults the environment for it, so
     # passing only addr and token silently left verification on.
     vault_skip_verify = os.environ.get("VAULT_SKIP_VERIFY", "false").lower() == "true"
+    # PEM CA bundle to verify the server's certificate against, as the vault CLI
+    # reads it. Checked here so a typo fails before any request, not as an
+    # opaque TLS error from inside the first read.
+    vault_cacert = os.environ.get("VAULT_CACERT") or None
+    if vault_cacert and not vault_skip_verify and not os.path.isfile(vault_cacert):
+        logger.error("vault_cacert_not_found", vault_cacert=vault_cacert)
+        sys.stderr.write(f"Error: VAULT_CACERT file not found: {vault_cacert}\n")
+        sys.exit(1)
 
     if not vault_addr or not vault_token:
         missing_vars = []
@@ -81,7 +89,7 @@ def create_vault_client(logger) -> VaultClient:
         )
         sys.exit(1)
 
-    return VaultClient(vault_addr, vault_token, vault_skip_verify=vault_skip_verify)
+    return VaultClient(vault_addr, vault_token, vault_skip_verify=vault_skip_verify, vault_cacert=vault_cacert)
 
 
 def validate_dates(start_date: str, end_date: str, logger) -> None:

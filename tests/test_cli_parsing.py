@@ -10,7 +10,7 @@ before the subcommand. These tests pin both positions.
 import json
 import tomllib
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -258,3 +258,31 @@ class TestActivityExportGating:
             main.main()
         assert exc.value.code == 3
         assert run.call_args.kwargs["is_enterprise"] is True
+
+
+class TestCreateVaultClientTls:
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("VAULT_ADDR", "https://vault.example.com")
+        monkeypatch.setenv("VAULT_TOKEN", "s.test")
+        monkeypatch.delenv("VAULT_SKIP_VERIFY", raising=False)
+        monkeypatch.delenv("VAULT_CACERT", raising=False)
+
+    def test_cacert_is_used(self, monkeypatch, tmp_path):
+        ca = tmp_path / "ca.pem"
+        ca.write_text("pem")
+        monkeypatch.setenv("VAULT_CACERT", str(ca))
+        client = main.create_vault_client(Mock())
+        assert client.verify == str(ca)
+
+    def test_missing_cacert_exits_1(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setenv("VAULT_CACERT", str(tmp_path / "missing.pem"))
+        with pytest.raises(SystemExit) as exc:
+            main.create_vault_client(Mock())
+        assert exc.value.code == 1
+        assert "VAULT_CACERT file not found" in capsys.readouterr().err
+
+    def test_skip_verify_wins_over_cacert(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("VAULT_SKIP_VERIFY", "true")
+        monkeypatch.setenv("VAULT_CACERT", str(tmp_path / "missing.pem"))
+        assert main.create_vault_client(Mock()).verify is False

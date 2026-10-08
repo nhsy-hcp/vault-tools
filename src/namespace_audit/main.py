@@ -467,9 +467,11 @@ class NamespaceAuditor:
             logger.info(f"The token cannot read {kind.upper()} policy bodies; listing names only for the rest of the run")
 
     def _body_status(self, kind: str) -> str:
-        """assessed / partial / not readable / names only / none found, for the reports."""
+        """assessed / partial / not readable / names only / skipped / none found, for the reports."""
         if self.names_only:
             return "names only"
+        if kind == "sentinel" and not self.collect_sentinel:
+            return "skipped"
         state = self._body_reads[kind]
         if state["read"] and state["denied"]:
             return "partial"

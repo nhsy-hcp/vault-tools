@@ -66,7 +66,7 @@ class FullAuditContext:
     total_clients: int = 0
     current_month_clients: int | None = None
     activity_namespaces: list[dict[str, Any]] | None = None
-    # "acl" / "sentinel" -> assessed, partial, not readable, names only, none found.
+    # "acl" / "sentinel" -> assessed, partial, not readable, names only, skipped, none found.
     policy_bodies: dict[str, str] = field(default_factory=dict)
     previous_diff: dict[str, Any] | None = None
     previous_path: str | None = None
@@ -121,6 +121,7 @@ _BODY_LABELS = {
     "partial": "partly assessed",
     "not readable": "not readable with this token",
     "names only": "names only (`--names-only`)",
+    "skipped": "skipped (`--no-sentinel`)",
     "none found": "none to read",
 }
 

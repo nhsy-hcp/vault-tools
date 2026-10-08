@@ -5,6 +5,20 @@ version: '3'
 
 dotenv: ['.env']
 
+vars:
+  # The dev stack's tasks always target the local primary with its CA and the
+  # `root` token, whatever VAULT_ADDR/VAULT_TOKEN the shell exports, so a seed
+  # never lands on a real cluster by accident.
+  DEV_ENV: >-
+    env -u VAULT_SKIP_VERIFY -u VAULT_NAMESPACE
+    VAULT_CACERT=.tmp/vault/tls/vault-ca.pem VAULT_TOKEN=root
+    VAULT_ADDR=https://${VAULT_HOST_IP:-127.0.0.1}:${VAULT_HOST_PORT:-8310}
+  DEV_PR_ENV: >-
+    env -u VAULT_SKIP_VERIFY -u VAULT_NAMESPACE
+    VAULT_CACERT=.tmp/vault/tls/vault-ca.pem VAULT_TOKEN=root
+    VAULT_ADDR=https://${VAULT_HOST_IP:-127.0.0.1}:${VAULT_PR_HOST_PORT:-8340}
+  CURL_CA: curl -s --cacert .tmp/vault/tls/vault-ca.pem
+
 tasks:
   init:
     desc: "Perform one-time environment setup"
@@ -19,33 +33,135 @@ tasks:
       - uv sync --extra dev
       - echo "Installing pre-commit hooks..."
       - uv run pre-commit install
+      - test -f .env || cp .env.example .env
+      - mkdir -p .tmp .plans
       - echo "✅ Environment setup complete!"
 
   deps:
-    desc: "Check for required dependencies and validate environment"
+    desc: "Check required tools, container runtime, dev stack ports and .env"
+    run: once
     cmds:
       - echo "Checking Python installation..."
       - command -v python >/dev/null 2>&1 || (echo "❌ Python not found" && exit 1)
       - python --version
-      - echo "Checking uv installation..."
-      - command -v uv >/dev/null 2>&1 || (echo "❌ uv not installed. Run 'task init'" && exit 1)
-      - echo "Checking virtual environment..."
-      - test -d .venv || (echo "❌ Virtual environment not found. Run 'task init'" && exit 1)
-      - echo "Checking vault binary..."
-      - command -v vault >/dev/null 2>&1 || echo "⚠️  vault binary not found. Install from https://www.vaultproject.io/downloads (needed for the dev server and the policy format check in task lint)"
-      - echo "✅ All dependencies satisfied"
+      - ./scripts/check-deps.sh
+
+  # --- Dev stack (compose.yaml: Vault Enterprise, raft, TLS) -------------------
+  # See docs/dev-stack.md. The DR and performance secondaries are optional.
 
   up:
-    desc: "Start local Vault dev server for testing"
+    desc: "Start the primary Vault Enterprise node (default 127.0.0.1:8310)"
+    deps: [deps]
     cmds:
-      - echo "Starting Vault dev server..."
-      - echo "⚠️  Make sure vault binary is installed (https://www.vaultproject.io/downloads)"
-      - echo "Starting vault server in dev mode with root token 'root'..."
-      - echo "Add to your .env file:"
-      - echo "  export VAULT_ADDR='http://127.0.0.1:8200'"
-      - echo "  export VAULT_TOKEN='root'"
-      - echo ""
-      - vault server -dev -dev-root-token-id=root
+      - ./scripts/vault-up.sh vault-primary "${VAULT_HOST_PORT:-8310}"
+
+  up:dr:
+    desc: "Optional: start the DR secondary node (default 127.0.0.1:8320)"
+    deps: [deps]
+    cmds:
+      - ./scripts/vault-up.sh vault-dr "${VAULT_DR_HOST_PORT:-8320}"
+
+  up:pr:
+    desc: "Optional: start the performance secondary node (default 127.0.0.1:8340)"
+    deps: [deps]
+    cmds:
+      - ./scripts/vault-up.sh vault-pr "${VAULT_PR_HOST_PORT:-8340}"
+
+  up:all:
+    desc: "Start the primary, DR and performance secondary nodes"
+    deps: [deps]
+    cmds:
+      - task: up
+      - task: up:dr
+      - task: up:pr
+
+  down:
+    desc: "Stop and remove every dev stack container and the network (data volumes and .tmp/vault unseal keys are kept)"
+    cmds:
+      - ./scripts/vault-down.sh
+
+  down:dr:
+    desc: "Stop and remove the DR container only"
+    cmds:
+      - ./scripts/vault-down.sh vault-dr
+
+  down:pr:
+    desc: "Stop and remove the performance secondary container only"
+    cmds:
+      - ./scripts/vault-down.sh vault-pr
+
+  up:ce:
+    desc: "Start a throwaway Vault Community dev server (compose.ce.yaml, http://127.0.0.1:8330, root token vault-tools-ce-root)"
+    cmds:
+      - ${CONTAINER_CLI:-docker} compose -f compose.ce.yaml up -d --wait vault-ce
+      - 'echo "export VAULT_ADDR=http://127.0.0.1:${CE_PORT:-8330} VAULT_TOKEN=${CE_ROOT_TOKEN:-vault-tools-ce-root}"'
+
+  down:ce:
+    desc: "Stop and remove the Community dev server"
+    cmds:
+      - ${CONTAINER_CLI:-docker} compose -f compose.ce.yaml down
+
+  dr:enable:
+    desc: "Enable DR replication primary -> vault-dr and wait for stream-wals (idempotent)"
+    cmds:
+      - ./scripts/dr-enable.sh
+
+  dr:status:
+    desc: "Show DR replication status on both nodes"
+    cmds:
+      - "{{.CURL_CA}} https://${VAULT_HOST_IP:-127.0.0.1}:${VAULT_HOST_PORT:-8310}/v1/sys/replication/dr/status | jq -c '.data | {node: \"primary\", mode, state, connection: [.secondaries[]?.connection_status]}'"
+      - "{{.CURL_CA}} https://${VAULT_HOST_IP:-127.0.0.1}:${VAULT_DR_HOST_PORT:-8320}/v1/sys/replication/dr/status | jq -c '.data | {node: \"dr\", mode, state, connection_state}'"
+
+  pr:enable:
+    desc: "Enable performance replication primary -> vault-pr, wait for stream-wals, restore token root there (idempotent)"
+    cmds:
+      - ./scripts/pr-enable.sh
+
+  pr:status:
+    desc: "Show performance replication status on the primary and vault-pr"
+    cmds:
+      - "{{.CURL_CA}} https://${VAULT_HOST_IP:-127.0.0.1}:${VAULT_HOST_PORT:-8310}/v1/sys/replication/performance/status | jq -c '.data | {node: \"primary\", mode, state, known_secondaries, connection: [.secondaries[]?.connection_status]}'"
+      - "{{.CURL_CA}} https://${VAULT_HOST_IP:-127.0.0.1}:${VAULT_PR_HOST_PORT:-8340}/v1/sys/replication/performance/status | jq -c '.data | {node: \"pr\", mode, state, connection_state}'"
+
+  status:
+    desc: "Show the dev primary's vault status"
+    cmds:
+      - "{{.DEV_ENV}} vault status"
+
+  logs:
+    desc: "Tail a node's Vault log (NODE=vault-dr task logs for the DR node)"
+    cmds:
+      - ${CONTAINER_CLI:-docker} compose logs -f --tail 50 {{.NODE | default "vault-primary"}}
+
+  seed:
+    desc: "Seed the dev primary with ~130 namespaces, mounts, KV data, identity and client activity (root token)"
+    cmds:
+      - "{{.DEV_ENV}} uv run --script scripts/seed-vault.py"
+
+  seed:findings:
+    desc: "Seed config on the dev primary that trips every live-testable audit rule (root token)"
+    cmds:
+      - "{{.DEV_ENV}} ./scripts/seed-findings.sh"
+
+  token:audit:
+    desc: "Write the vault-tools-audit policy on the dev primary and mint a 1h token to .tmp/audit-token"
+    cmds:
+      - "{{.DEV_ENV}} ./scripts/audit-token.sh"
+
+  token:policies:
+    desc: "Like token:audit, plus the ACL and Sentinel body-reader add-ons"
+    cmds:
+      - "{{.DEV_ENV}} POLICY_READER=1 ./scripts/audit-token.sh"
+
+  token:pr:
+    desc: "Like token:policies, but minted on the performance secondary (tokens are per cluster) into .tmp/audit-token-pr"
+    cmds:
+      - "{{.DEV_PR_ENV}} TOKEN_FILE=.tmp/audit-token-pr POLICY_READER=1 ./scripts/audit-token.sh"
+
+  audit:dev:
+    desc: "Run full-audit on the dev primary, and cluster-audit on each running secondary, into .tmp/audit/<node>"
+    cmds:
+      - ./scripts/audit-dev.sh
 
   seed:sentinel:
     desc: "Write no-op Sentinel EGP/RGP policies for testing (usage: task seed:sentinel -- [namespace ...])"
@@ -70,6 +186,11 @@ tasks:
       - find . -path ./.venv -prune -o -path ./.git -prune -o -type f -name "*.py[co]" -delete
       - echo "Cleaning test and lint caches..."
       - rm -rf .pytest_cache/ .ruff_cache/
+      # Before .tmp/ goes: the node volumes and .tmp/vault (unseal keys, TLS)
+      # must be removed together, or a restart cannot unseal its own data.
+      - echo "Removing dev stack containers and volumes..."
+      - cmd: VOLUMES=1 ./scripts/vault-down.sh
+        ignore_error: true
       - echo "Cleaning temporary files..."
       - rm -rf .tmp/
       - echo "Cleaning coverage reports..."
@@ -94,6 +215,16 @@ tasks:
       - echo "Running pytest..."
       - uv run pytest tests/ -v
       - echo "✅ All tests passed"
+
+  test:ce:
+    desc: "CE smoke tests against a throwaway Community dev server from compose.ce.yaml (local only, not in CI; task test:ce -- <pytest args>)"
+    cmds:
+      - ./scripts/test-ce.sh {{.CLI_ARGS}}
+
+  test:e2e:
+    desc: "Full e2e from scratch (destructive: wipes .tmp/): down, clean, up:all, dr:enable, pr:enable, seed, seed:findings, tokens, audit:dev, test, test:ce, lint"
+    cmds:
+      - ./scripts/e2e.sh
 
   test:all:
     desc: "Run the complete test suite across all modules"

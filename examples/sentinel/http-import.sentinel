@@ -1,0 +1,4 @@
+# Imports http (VT-SNT-007) but never calls it, so no request waits on an outbound call.
+import "http"
+
+main = rule { true and request.path is not "" }

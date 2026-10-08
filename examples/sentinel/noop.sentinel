@@ -1,0 +1,4 @@
+# No-op policy: the condition can never be false, so nothing is blocked.
+import "time"
+
+main = rule { time.now.unix > 0 }

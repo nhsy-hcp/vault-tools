@@ -1,0 +1,4 @@
+# Drifted copy of noop.sentinel: same name in another namespace, different body (VT-SNT-005).
+import "time"
+
+main = rule { time.now.unix >= 0 }

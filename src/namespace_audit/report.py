@@ -440,6 +440,7 @@ def render_acl_policies(acl_policies: dict[str, list[str]], max_rows: int = MAX_
 POLICY_BODY_NOTES = {
     "not readable": "the token cannot read policy bodies, so only names were listed. Attach `{addon}` to the token to assess them",
     "names only": "only names were listed (`--names-only`)",
+    "skipped": "Sentinel collection was skipped (`--no-sentinel`)",
     "none found": "there were no policies to read",
 }
 
