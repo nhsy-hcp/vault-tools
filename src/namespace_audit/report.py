@@ -13,13 +13,22 @@ circular import.
 from __future__ import annotations
 
 import hashlib
-import importlib.metadata
 import logging
 import re
 from collections import Counter
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from src.cluster_audit.findings import (
+    DEFAULT_LEASE_TTL_WARNING_SECONDS,
+    LICENSE_EXPIRY_WARNING_DAYS,
+    cluster_lease_findings,
+    health_findings,
+    license_expiry_days,
+    license_findings,
+    parse_license_time,
+)
+from src.cluster_audit.report import render_cluster_health, render_cluster_reads, render_license
 from src.common.findings import (
     SEVERITY_ORDER,
     Finding,
@@ -27,9 +36,12 @@ from src.common.findings import (
     coverage_block,
     display_namespace,
     finding,
+    format_ttl,
+    get_tool_version,
     run_block,
     sort_findings,
 )
+from src.common.markdown import md_escape, md_table, render_findings_table
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .main import AuditData, AuditStats
@@ -59,12 +71,6 @@ MAX_ACCESS_GAP_ROWS = 10
 # stock system max. Prefer the real value: a cluster tuned down to, say, 24h
 # makes this constant far too permissive to catch anything.
 LONG_MAX_LEASE_TTL_SECONDS = 768 * 3600
-
-# A *default* lease TTL above Vault's stock 768h means every lease that does not
-# ask for a TTL lives that long (VT-MOUNT-004 per mount, VT-LEASE-001 for the
-# cluster). Fixed rather than calibrated: unlike the max, there is no cluster
-# value that makes a longer default the norm. 0 means "inherit" and never fires.
-DEFAULT_LEASE_TTL_WARNING_SECONDS = 768 * 3600
 
 # More than this many non-built-in mounts of one type in one namespace
 # (VT-MOUNT-005). Above it the mount table itself becomes the problem: slower
@@ -120,67 +126,30 @@ SENTINEL_IMPORT = re.compile(r'^\s*import\s+"([^"]+)"', re.M)
 # the blast radius should be a deliberate choice.
 BROAD_EGP_PATHS = frozenset({"*", "/*"})
 
-# Days before license expiration at which a finding is raised.
-LICENSE_EXPIRY_WARNING_DAYS = 90
 
+# Re-exported so callers keep importing these from the report module.
+__all__ = [
+    "DEFAULT_LEASE_TTL_WARNING_SECONDS",
+    "LICENSE_EXPIRY_WARNING_DAYS",
+    "SEVERITY_ORDER",
+    "Finding",
+    "display_namespace",
+    "format_ttl",
+    "get_tool_version",
+    "md_escape",
+    "md_table",
+    "render_license",
+]
 
-# Re-exported so callers keep importing the model from the report module.
-__all__ = ["SEVERITY_ORDER", "Finding", "display_namespace"]
-
-
-def get_tool_version() -> str:
-    """Resolve the installed vault-tools version.
-
-    Read from package metadata rather than importing ``main.__version__``:
-    ``main`` imports the auditor, so that import would be circular.
-    """
-    try:
-        return importlib.metadata.version("vault-tools")
-    except importlib.metadata.PackageNotFoundError:
-        return "unknown"
-
-
-def format_ttl(seconds: int) -> str:
-    """Render a TTL the way the Vault CLI does — whole hours where possible."""
-    if seconds % 3600 == 0:
-        return f"{seconds // 3600}h"
-    if seconds % 60 == 0:
-        return f"{seconds // 60}m"
-    return f"{seconds}s"
+# The license helpers moved to cluster_audit.findings, which cluster-audit shares.
+_parse_license_time = parse_license_time
+_license_expiry_days = license_expiry_days
 
 
 def _format_multiple(value: int, baseline: int) -> str:
     """How many times larger value is than baseline, e.g. '90x' or '1.5x'."""
     ratio = value / baseline
     return f"{ratio:.0f}x" if abs(ratio - round(ratio)) < 0.05 else f"{ratio:.1f}x"
-
-
-def md_escape(value: Any) -> str:
-    """Make an arbitrary value safe to drop into a markdown table cell.
-
-    Pipes would end the cell early and newlines would end the row, so both are
-    neutralised. Everything else is left alone.
-    """
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-
-
-def md_table(headers: list[str], rows: list[list[Any]]) -> str:
-    """Render a markdown table.
-
-    Hand-rolled on purpose: ``DataFrame.to_markdown`` would pull in tabulate,
-    which is not a project dependency.
-
-    Returns an italic placeholder rather than a headerless table when there are
-    no rows, so a section never renders as a bare, confusing header line.
-    """
-    if not rows:
-        return "_No entries._"
-
-    header_line = "| " + " | ".join(md_escape(h) for h in headers) + " |"
-    separator = "| " + " | ".join("---" for _ in headers) + " |"
-    body = ["| " + " | ".join(md_escape(cell) for cell in row) + " |" for row in rows]
-    return "\n".join([header_line, separator, *body])
 
 
 def _namespace_nodes(data: AuditData) -> list[str]:
@@ -483,81 +452,6 @@ def render_enforcement_distribution(egp: dict[str, Any], rgp: dict[str, Any]) ->
     return md_table(["Enforcement level", "EGP", "RGP"], rows)
 
 
-def _parse_license_time(value: Any) -> datetime | None:
-    """Parse a sys/license/status timestamp as an aware UTC datetime.
-
-    A timestamp with no offset is taken as UTC: subtracting a naive datetime
-    from an aware one raises TypeError, which would sink the whole report.
-    """
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, TypeError, AttributeError):
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
-def _license_expiry_days(expiration_time: Any, now: datetime | None = None) -> int | None:
-    """Days until the license soft-expiry, negative once it has passed.
-
-    Returns None when the string is unparseable.
-    """
-    expiry = _parse_license_time(expiration_time)
-    if expiry is None:
-        return None
-    reference = now or datetime.now(UTC)
-    if reference.tzinfo is None:
-        reference = reference.replace(tzinfo=UTC)
-    return (expiry - reference).days
-
-
-_LICENSE_UNAVAILABLE_NOTES = {
-    "denied": "_License data unavailable — the token was denied read on `sys/license/status`._",
-    "unexpected response": "_License data unavailable — `sys/license/status` returned a response with no `autoloaded` license._",
-}
-
-
-def render_license(
-    license_status: dict[str, Any] | None,
-    is_enterprise: bool | None,
-    unavailable_reason: str | None = None,
-) -> str:
-    """Render the ## License section.
-
-    Returns an empty string when there is nothing to say — Community Edition,
-    or an unknown edition where the probe recorded no failure — so the caller
-    can omit the section entirely. Otherwise returns a note worded from
-    ``unavailable_reason``, so a 5xx is not reported as a token problem.
-    """
-    if license_status is None:
-        if unavailable_reason is None and not is_enterprise:
-            return ""
-        if unavailable_reason and unavailable_reason.startswith("error: "):
-            return f"_License data unavailable — reading `sys/license/status` failed: {md_escape(unavailable_reason.removeprefix('error: '))}_"
-        return _LICENSE_UNAVAILABLE_NOTES.get(unavailable_reason or "", "_License data unavailable — `sys/license/status` was not read._")
-
-    rows: list[list[Any]] = []
-    rows.append(["License ID", license_status.get("license_id", "—")])
-    rows.append(["Issuer", license_status.get("issuer", "—")])
-    edition = license_status.get("edition", "")
-    if edition:
-        rows.append(["Edition", edition])
-    expiry = license_status.get("expiration_time", "")
-    if expiry:
-        rows.append(["Expires (soft)", expiry[:10]])
-    termination = license_status.get("termination_time", "")
-    if termination:
-        rows.append(["Terminates (hard)", termination[:10]])
-    perf_standbys = license_status.get("performance_standby_count")
-    if perf_standbys is not None:
-        rows.append(["Perf. standbys", perf_standbys])
-
-    features = license_status.get("features") or []
-    features_line = ", ".join(sorted(features)) if features else "—"
-
-    table = md_table(["Field", "Value"], rows)
-    return f"{table}\n\n**Features:** {features_line}"
-
-
 def _collect_sentinel_findings(data: AuditData) -> list[Finding]:
     """Security observations derived from the Sentinel policies collected."""
     findings: list[Finding] = []
@@ -849,19 +743,7 @@ def collect_findings(
                     )
                 )
 
-    if isinstance(system_default_lease_ttl, int) and system_default_lease_ttl > DEFAULT_LEASE_TTL_WARNING_SECONDS:
-        findings.append(
-            finding(
-                "VT-LEASE-001",
-                "",
-                "cluster",
-                None,
-                "lease_ttl",
-                f"Cluster `default_lease_ttl` is {format_ttl(system_default_lease_ttl)}, above the {format_ttl(DEFAULT_LEASE_TTL_WARNING_SECONDS)} review threshold — mounts without their own default inherit it.",
-                default_lease_ttl_seconds=system_default_lease_ttl,
-                threshold_seconds=DEFAULT_LEASE_TTL_WARNING_SECONDS,
-            )
-        )
+    findings.extend(cluster_lease_findings(system_default_lease_ttl))
 
     for namespace, mounts in data.auth_methods.items():
         external = {m.get("type") for m in mounts.values() if isinstance(m, dict) and m.get("type") not in BUILTIN_AUTH_TYPES}
@@ -902,54 +784,24 @@ def collect_findings(
 
     findings.extend(_collect_license_findings(data, now))
 
+    # Judged against the node's own clock at collection, not ``now``: the walk
+    # can take minutes, and that must not read as replication lag.
+    findings.extend(health_findings(data.cluster_health))
+
     return sort_findings(findings)
 
 
 def _collect_license_findings(data: AuditData, now: datetime | None) -> list[Finding]:
     """Expiry findings, counted from ``now`` so they agree with the report date."""
-    if not isinstance(data.license_status, dict):
-        return []
-    expiry_str = data.license_status.get("expiration_time", "")
-    days = _license_expiry_days(expiry_str, now)
-    if days is None or days > LICENSE_EXPIRY_WARNING_DAYS:
-        return []
-    if days >= 0:
-        detail = f"License expires on {expiry_str[:10]} ({days} day{'s' if days != 1 else ''} remaining) — renew before the grace period ends."
-        return [finding("VT-LIC-001", "", "cluster", None, "license", detail, days_remaining=days, expiration_time=expiry_str)]
-
-    # Past the soft expiry the cluster is running on the grace period, and the
-    # date that matters is the hard termination, when Vault stops serving.
-    ago = -days
-    detail = f"License expired on {expiry_str[:10]} ({ago} day{'s' if ago != 1 else ''} ago)"
-    termination_time = data.license_status.get("termination_time")
-    termination = _parse_license_time(termination_time)
-    if termination is not None:
-        detail += f"; Vault stops at termination on {termination.strftime('%Y-%m-%d')}"
-    # Same rule, escalated: a diff then shows this finding worsening rather
-    # than an "expires soon" resolving as an "expired" appears.
-    evidence: dict[str, Any] = {"days_remaining": days, "expiration_time": expiry_str}
-    if termination_time:
-        evidence["termination_time"] = termination_time
-    return [finding("VT-LIC-001", "", "cluster", None, "license", detail + " — renew now.", severity="High", **evidence)]
+    return license_findings(data.license_status, now)
 
 
 def render_findings(findings: list[Finding]) -> str:
     """Findings grouped by severity, most severe first."""
-    if not findings:
-        return "_No observations — no deprecated plugins, publicly listed auth mounts, long leases, KV v1 or crowded mounts, empty namespaces or Sentinel policy issues were found._"
-
-    sections: list[str] = []
-    for severity in SEVERITY_ORDER:
-        group = [f for f in findings if f.severity == severity]
-        if not group:
-            continue
-        rows = [[f.rule_id, display_namespace(f.namespace), f.mount, f.mount_type, f.detail] for f in group]
-        # "Object", not "Mount": the Sentinel checks put a policy name in this
-        # column, and findings that name a whole namespace put a dash in it.
-        # "Rule" carries the vault-ops catalogue ID, so a row can be looked up
-        # in the skill's rules.md and matched against findings.json.
-        sections.append(f"#### {severity} ({len(group)})\n\n" + md_table(["Rule", "Namespace", "Object", "Type", "Observation"], rows))
-    return "\n\n".join(sections)
+    return render_findings_table(
+        findings,
+        "_No observations — no deprecated plugins, publicly listed auth mounts, long leases, KV v1 or crowded mounts, empty namespaces, Sentinel policy issues or cluster health problems were found._",
+    )
 
 
 def _access_gap_rows(forbidden: list[tuple[str, str]]) -> list[list[Any]]:
@@ -974,7 +826,7 @@ def _access_gap_rows(forbidden: list[tuple[str, str]]) -> list[list[Any]]:
     return rows
 
 
-def render_access_gaps(stats: AuditStats, start_namespace: str, license_unavailable_reason: str | None = None) -> str:
+def render_access_gaps(stats: AuditStats, start_namespace: str, license_unavailable_reason: str | None = None, cluster_coverage: Any = None) -> str:
     """What the audit could not reach — denials first, then errors.
 
     A denied license read is listed separately from the namespace denials: it
@@ -997,6 +849,10 @@ def render_access_gaps(stats: AuditStats, start_namespace: str, license_unavaila
 
     if license_unavailable_reason == "denied":
         parts.append("**Cluster-level reads:** `sys/license/status` was denied, so the License section is incomplete.")
+    # Cluster health denials sit here for the same reason as the license: they
+    # say nothing about how much of the namespace tree was covered.
+    if cluster_lines := render_cluster_reads(cluster_coverage):
+        parts.append(cluster_lines)
 
     if stats.errors:
         rows = [[namespace, message] for namespace, message in sorted(stats.errors)]
@@ -1150,6 +1006,10 @@ def build_markdown_report(
         )
 
     license_content = render_license(data.license_status, data.is_enterprise, data.license_unavailable_reason)
+    cluster_section: list[str] = []
+    if cluster_content := render_cluster_health(data.cluster_health):
+        cluster_section = [cluster_content, ""]
+
     license_section: list[str] = []
     if license_content:
         license_section = ["## License", "", license_content, ""]
@@ -1164,9 +1024,10 @@ def build_markdown_report(
         md_table(["Metric", "Value"], _summary_rows(data, stats, worker_threads, system_lease_ttls, sentinel_supported)),
         "",
         *license_section,
+        *cluster_section,
         "## Access gaps",
         "",
-        render_access_gaps(stats, start_namespace, data.license_unavailable_reason),
+        render_access_gaps(stats, start_namespace, data.license_unavailable_reason, data.cluster_coverage),
         "",
         "## Namespace inventory",
         "",
@@ -1212,6 +1073,19 @@ def build_markdown_report(
         "",
     ]
     return "\n".join(sections)
+
+
+def _cluster_denials(data: AuditData) -> list[tuple[str, str]]:
+    """Cluster-level reads the token was refused, as root-namespace coverage rows.
+
+    In findings.json they count against completeness, unlike the markdown's
+    access-gaps table: a CI gate asking "was anything not judged?" must see a
+    denied sys/audit, even though it says nothing about namespace coverage.
+    """
+    denied = [("", scope) for scope in (data.cluster_coverage.denied if data.cluster_coverage else [])]
+    if data.license_unavailable_reason == "denied":
+        denied.append(("", "sys/license/status"))
+    return denied
 
 
 def sentinel_status(sentinel_supported: bool | None) -> str:
@@ -1263,8 +1137,8 @@ def build_findings_json(
         },
         coverage=coverage_block(
             stats.processed_count,
-            stats.forbidden_namespaces,
-            stats.errors,
+            [*stats.forbidden_namespaces, *_cluster_denials(data)],
+            [*stats.errors, *(data.cluster_coverage.errors if data.cluster_coverage else [])],
             unattributed_denials=stats.forbidden_count - len(stats.forbidden_namespaces),
             unattributed_errors=stats.error_count - len(stats.errors),
         ),

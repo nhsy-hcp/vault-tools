@@ -21,10 +21,11 @@ from rich.progress import (
 )
 from rich.table import Table
 
+from src.cluster_audit.collector import collect_cluster_health, fetch_license_status, fetch_system_lease_ttls
 from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import write_csv, write_json, write_markdown
 from src.common.utils import FILE_DATE_FORMAT, normalise_namespace_path
-from src.common.vault_client import VaultClient, VaultConnectionError, VaultPermissionError
+from src.common.vault_client import VaultClient, VaultConnectionError
 from src.namespace_audit.report import build_findings_json, build_markdown_report
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,12 @@ class AuditData:
     license_unavailable_reason: str | None = None
     # Cluster UUID from sys/health. None when the health response omits it.
     cluster_id: str | None = None
+    # Seal, HA, replication, raft, audit devices, snapshots and metrics from
+    # cluster_audit.collector, read once before the walk. None when not
+    # collected; individual blocks inside are None when unreadable.
+    cluster_health: dict[str, Any] | None = None
+    # What those cluster reads were denied or failed on (ClusterCoverage).
+    cluster_coverage: Any = None
 
 
 class NamespaceAuditor:
@@ -270,6 +277,9 @@ class NamespaceAuditor:
 
             self.system_lease_ttls = self._fetch_system_lease_ttls()
             self.data.license_status = self._fetch_license_status(info.is_enterprise)
+            # Once per run, before the walk: these are cluster-level, and the
+            # collector never raises, so a denied sys/audit cannot sink the audit.
+            self.data.cluster_health, self.data.cluster_coverage = collect_cluster_health(self.vault_client)
 
             # The queue must stay unbounded: worker threads are also the
             # producers (they enqueue child namespaces from _traverse_namespace),
@@ -388,60 +398,25 @@ class NamespaceAuditor:
         the audit can otherwise do without, so any error here downgrades the
         report's lease findings to a fixed threshold rather than sinking the run.
         """
-        try:
-            response = self.vault_client.get("sys/config/state/sanitized")
-            payload = response.get("data", response) if isinstance(response, dict) else {}
-            default_ttl = payload.get("default_lease_ttl")
-            max_ttl = payload.get("max_lease_ttl")
-            if isinstance(default_ttl, int) and isinstance(max_ttl, int) and max_ttl > 0:
-                logger.debug(f"System lease TTLs: default={default_ttl}s max={max_ttl}s")
-                return default_ttl, max_ttl
-            logger.debug(f"Unexpected sys/config/state/sanitized payload; lease TTLs unavailable: {payload!r}")
-        except Exception as e:
-            logger.debug(f"Could not read sys/config/state/sanitized ({e}); lease findings will use the fixed threshold")
-        return None
+        return fetch_system_lease_ttls(self.vault_client)
 
     def _fetch_license_status(self, is_enterprise: bool | None) -> dict[str, Any] | None:
         """Read the cluster's active license from sys/license/status.
 
         Returns the "autoloaded" sub-dict, or None when the endpoint is absent
-        (Community Edition) or unreadable. This is optional enrichment — any
-        failure downgrades the report rather than sinking the run, and the
-        reason is kept on ``license_unavailable_reason`` for the report.
-
-        An unknown edition (no version in sys/health) is probed rather than
-        skipped: a 404 then identifies Community and records nothing.
+        (Community Edition) or unreadable; the reason is kept on
+        ``license_unavailable_reason`` and the settled edition on
+        ``is_enterprise``. Shared with cluster-audit via fetch_license_status.
 
         A denial is deliberately not passed to ``increment_forbidden``: that
         list means "the namespace tree is incomplete below here", and a
         cluster-level license read says nothing about namespace coverage.
         """
-        if is_enterprise is False:
-            return None
-        try:
-            response = self.vault_client.get("sys/license/status")
-        except VaultPermissionError as e:
-            logger.debug(f"Permission denied reading sys/license/status ({e}); license data unavailable")
-            self.data.license_unavailable_reason = "denied"
-            return None
-        except Exception as e:
-            if is_enterprise is None and isinstance(e.__cause__, hvac.exceptions.InvalidPath):
-                logger.debug("sys/license/status not found; treating the cluster as Community Edition")
-                self.data.is_enterprise = False
-                return None
-            logger.debug(f"Could not read sys/license/status ({e}); license data unavailable")
-            self.data.license_unavailable_reason = f"error: {e}"
-            return None
-
-        payload = response.get("data", response) if isinstance(response, dict) else {}
-        autoloaded = payload.get("autoloaded") if isinstance(payload, dict) else None
-        if isinstance(autoloaded, dict):
-            logger.debug("License status collected from sys/license/status")
-            self.data.is_enterprise = True
-            return autoloaded
-        logger.debug(f"Unexpected sys/license/status payload shape; license data unavailable: {payload!r}")
-        self.data.license_unavailable_reason = "unexpected response"
-        return None
+        result = fetch_license_status(self.vault_client, is_enterprise)
+        self.data.is_enterprise = result.is_enterprise
+        if result.unavailable_reason is not None:
+            self.data.license_unavailable_reason = result.unavailable_reason
+        return result.status
 
     def _fetch_acl_policies(self, client: Any, display_path: str) -> list[str]:
         """List this namespace's own ACL policy names.

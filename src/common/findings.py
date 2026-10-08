@@ -14,6 +14,7 @@ Pure functions only — no Vault calls and no filesystem access.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -65,7 +66,45 @@ RULES: dict[str, Rule] = {
     "VT-SNT-007": Rule("Info", "governance", "Sentinel policy makes outbound HTTP calls"),
     "VT-LIC-001": Rule("Medium", "lifecycle", "License expires soon"),
     "VT-LEASE-001": Rule("Low", "lease", "Cluster default lease TTL is long"),
+    "VT-HLTH-001": Rule("Medium", "availability", "Node sealed or no active leader"),
+    "VT-HLTH-002": Rule("Medium", "replication", "Replication enabled but not healthy"),
+    "VT-HLTH-003": Rule("Info", "lifecycle", "Vault version below supported window"),
+    "VT-HLTH-004": Rule("Medium", "availability", "Raft autopilot reports the cluster or a server unhealthy"),
+    "VT-HLTH-005": Rule("Low", "lease", "Irrevocable leases present"),
+    "VT-HLTH-006": Rule("Medium", "lease", "Lease count is high"),
+    "VT-REPL-001": Rule("Medium", "replication", "Replication peer is lagging"),
+    "VT-REPL-002": Rule("Low", "replication", "Known secondary has no heartbeat (never connected, or down since the primary started)"),
+    "VT-REPL-003": Rule("Medium", "replication", "Clock skew between replication peers"),
+    "VT-REPL-004": Rule("High", "replication", "Replication merkle tree reported corrupted"),
+    "VT-REPL-005": Rule("Info", "replication", "Performance replication paths filter in use"),
+    "VT-AUD-001": Rule("Medium", "audit", "No audit device enabled"),
+    "VT-AUD-002": Rule("Low", "audit", "Only one audit device enabled"),
+    "VT-AUD-003": Rule("Medium", "audit", "Audit device logs raw values or unhashed accessors"),
+    "VT-SNAP-001": Rule("Medium", "backup", "No automated Raft snapshots configured"),
+    "VT-SNAP-002": Rule("Medium", "backup", "Automated snapshot failing or overdue"),
+    "VT-SNAP-003": Rule("Info", "backup", "Automated snapshots stored on the node's local disk"),
 }
+
+
+def get_tool_version() -> str:
+    """Resolve the installed vault-tools version.
+
+    Read from package metadata rather than importing ``main.__version__``:
+    ``main`` imports the auditors, so that import would be circular.
+    """
+    try:
+        return importlib.metadata.version("vault-tools")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def format_ttl(seconds: int) -> str:
+    """Render a TTL the way the Vault CLI does — whole hours where possible."""
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
 
 
 def display_namespace(path: str) -> str:

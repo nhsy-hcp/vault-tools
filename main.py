@@ -18,6 +18,7 @@ import sys
 import uuid
 
 from src.activity_export.main import run_activity_export
+from src.cluster_audit.main import run_cluster_audit
 from src.common.config import GlobalConfig
 from src.common.exceptions import ConfigurationError, VaultToolsError
 from src.common.findings import EXIT_OK, SEVERITY_ORDER, exit_code_for
@@ -167,6 +168,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip Sentinel EGP/RGP policy collection. Costs one LIST plus one read per policy per namespace on Vault Enterprise; a no-op elsewhere.",
     )
 
+    # Cluster Audit command
+    subparsers.add_parser(
+        "cluster-audit",
+        help="Audit cluster health: seal, HA, replication, raft, audit devices, snapshots, metrics.",
+        parents=[common, gating],
+    )
+
     # Activity Export command
     parser_activity = subparsers.add_parser("activity-export", help="Export activity data.", parents=[common])
     parser_activity.add_argument("-s", "--start-date", required=True, type=str, help="Start date (YYYY-MM-DD)")
@@ -223,6 +231,7 @@ def main() -> None:
 
     Parses command line arguments and executes the appropriate tool:
     - namespace-audit: Audit Vault namespaces, auth methods, and secret engines
+    - cluster-audit: Audit cluster health, replication, audit devices and snapshots
     - activity-export: Export Vault activity logs and usage metrics
     - entity-export: Export Vault entity data
     - diff: Compare two findings.json files
@@ -308,6 +317,14 @@ def main() -> None:
                 sys.exit(1)
             exit_code = exit_code_for(document, args.fail_on, args.fail_on_gaps)
             logger.info("command_execution_completed", command="namespace-audit", exit_code=exit_code)
+
+        elif args.command == "cluster-audit":
+            logger.info("command_execution_started", command="cluster-audit")
+            document = run_cluster_audit(vault_client, global_config.output_dir)
+            if document is None:
+                sys.exit(1)
+            exit_code = exit_code_for(document, args.fail_on, args.fail_on_gaps)
+            logger.info("command_execution_completed", command="cluster-audit", exit_code=exit_code)
 
         elif args.command == "activity-export":
             validate_dates(args.start_date, args.end_date, logger)
