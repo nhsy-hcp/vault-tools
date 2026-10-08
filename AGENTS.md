@@ -229,13 +229,13 @@ All tools write to configurable output directory (default: `outputs/`) with cons
 - Filename pattern: `{cluster-name}-{data-type}-{YYYYMMDD}.{ext}`
 - **Configurable**: Set `VAULT_TOOLS_OUTPUT_DIR` environment variable
 
-`namespace-audit` writes up to eleven files per run: up to five JSON, up to five
+`namespace-audit` writes up to twelve files per run: up to six JSON, up to five
 CSV, and `{cluster-name}-audit-report-{YYYYMMDD}.md`. The report is always
 written; there is no flag to enable or suppress it. The count is a maximum, not a
-guarantee: the CSV summary writers return early when they have no rows, and the
+guarantee: the CSV summary writers return early when they have no rows, the
 Sentinel pair (`sentinel-policies.json`, `summary-sentinel-policies.csv`) is
-skipped entirely unless policies were collected — so a root-only Community
-cluster produces six. The report's "Output files" index checks existence rather
+skipped entirely unless policies were collected, and `license.json` is written
+only when the license was read — so a root-only Community cluster produces six. The report's "Output files" index checks existence rather
 than assuming the full set.
 
 The two ACL files differ from each other on purpose. `acl-policies.json` is
@@ -333,6 +333,33 @@ block as the auth and engine collectors, using hvac's native
   covering each finding branch, including a hard-mandatory control that must
   produce *no* finding. Every body evaluates to `true` unconditionally.
 
+### License and version collection
+
+`validate_connection()` reads `sys/health` once and returns `ConnectionInfo`;
+the auditor copies `vault_version`, `cluster_id` and `is_enterprise` onto
+`AuditData`. `NamespaceAuditor._fetch_license_status()` then reads
+`sys/license/status` once per run and stores the `autoloaded` sub-dict.
+
+- **`is_enterprise` is tri-state.** `True`/`False` from the `+ent` version
+  suffix, `None` when `sys/health` omits the version. The suffix check lives
+  only in `vault_client.py` — the report reads the flag, never the string.
+- **Unknown edition is probed, not skipped.** `False` makes no call. `None`
+  calls the endpoint anyway: a 404 (`VaultAPIError` caused by
+  `hvac.exceptions.InvalidPath`) settles it as Community and records nothing;
+  a success settles it as Enterprise. A 404 on a known-Enterprise cluster is an
+  error, not a Community signal.
+- **Every failure keeps its reason** on `AuditData.license_unavailable_reason`:
+  `"denied"`, `"unexpected response"` or `"error: <message>"`. The License
+  section words its note from it, so a 5xx is not blamed on token permissions.
+- **A denial is not an access gap.** It is deliberately not passed to
+  `increment_forbidden`: that list means "the tree is incomplete below this
+  namespace", and a cluster-level read says nothing about coverage. Access
+  gaps shows it on its own "Cluster-level reads" line instead.
+- **Expiry findings**: within `LICENSE_EXPIRY_WARNING_DAYS` (90) is Medium;
+  already past the soft expiry is High — the only High finding — and cites
+  `termination_time`, when Vault actually stops serving. Timestamps without an
+  offset are read as UTC.
+
 ### Markdown Report (`src/namespace_audit/report.py`)
 
 Rendering is deliberately separated from collection:
@@ -347,6 +374,13 @@ Rendering is deliberately separated from collection:
   `DataFrame.to_markdown()` requires `tabulate`, which the project does not
   depend on. The tool version comes from `importlib.metadata`, not from
   `main.__version__`.
+- **`AuditData` is the single source**: every section reads the same `data`
+  object. Do not add kwargs to `build_markdown_report` that duplicate an
+  `AuditData` field — the license section once took its data from a kwarg while
+  the summary and findings read `data`, and the two could disagree.
+- **One clock**: `collect_findings(..., now=...)` receives the report's
+  `generated_at`, so time-based findings match the "Generated" header and tests
+  pin them with a fixed date rather than the wall clock.
 - **Node set**: the namespace tree is built from the `auth_methods` keys, which
   include the root as `""`. `data.namespaces` holds only *discovered children*
   and omits the root, so it cannot be the sole source.
@@ -373,9 +407,10 @@ cluster data. Two checks in the original draft fired on 134 and 1515 mounts
 respectively — both were the *default* state, not a deviation, and would have
 buried the ~15 genuine findings.
 
-When adding a writer to `_write_reports`, patch it in
-`tests/namespace_audit/fixtures.py::mock_file_operations` too, or unit tests will
-write real files to disk.
+When adding a writer to `_write_reports`, make sure the `file_utils` function it
+calls is patched in `tests/namespace_audit/fixtures.py::mock_file_operations`,
+or unit tests will write real files to disk. Patch the `file_utils` function,
+not the `_write_*` method — replacing the method means no test ever runs it.
 
 When adding a per-namespace collector, add its endpoint to
 `tests/namespace_audit/fixtures.py::make_hvac_client` as well. The mock hvac

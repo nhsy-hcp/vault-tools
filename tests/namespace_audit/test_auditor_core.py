@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import hvac
 import pytest
 
-from src.common.vault_client import ConnectionInfo, VaultConnectionError
+from src.common.vault_client import ConnectionInfo, VaultAPIError, VaultConnectionError, VaultPermissionError
 from src.namespace_audit.main import PROGRESS_DESCRIPTION, AuditData, AuditStats, NamespaceAuditor
 
 from .fixtures import mock_file_operations
@@ -455,6 +455,79 @@ class TestSystemLeaseTtlFetch:
         auditor.vault_client.get = Mock(return_value=[])
 
         assert auditor._fetch_system_lease_ttls() is None
+
+
+class TestLicenseStatusFetch:
+    """sys/license/status is optional enrichment; every failure is recorded, none raised."""
+
+    LICENSE = {"license_id": "abc", "expiration_time": "2027-01-01T00:00:00Z", "features": []}
+
+    def test_community_skips_the_call(self, auditor):
+        assert auditor._fetch_license_status(False) is None
+        auditor.vault_client.get.assert_not_called()
+        assert auditor.data.license_unavailable_reason is None
+
+    def test_success_returns_autoloaded(self, auditor):
+        auditor.vault_client.get.return_value = {"data": {"autoloaded": self.LICENSE}}
+        assert auditor._fetch_license_status(True) == self.LICENSE
+        assert auditor.data.license_unavailable_reason is None
+
+    def test_denied_is_recorded_but_not_a_namespace_gap(self, auditor):
+        auditor.vault_client.get.side_effect = VaultPermissionError("Access denied")
+        assert auditor._fetch_license_status(True) is None
+        assert auditor.data.license_unavailable_reason == "denied"
+        assert auditor.stats.forbidden_count == 0
+        assert auditor.stats.forbidden_namespaces == []
+
+    def test_server_error_records_the_message(self, auditor):
+        auditor.vault_client.get.side_effect = VaultAPIError("GET sys/license/status failed with status 503")
+        assert auditor._fetch_license_status(True) is None
+        assert auditor.data.license_unavailable_reason == "error: GET sys/license/status failed with status 503"
+
+    def test_unexpected_payload(self, auditor):
+        auditor.vault_client.get.return_value = {"data": {"something": "else"}}
+        assert auditor._fetch_license_status(True) is None
+        assert auditor.data.license_unavailable_reason == "unexpected response"
+
+    def test_unknown_edition_probes_and_404_means_community(self, auditor):
+        error = VaultAPIError("Invalid path sys/license/status")
+        error.__cause__ = hvac.exceptions.InvalidPath()
+        auditor.vault_client.get.side_effect = error
+        auditor.data.is_enterprise = None
+
+        assert auditor._fetch_license_status(None) is None
+        auditor.vault_client.get.assert_called_once_with("sys/license/status")
+        assert auditor.data.is_enterprise is False
+        assert auditor.data.license_unavailable_reason is None
+
+    def test_unknown_edition_success_marks_enterprise(self, auditor):
+        auditor.vault_client.get.return_value = {"data": {"autoloaded": self.LICENSE}}
+        auditor.data.is_enterprise = None
+        assert auditor._fetch_license_status(None) == self.LICENSE
+        assert auditor.data.is_enterprise is True
+
+    def test_404_on_known_enterprise_is_an_error(self, auditor):
+        error = VaultAPIError("Invalid path sys/license/status")
+        error.__cause__ = hvac.exceptions.InvalidPath()
+        auditor.vault_client.get.side_effect = error
+        assert auditor._fetch_license_status(True) is None
+        assert auditor.data.license_unavailable_reason.startswith("error: ")
+
+
+class TestWriteLicense:
+    """Runs the real writer: mock_file_operations patches only write_json."""
+
+    def test_writes_when_collected(self, auditor):
+        auditor.data.license_status = {"license_id": "abc"}
+        with patch("src.namespace_audit.main.write_json") as mock_write_json:
+            auditor._write_license("out/license.json")
+        mock_write_json.assert_called_once_with("out/license.json", {"license_id": "abc"})
+
+    def test_skips_when_not_collected(self, auditor):
+        auditor.data.license_status = None
+        with patch("src.namespace_audit.main.write_json") as mock_write_json:
+            auditor._write_license("out/license.json")
+        mock_write_json.assert_not_called()
 
 
 class TestProgressTracking:

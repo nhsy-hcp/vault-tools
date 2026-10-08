@@ -72,7 +72,8 @@ BUILTIN_AUTH_TYPES = frozenset({"token", "ns_token"})
 # Plugin lifecycle states that mean the mount will stop working at some point.
 DEPRECATED_STATUSES = frozenset({"deprecated", "pending-removal", "removed"})
 
-SEVERITY_ORDER = ("Medium", "Low", "Info")
+# High exists for one case only: a license already past its soft expiry.
+SEVERITY_ORDER = ("High", "Medium", "Low", "Info")
 
 # Sentinel's three enforcement levels, ordered strongest first. Only
 # hard-mandatory actually stops a request outright: soft-mandatory can be
@@ -448,29 +449,57 @@ def render_enforcement_distribution(egp: dict[str, Any], rgp: dict[str, Any]) ->
     return md_table(["Enforcement level", "EGP", "RGP"], rows)
 
 
-def _license_expiry_days(expiration_time: str, now: datetime | None = None) -> int | None:
-    """Days until the license soft-expiry. Returns None when the string is unparseable."""
+def _parse_license_time(value: Any) -> datetime | None:
+    """Parse a sys/license/status timestamp as an aware UTC datetime.
+
+    A timestamp with no offset is taken as UTC: subtracting a naive datetime
+    from an aware one raises TypeError, which would sink the whole report.
+    """
     try:
-        expiry = datetime.fromisoformat(expiration_time.replace("Z", "+00:00"))
-        reference = now or datetime.now(UTC)
-        if reference.tzinfo is None:
-            reference = reference.replace(tzinfo=UTC)
-        return (expiry - reference).days
-    except (ValueError, AttributeError):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
         return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def render_license(license_status: dict[str, Any] | None, is_enterprise: bool) -> str:
+def _license_expiry_days(expiration_time: Any, now: datetime | None = None) -> int | None:
+    """Days until the license soft-expiry, negative once it has passed.
+
+    Returns None when the string is unparseable.
+    """
+    expiry = _parse_license_time(expiration_time)
+    if expiry is None:
+        return None
+    reference = now or datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    return (expiry - reference).days
+
+
+_LICENSE_UNAVAILABLE_NOTES = {
+    "denied": "_License data unavailable — the token was denied read on `sys/license/status`._",
+    "unexpected response": "_License data unavailable — `sys/license/status` returned a response with no `autoloaded` license._",
+}
+
+
+def render_license(
+    license_status: dict[str, Any] | None,
+    is_enterprise: bool | None,
+    unavailable_reason: str | None = None,
+) -> str:
     """Render the ## License section.
 
-    Returns an empty string for Community Edition so the caller can omit the
-    section entirely. Returns an unavailability note for Enterprise clusters
-    where the endpoint was inaccessible.
+    Returns an empty string when there is nothing to say — Community Edition,
+    or an unknown edition where the probe recorded no failure — so the caller
+    can omit the section entirely. Otherwise returns a note worded from
+    ``unavailable_reason``, so a 5xx is not reported as a token problem.
     """
     if license_status is None:
-        if not is_enterprise:
+        if unavailable_reason is None and not is_enterprise:
             return ""
-        return "_License data unavailable — `sys/license/status` was not accessible with the provided token._"
+        if unavailable_reason and unavailable_reason.startswith("error: "):
+            return f"_License data unavailable — reading `sys/license/status` failed: {md_escape(unavailable_reason.removeprefix('error: '))}_"
+        return _LICENSE_UNAVAILABLE_NOTES.get(unavailable_reason or "", "_License data unavailable — `sys/license/status` was not read._")
 
     rows: list[list[Any]] = []
     rows.append(["License ID", license_status.get("license_id", "—")])
@@ -550,7 +579,11 @@ def _collect_sentinel_findings(data: AuditData) -> list[Finding]:
     return findings
 
 
-def collect_findings(data: AuditData, system_max_lease_ttl: int | None = None) -> list[Finding]:
+def collect_findings(
+    data: AuditData,
+    system_max_lease_ttl: int | None = None,
+    now: datetime | None = None,
+) -> list[Finding]:
     """Derive security observations from the mount metadata already collected.
 
     These are prompts for review, not a compliance verdict — several are
@@ -659,22 +692,32 @@ def collect_findings(data: AuditData, system_max_lease_ttl: int | None = None) -
 
     findings.extend(_collect_sentinel_findings(data))
 
-    if isinstance(data.license_status, dict):
-        expiry_str = data.license_status.get("expiration_time", "")
-        days = _license_expiry_days(expiry_str)
-        if days is not None and days <= LICENSE_EXPIRY_WARNING_DAYS:
-            findings.append(
-                Finding(
-                    "Medium",
-                    "",
-                    "—",
-                    "license",
-                    f"License expires on {expiry_str[:10]} ({days} day{'s' if days != 1 else ''} remaining) — renew before the grace period ends.",
-                )
-            )
+    findings.extend(_collect_license_findings(data, now))
 
     findings.sort(key=lambda f: (SEVERITY_ORDER.index(f.severity), f.namespace, f.mount))
     return findings
+
+
+def _collect_license_findings(data: AuditData, now: datetime | None) -> list[Finding]:
+    """Expiry findings, counted from ``now`` so they agree with the report date."""
+    if not isinstance(data.license_status, dict):
+        return []
+    expiry_str = data.license_status.get("expiration_time", "")
+    days = _license_expiry_days(expiry_str, now)
+    if days is None or days > LICENSE_EXPIRY_WARNING_DAYS:
+        return []
+    if days >= 0:
+        detail = f"License expires on {expiry_str[:10]} ({days} day{'s' if days != 1 else ''} remaining) — renew before the grace period ends."
+        return [Finding("Medium", "", "—", "license", detail)]
+
+    # Past the soft expiry the cluster is running on the grace period, and the
+    # date that matters is the hard termination, when Vault stops serving.
+    ago = -days
+    detail = f"License expired on {expiry_str[:10]} ({ago} day{'s' if ago != 1 else ''} ago)"
+    termination = _parse_license_time(data.license_status.get("termination_time"))
+    if termination is not None:
+        detail += f"; Vault stops at termination on {termination.strftime('%Y-%m-%d')}"
+    return [Finding("High", "", "—", "license", detail + " — renew now.")]
 
 
 def render_findings(findings: list[Finding]) -> str:
@@ -716,8 +759,13 @@ def _access_gap_rows(forbidden: list[tuple[str, str]]) -> list[list[Any]]:
     return rows
 
 
-def render_access_gaps(stats: AuditStats, start_namespace: str) -> str:
-    """What the audit could not reach — denials first, then errors."""
+def render_access_gaps(stats: AuditStats, start_namespace: str, license_unavailable_reason: str | None = None) -> str:
+    """What the audit could not reach — denials first, then errors.
+
+    A denied license read is listed separately from the namespace denials: it
+    is a cluster-level endpoint, and listing it against the root would claim
+    the whole tree is incomplete when only the license data is missing.
+    """
     parts: list[str] = []
 
     if stats.forbidden_namespaces:
@@ -731,6 +779,9 @@ def render_access_gaps(stats: AuditStats, start_namespace: str) -> str:
         parts.append(f"{stats.forbidden_count} permission denial(s) were recorded without an attributed namespace.")
     else:
         parts.append(f"None — the audit covered the full tree reachable from `{display_namespace(start_namespace)}`.")
+
+    if license_unavailable_reason == "denied":
+        parts.append("**Cluster-level reads:** `sys/license/status` was denied, so the License section is incomplete.")
 
     if stats.errors:
         rows = [[namespace, message] for namespace, message in sorted(stats.errors)]
@@ -811,9 +862,6 @@ def build_markdown_report(
     generated_at: datetime | None = None,
     system_lease_ttls: tuple[int, int] | None = None,
     sentinel_supported: bool | None = None,
-    vault_version: str | None = None,
-    license_status: dict[str, Any] | None = None,
-    cluster_id: str | None = None,
 ) -> str:
     """Render the complete namespace audit report as a markdown document.
 
@@ -829,10 +877,7 @@ def build_markdown_report(
     """
     generated = generated_at or datetime.now(UTC)
     system_max = system_lease_ttls[1] if system_lease_ttls else None
-    findings = collect_findings(data, system_max_lease_ttl=system_max)
-
-    is_enterprise = "+ent" in (vault_version or "")
-    edition_label = "Enterprise" if is_enterprise else "Community Edition"
+    findings = collect_findings(data, system_max_lease_ttl=system_max, now=generated)
 
     header_rows = [
         ["Cluster", cluster_name],
@@ -842,10 +887,13 @@ def build_markdown_report(
     ]
     if vault_addr:
         header_rows.insert(1, ["Vault address", vault_addr])
-    if cluster_id:
-        header_rows.insert(1, ["Cluster ID", cluster_id])
-    if vault_version:
-        header_rows.append(["Vault version", f"{vault_version} ({edition_label})"])
+    if data.cluster_id:
+        header_rows.insert(1, ["Cluster ID", data.cluster_id])
+    if data.vault_version:
+        version = data.vault_version
+        if data.is_enterprise is not None:
+            version += " (Enterprise)" if data.is_enterprise else " (Community Edition)"
+        header_rows.append(["Vault version", version])
 
     sentinel_sections: list[str] = ["## Sentinel policies", ""]
     if sentinel_supported is False:
@@ -885,7 +933,7 @@ def build_markdown_report(
             ]
         )
 
-    license_content = render_license(license_status, is_enterprise)
+    license_content = render_license(data.license_status, data.is_enterprise, data.license_unavailable_reason)
     license_section: list[str] = []
     if license_content:
         license_section = ["## License", "", license_content, ""]
@@ -902,7 +950,7 @@ def build_markdown_report(
         *license_section,
         "## Access gaps",
         "",
-        render_access_gaps(stats, start_namespace),
+        render_access_gaps(stats, start_namespace, data.license_unavailable_reason),
         "",
         "## Namespace inventory",
         "",

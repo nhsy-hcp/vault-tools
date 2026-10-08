@@ -155,6 +155,23 @@ class TestValidateConnection:
 
         assert info.cluster_id is None
 
+    def test_edition_unknown_when_version_absent(self, client):
+        mock_hvac = MagicMock()
+        health = self._make_health()
+        health.pop("version")
+        mock_hvac.sys.read_health_status.return_value = health
+        mock_hvac.sys.is_sealed.return_value = False
+        mock_hvac.is_authenticated.return_value = True
+        mock_hvac.sys.is_initialized.return_value = True
+
+        with patch.object(client, "get_client") as mock_gc:
+            mock_gc.return_value.__enter__ = Mock(return_value=mock_hvac)
+            mock_gc.return_value.__exit__ = Mock(return_value=False)
+            info = client.validate_connection()
+
+        assert info.vault_version is None
+        assert info.is_enterprise is None
+
     def test_sealed_raises(self, client):
         mock_hvac = MagicMock()
         mock_hvac.sys.read_health_status.return_value = self._make_health()

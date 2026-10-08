@@ -83,6 +83,7 @@ def clean_data():
         "team-a": {"ns_cubbyhole/": mount("ns_cubbyhole"), "pki/": mount("pki")},
     }
     data.vault_version = "1.17.0+ent"
+    data.is_enterprise = True
     data.license_status = _sample_license(expiration_days_from_now=365)
     data.cluster_id = "d33099d9-206e-53c2-4e50-44fb62ac69a6"
     return data
@@ -116,6 +117,7 @@ def flagged_data():
         "empty": {"cubbyhole/": mount("cubbyhole"), "identity/": mount("identity")},
     }
     data.vault_version = "1.17.0+ent"
+    data.is_enterprise = True
     data.license_status = _sample_license(expiration_days_from_now=365)
     return data
 
@@ -165,6 +167,7 @@ def sentinel_data():
         "team-a": {"overridable": sentinel_policy("overridable", enforcement_level="soft-mandatory")},
     }
     data.vault_version = "1.17.0+ent"
+    data.is_enterprise = True
     data.license_status = _sample_license(expiration_days_from_now=365)
     return data
 
@@ -177,6 +180,7 @@ def license_expiring_data():
     data.auth_methods = {"": {"token/": mount("token")}}
     data.secret_engines = {"": {"cubbyhole/": mount("cubbyhole"), "identity/": mount("identity")}}
     data.vault_version = "1.17.0+ent"
+    data.is_enterprise = True
     data.license_status = _sample_license(expiration_days_from_now=30)
     return data
 
@@ -189,6 +193,7 @@ def ce_data():
     data.auth_methods = {"": {"token/": mount("token")}}
     data.secret_engines = {"": {"cubbyhole/": mount("cubbyhole"), "identity/": mount("identity")}}
     data.vault_version = "1.16.0"
+    data.is_enterprise = False
     data.license_status = None
     return data
 

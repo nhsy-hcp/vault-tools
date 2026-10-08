@@ -56,3 +56,4 @@ Thumbs.db
 
 # Testing infrastructure (not for version control)
 testing/
+/.claude/

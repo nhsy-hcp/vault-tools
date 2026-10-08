@@ -63,6 +63,17 @@ path "sys/config/state/sanitized" {
   capabilities = ["read"]
 }
 
+# --- namespace-audit: license status -----------------------------------------
+# GET sys/license/status, read once per run against the root namespace, for the
+# report's License section and the expiry findings. Enterprise only: a Community
+# cluster has no such endpoint and the rule grants nothing there.
+#
+# Optional: without it the License section reports the read as denied and the
+# run still succeeds. No nested variants -- the license is cluster-wide.
+path "sys/license/status" {
+  capabilities = ["read"]
+}
+
 # --- namespace-audit: auth methods -------------------------------------------
 # list_auth_methods() -> GET sys/auth, once per namespace visited. The traversal
 # scopes each request with get_client(namespace_path), so every nesting level is

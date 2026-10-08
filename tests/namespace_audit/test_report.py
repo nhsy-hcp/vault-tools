@@ -1,6 +1,6 @@
 """Tests for the namespace audit markdown report."""
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 from src.namespace_audit.main import AuditData, AuditStats
 from src.namespace_audit.report import (
@@ -778,34 +778,30 @@ class TestSentinelSection:
 
 class TestVaultVersionHeader:
     def test_version_row_present_when_set(self, clean_data, finished_stats):
-        report = build_markdown_report("prod", clean_data, finished_stats, vault_version="1.17.0+ent")
-        assert "Vault version" in report
-        assert "1.17.0+ent" in report
+        report = build_markdown_report("prod", clean_data, finished_stats)
+        assert "| Vault version | 1.17.0+ent (Enterprise) |" in report
 
-    def test_enterprise_label(self, clean_data, finished_stats):
-        report = build_markdown_report("prod", clean_data, finished_stats, vault_version="1.17.0+ent")
-        assert "Enterprise" in report
+    def test_ce_label(self, ce_data, finished_stats):
+        report = build_markdown_report("prod", ce_data, finished_stats)
+        assert "| Vault version | 1.16.0 (Community Edition) |" in report
 
-    def test_ce_label(self, clean_data, finished_stats):
-        report = build_markdown_report("prod", clean_data, finished_stats, vault_version="1.16.0")
-        assert "Community Edition" in report
+    def test_label_omitted_when_edition_unknown(self, clean_data, finished_stats):
+        clean_data.is_enterprise = None
+        report = build_markdown_report("prod", clean_data, finished_stats)
+        assert "| Vault version | 1.17.0+ent |" in report
 
     def test_version_row_absent_when_none(self, clean_data, finished_stats):
-        report = build_markdown_report("prod", clean_data, finished_stats, vault_version=None)
+        clean_data.vault_version = None
+        report = build_markdown_report("prod", clean_data, finished_stats)
         assert "Vault version" not in report
 
-    def test_version_from_data_field(self, clean_data, finished_stats):
-        clean_data.vault_version = "1.17.0+ent"
-        report = build_markdown_report("prod", clean_data, finished_stats, vault_version=clean_data.vault_version)
-        assert "1.17.0+ent" in report
-
     def test_cluster_id_row_present_when_set(self, clean_data, finished_stats):
-        report = build_markdown_report("prod", clean_data, finished_stats, cluster_id="d33099d9-206e-53c2-4e50-44fb62ac69a6")
-        assert "Cluster ID" in report
-        assert "d33099d9-206e-53c2-4e50-44fb62ac69a6" in report
+        report = build_markdown_report("prod", clean_data, finished_stats)
+        assert "| Cluster ID | d33099d9-206e-53c2-4e50-44fb62ac69a6 |" in report
 
     def test_cluster_id_row_absent_when_none(self, clean_data, finished_stats):
-        report = build_markdown_report("prod", clean_data, finished_stats, cluster_id=None)
+        clean_data.cluster_id = None
+        report = build_markdown_report("prod", clean_data, finished_stats)
         assert "Cluster ID" not in report
 
 
@@ -845,10 +841,27 @@ class TestRenderLicense:
     def test_ce_returns_empty_string(self):
         assert render_license(None, is_enterprise=False) == ""
 
-    def test_enterprise_unavailable_returns_note(self):
-        result = render_license(None, is_enterprise=True)
-        assert "unavailable" in result
+    def test_unknown_edition_without_failure_returns_empty_string(self):
+        assert render_license(None, is_enterprise=None) == ""
+
+    def test_denied_note_blames_the_token(self):
+        result = render_license(None, is_enterprise=True, unavailable_reason="denied")
+        assert "denied" in result
         assert "sys/license/status" in result
+
+    def test_error_note_does_not_blame_the_token(self):
+        result = render_license(None, is_enterprise=True, unavailable_reason="error: GET sys/license/status failed with status 503")
+        assert "503" in result
+        assert "token" not in result
+
+    def test_unexpected_response_note(self):
+        result = render_license(None, is_enterprise=True, unavailable_reason="unexpected response")
+        assert "autoloaded" in result
+        assert "token" not in result
+
+    def test_failure_on_unknown_edition_still_renders_note(self):
+        result = render_license(None, is_enterprise=None, unavailable_reason="denied")
+        assert "unavailable" in result
 
     def test_expiry_dates_formatted_as_date_only(self):
         result = render_license(self._license(), is_enterprise=True)
@@ -858,87 +871,142 @@ class TestRenderLicense:
 
 class TestLicenseSection:
     def test_license_section_present_for_enterprise(self, clean_data, finished_stats):
-        report = build_markdown_report("prod", clean_data, finished_stats, license_status=clean_data.license_status, vault_version="1.17.0+ent")
+        report = build_markdown_report("prod", clean_data, finished_stats)
         assert "## License" in report
 
     def test_license_section_absent_for_ce(self, ce_data, finished_stats):
-        report = build_markdown_report("prod", ce_data, finished_stats, license_status=None, vault_version="1.16.0")
+        report = build_markdown_report("prod", ce_data, finished_stats)
         assert "## License" not in report
 
     def test_license_section_after_summary_before_access_gaps(self, clean_data, finished_stats):
-        report = build_markdown_report("prod", clean_data, finished_stats, license_status=clean_data.license_status, vault_version="1.17.0+ent")
+        report = build_markdown_report("prod", clean_data, finished_stats)
         assert report.index("## Summary") < report.index("## License") < report.index("## Access gaps")
 
     def test_features_line_in_report(self, clean_data, finished_stats):
-        report = build_markdown_report("prod", clean_data, finished_stats, license_status=clean_data.license_status, vault_version="1.17.0+ent")
+        report = build_markdown_report("prod", clean_data, finished_stats)
         assert "**Features:**" in report
 
     def test_unavailable_note_when_ent_no_license(self, ce_data, finished_stats):
         ce_data.vault_version = "1.17.0+ent"
-        report = build_markdown_report("prod", ce_data, finished_stats, license_status=None, vault_version="1.17.0+ent")
+        ce_data.is_enterprise = True
+        ce_data.license_unavailable_reason = "denied"
+        report = build_markdown_report("prod", ce_data, finished_stats)
         assert "## License" in report
         assert "unavailable" in report
+
+    def test_section_and_summary_share_one_source(self, clean_data, finished_stats):
+        """Regression: the section used to need kwargs the summary did not."""
+        report = build_markdown_report("prod", clean_data, finished_stats)
+        assert "License expiry" in report
+        assert "**Features:**" in report
+
+
+class TestLicenseAccessGap:
+    def test_denied_license_is_not_a_namespace_gap(self, clean_data, finished_stats):
+        clean_data.license_status = None
+        clean_data.license_unavailable_reason = "denied"
+        report = build_markdown_report("prod", clean_data, finished_stats)
+        gaps = report[report.index("## Access gaps") :]
+        assert "None — the audit covered the full tree" in gaps
+        assert "**Cluster-level reads:** `sys/license/status` was denied" in gaps
+
+    def test_no_cluster_line_for_other_reasons(self, finished_stats):
+        rendered = render_access_gaps(finished_stats, "", "error: boom")
+        assert "Cluster-level" not in rendered
 
 
 class TestSummaryLicenseRows:
     def test_expiry_and_feature_count_rows_present(self, clean_data, finished_stats):
-        report = build_markdown_report("prod", clean_data, finished_stats, license_status=clean_data.license_status, vault_version="1.17.0+ent")
+        report = build_markdown_report("prod", clean_data, finished_stats)
         assert "License expiry" in report
         assert "Licensed features" in report
         assert "| Licensed features | 13 |" in report
 
     def test_rows_absent_when_no_license(self, ce_data, finished_stats):
-        report = build_markdown_report("prod", ce_data, finished_stats, license_status=None, vault_version="1.16.0")
+        report = build_markdown_report("prod", ce_data, finished_stats)
         assert "License expiry" not in report
         assert "Licensed features" not in report
 
 
+GENERATED = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
+
+
+def _license_findings(data, now=GENERATED):
+    return [f for f in collect_findings(data, now=now) if f.mount_type == "license"]
+
+
 class TestLicenseFinding:
-    def test_expiry_within_window_raises_medium(self, license_expiring_data, finished_stats):
-        findings = collect_findings(license_expiring_data)
-        license_findings = [f for f in findings if f.mount_type == "license"]
-        assert len(license_findings) == 1
-        assert license_findings[0].severity == "Medium"
-        assert "expires" in license_findings[0].detail.lower()
+    def _data(self, expiration_time, termination_time="2031-05-17T23:59:59Z"):
+        data = AuditData()
+        data.is_enterprise = True
+        data.license_status = {"expiration_time": expiration_time, "termination_time": termination_time, "features": []}
+        return data
 
-    def test_expiry_outside_window_no_finding(self, clean_data, finished_stats):
-        findings = collect_findings(clean_data)
-        license_findings = [f for f in findings if f.mount_type == "license"]
-        assert len(license_findings) == 0
+    def test_expiry_within_window_raises_medium(self):
+        findings = _license_findings(self._data("2026-11-07T12:00:00Z"))
+        assert len(findings) == 1
+        assert findings[0].severity == "Medium"
+        assert "(30 days remaining)" in findings[0].detail
 
-    def test_no_license_no_finding(self, ce_data, finished_stats):
-        findings = collect_findings(ce_data)
-        license_findings = [f for f in findings if f.mount_type == "license"]
-        assert len(license_findings) == 0
+    def test_expiry_outside_window_no_finding(self):
+        assert _license_findings(self._data("2027-10-08T12:00:00Z")) == []
+
+    def test_no_license_no_finding(self, ce_data):
+        assert _license_findings(ce_data) == []
+
+    def test_expired_license_raises_high_with_termination(self):
+        findings = _license_findings(self._data("2026-09-28T12:00:00Z"))
+        assert len(findings) == 1
+        assert findings[0].severity == "High"
+        assert "expired on 2026-09-28 (10 days ago)" in findings[0].detail
+        assert "termination on 2031-05-17" in findings[0].detail
+        assert "remaining" not in findings[0].detail
+        assert "-" + "10" not in findings[0].detail
+
+    def test_expired_license_without_termination(self):
+        findings = _license_findings(self._data("2026-09-28T12:00:00Z", termination_time=""))
+        assert findings[0].severity == "High"
+        assert "termination" not in findings[0].detail
+
+    def test_naive_timestamp_does_not_raise(self, finished_stats):
+        data = self._data("2026-11-07T12:00:00")
+        findings = _license_findings(data)
+        assert findings[0].severity == "Medium"
+        report = build_markdown_report("prod", data, finished_stats, generated_at=GENERATED)
+        assert "## License" in report
+
+    def test_day_count_follows_generated_at_not_wall_clock(self, finished_stats):
+        data = self._data("2026-11-07T12:00:00Z")
+        report = build_markdown_report("prod", data, finished_stats, generated_at=GENERATED)
+        assert "(30 days remaining)" in report
+        later = build_markdown_report("prod", data, finished_stats, generated_at=datetime(2026, 11, 1, 12, 0, tzinfo=UTC))
+        assert "(6 days remaining)" in later
+
+    def test_high_sorts_before_medium(self, flagged_data):
+        flagged_data.license_status = {"expiration_time": "2026-09-28T12:00:00Z", "features": []}
+        findings = collect_findings(flagged_data, now=GENERATED)
+        assert findings[0].severity == "High"
 
     def test_finding_appears_in_report(self, license_expiring_data, finished_stats):
-        report = build_markdown_report(
-            "prod",
-            license_expiring_data,
-            finished_stats,
-            license_status=license_expiring_data.license_status,
-            vault_version="1.17.0+ent",
-        )
-        assert "license" in report.lower()
+        report = build_markdown_report("prod", license_expiring_data, finished_stats)
         assert "expires" in report.lower()
 
 
 class TestLicenseExpiryDaysHelper:
     def test_future_date_returns_positive(self):
-        from datetime import datetime, timedelta
-
-        future = (datetime.now(UTC) + timedelta(days=45)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        days = _license_expiry_days(future)
-        assert days is not None
-        assert 44 <= days <= 45
+        assert _license_expiry_days("2026-11-22T12:00:00Z", now=GENERATED) == 45
 
     def test_past_date_returns_negative(self):
-        days = _license_expiry_days("2020-01-01T00:00:00Z")
-        assert days is not None
-        assert days < 0
+        assert _license_expiry_days("2020-01-01T00:00:00Z", now=GENERATED) < 0
+
+    def test_naive_timestamp_is_treated_as_utc(self):
+        assert _license_expiry_days("2026-11-22T12:00:00", now=GENERATED) == 45
 
     def test_invalid_string_returns_none(self):
         assert _license_expiry_days("not-a-date") is None
 
     def test_empty_string_returns_none(self):
         assert _license_expiry_days("") is None
+
+    def test_non_string_returns_none(self):
+        assert _license_expiry_days(None) is None

@@ -82,12 +82,13 @@ python main.py namespace-audit --workers 8 --output-dir custom-output
 python main.py namespace-audit --help
 ```
 
-Each run writes up to eleven files to the output directory: up to five JSON
+Each run writes up to twelve files to the output directory: up to six JSON
 dumps of the raw API responses, up to five CSV summaries, and a markdown report,
 `{cluster-name}-audit-report-{YYYYMMDD}.md`. The report is written on every run —
 there is no flag to enable or suppress it. The two Sentinel files are written
-only on a cluster that has Sentinel policies, and the CSV summaries are skipped
-when they would be empty, so a small cluster produces fewer files.
+only on a cluster that has Sentinel policies, `license.json` only when the
+Enterprise license could be read, and the CSV summaries are skipped when they
+would be empty, so a small cluster produces fewer files.
 
 The console shows the run itself — a progress bar, the summary table and the
 list of files written — and nothing else. Per-namespace detail, file-write
@@ -98,16 +99,24 @@ aggregator can consume.
 
 The report is the human-readable view of the audit and contains:
 
-- **Header** — the cluster name, the `VAULT_ADDR` it was audited through, the
-  generation timestamp, the tool version and the starting namespace, so a report
-  found on its own still says which cluster it describes. The console prints the
-  same address when the run starts.
+- **Header** — the cluster name and ID, the `VAULT_ADDR` it was audited through,
+  the generation timestamp, the tool version, the starting namespace and the
+  Vault version with its edition (Enterprise or Community), so a report found on
+  its own still says which cluster it describes. The console prints the same
+  address when the run starts.
 - **Summary** — total namespaces, maximum nesting depth, mount totals and
-  distinct type counts, duration, errors and denials.
+  distinct type counts, duration, errors and denials, plus the license expiry
+  date and licensed feature count on Enterprise.
+- **License** — Enterprise only: license ID, issuer, soft-expiry and hard
+  termination dates, performance standby count and the licensed features. If
+  the license could not be read, the section says why — denied, a server error,
+  or an unexpected response — rather than disappearing. Community clusters omit
+  the section.
 - **Access gaps** — every namespace the token was denied, by name, and whether
   the whole namespace or only its child listing was refused. This is the section
   to read first: it bounds how much of the cluster the rest of the report
-  actually covers.
+  actually covers. A denied license read is listed separately as a cluster-level
+  read, because it does not make any namespace incomplete.
 - **Namespace inventory** — the hierarchy as an indented tree with per-namespace
   mount counts, then a table of namespace IDs, depth and custom metadata.
 - **Type distribution** — how many mounts of each auth method and secrets engine
@@ -126,10 +135,11 @@ The report is the human-readable view of the audit and contains:
   unauthenticated callers (`listing_visibility: unauth`), mounts whose
   `max_lease_ttl` overrides the cluster ceiling, non-replicated `local` mounts,
   namespaces with no auth method beyond the built-in token backend, leaf
-  namespaces holding nothing but Vault's own built-in engines, and Sentinel
+  namespaces holding nothing but Vault's own built-in engines, Sentinel
   policies that do not actually block anything (`advisory` or `soft-mandatory`
   enforcement, a wildcard EGP path, or a rule body that always evaluates to
-  true).
+  true), and an Enterprise license expiring within 90 days (Medium) or already
+  past its soft expiry (High, with the hard termination date).
 - **Output files** — an index of the sibling JSON and CSV files from the same run.
 
 These observations are review prompts, not a compliance verdict — informational
@@ -272,6 +282,10 @@ Two things to know about the policy:
   cluster they grant nothing. Removing them leaves that section empty; denying
   them mid-run puts the affected namespaces in **Access gaps** rather than
   failing the audit.
+- **`sys/license/status` is optional.** It supplies the report's License
+  section and expiry findings on Enterprise, and grants nothing on Community.
+  Removing the rule makes the License section report the read as denied and
+  **Access gaps** note it as a cluster-level read; it does not fail the run.
 
 If the token lacks `sys/namespaces` at some level, the audit stops descending
 there and reports the namespaces it did reach. The **Permission Denied (skipped)**

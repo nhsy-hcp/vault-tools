@@ -25,7 +25,9 @@ from .exceptions import (  # noqa: F401
 class ConnectionInfo(NamedTuple):
     cluster_name: str
     vault_version: str | None
-    is_enterprise: bool
+    # None when sys/health omits the version, so the edition is unknown rather
+    # than assumed to be Community.
+    is_enterprise: bool | None
     cluster_id: str | None
 
 
@@ -151,7 +153,7 @@ class VaultClient:
 
                 cluster_name = health_status.get("cluster_name", "unknown")
                 vault_version = health_status.get("version")
-                is_enterprise = "+ent" in (vault_version or "")
+                is_enterprise = "+ent" in vault_version if vault_version else None
                 cluster_id = health_status.get("cluster_id")
                 self.logger.info(f"Connected to Vault cluster: {cluster_name}")
                 return ConnectionInfo(cluster_name, vault_version, is_enterprise, cluster_id)

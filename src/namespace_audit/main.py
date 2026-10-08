@@ -24,7 +24,7 @@ from rich.table import Table
 from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import write_csv, write_json, write_markdown
 from src.common.utils import FILE_DATE_FORMAT, normalise_namespace_path
-from src.common.vault_client import VaultClient, VaultConnectionError
+from src.common.vault_client import VaultClient, VaultConnectionError, VaultPermissionError
 from src.namespace_audit.report import build_markdown_report
 
 logger = logging.getLogger(__name__)
@@ -145,9 +145,16 @@ class AuditData:
     # Vault version string from sys/health (e.g. "1.17.0+ent"). None when the
     # health response did not include it (pre-1.9 clusters, or mocked responses).
     vault_version: str | None = None
+    # From the "+ent" suffix on the version. None when the version is missing,
+    # so the edition is unknown rather than assumed to be Community.
+    is_enterprise: bool | None = None
     # The "autoloaded" sub-dict from sys/license/status, or None when the
-    # endpoint is absent (Community Edition) or unreadable (permission denied).
+    # endpoint is absent (Community Edition) or unreadable.
     license_status: dict[str, Any] | None = None
+    # Why license_status is None on a cluster that has a license endpoint:
+    # "denied", "unexpected response" or "error: <message>". None when the data
+    # was collected or the cluster has no license endpoint at all.
+    license_unavailable_reason: str | None = None
     # Cluster UUID from sys/health. None when the health response omits it.
     cluster_id: str | None = None
 
@@ -245,6 +252,7 @@ class NamespaceAuditor:
             cluster_name = info.cluster_name
             self.data.vault_version = info.vault_version
             self.data.cluster_id = info.cluster_id
+            self.data.is_enterprise = info.is_enterprise
             self.console.print(f"[green]✓[/green] Connected to cluster: [bold]{cluster_name}[/bold]")
 
             self.system_lease_ttls = self._fetch_system_lease_ttls()
@@ -377,31 +385,46 @@ class NamespaceAuditor:
             logger.debug(f"Could not read sys/config/state/sanitized ({e}); lease findings will use the fixed threshold")
         return None
 
-    def _fetch_license_status(self, is_enterprise: bool) -> dict[str, Any] | None:
+    def _fetch_license_status(self, is_enterprise: bool | None) -> dict[str, Any] | None:
         """Read the cluster's active license from sys/license/status.
 
         Returns the "autoloaded" sub-dict, or None when the endpoint is absent
-        (Community Edition) or when the token lacks permission. This is optional
-        enrichment — any failure downgrades the report rather than sinking the run.
+        (Community Edition) or unreadable. This is optional enrichment — any
+        failure downgrades the report rather than sinking the run, and the
+        reason is kept on ``license_unavailable_reason`` for the report.
+
+        An unknown edition (no version in sys/health) is probed rather than
+        skipped: a 404 then identifies Community and records nothing.
+
+        A denial is deliberately not passed to ``increment_forbidden``: that
+        list means "the namespace tree is incomplete below here", and a
+        cluster-level license read says nothing about namespace coverage.
         """
-        if not is_enterprise:
+        if is_enterprise is False:
             return None
         try:
             response = self.vault_client.get("sys/license/status")
-            payload = response.get("data", response) if isinstance(response, dict) else {}
-            autoloaded = payload.get("autoloaded")
-            if isinstance(autoloaded, dict):
-                logger.debug("License status collected from sys/license/status")
-                return autoloaded
-            logger.debug(f"Unexpected sys/license/status payload shape; license data unavailable: {payload!r}")
+        except VaultPermissionError as e:
+            logger.debug(f"Permission denied reading sys/license/status ({e}); license data unavailable")
+            self.data.license_unavailable_reason = "denied"
+            return None
         except Exception as e:
-            from src.common.exceptions import VaultPermissionError
+            if is_enterprise is None and isinstance(e.__cause__, hvac.exceptions.InvalidPath):
+                logger.debug("sys/license/status not found; treating the cluster as Community Edition")
+                self.data.is_enterprise = False
+                return None
+            logger.debug(f"Could not read sys/license/status ({e}); license data unavailable")
+            self.data.license_unavailable_reason = f"error: {e}"
+            return None
 
-            if isinstance(e, VaultPermissionError):
-                logger.debug(f"Permission denied reading sys/license/status ({e}); license data unavailable")
-                self.stats.increment_forbidden("", "sys/license/status")
-            else:
-                logger.debug(f"Could not read sys/license/status ({e}); license data unavailable")
+        payload = response.get("data", response) if isinstance(response, dict) else {}
+        autoloaded = payload.get("autoloaded") if isinstance(payload, dict) else None
+        if isinstance(autoloaded, dict):
+            logger.debug("License status collected from sys/license/status")
+            self.data.is_enterprise = True
+            return autoloaded
+        logger.debug(f"Unexpected sys/license/status payload shape; license data unavailable: {payload!r}")
+        self.data.license_unavailable_reason = "unexpected response"
         return None
 
     def _fetch_acl_policies(self, client: Any, display_path: str) -> list[str]:
@@ -814,9 +837,6 @@ class NamespaceAuditor:
                 output_files=sibling_files,
                 system_lease_ttls=self.system_lease_ttls,
                 sentinel_supported=self.sentinel_supported,
-                vault_version=self.data.vault_version,
-                license_status=self.data.license_status,
-                cluster_id=self.data.cluster_id,
             )
             write_markdown(file_path, content)
         except Exception as e:

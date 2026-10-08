@@ -122,7 +122,6 @@ def mock_file_operations():
         patch("src.namespace_audit.main.write_json") as mock_write_json,
         patch("src.namespace_audit.main.write_csv") as mock_write_csv,
         patch("src.namespace_audit.main.write_markdown"),
-        patch("src.namespace_audit.main.NamespaceAuditor._write_license"),
         patch("os.makedirs"),
     ):
         yield mock_write_json, mock_write_csv
