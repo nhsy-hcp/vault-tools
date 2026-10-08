@@ -17,6 +17,16 @@ repos:
         args: ['--fix']
       - id: ruff-format
 
+  # Vault policy formatting. Check only -- `task fmt:policy` applies the fix.
+  # Skips with a message when no vault binary is on PATH (e.g. CI runners).
+  - repo: local
+    hooks:
+      - id: vault-policy-fmt
+        name: vault policy fmt
+        entry: scripts/check-policy-fmt.sh
+        language: script
+        files: \.hcl$
+
   # YAML validation
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

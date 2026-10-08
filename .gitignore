@@ -54,6 +54,9 @@ Thumbs.db
 /.bob/
 /.plans/
 
+# Scratch space for agents and local runs; can hold real audit output
+/.tmp/
+
 # Testing infrastructure (not for version control)
 testing/
 /.claude/

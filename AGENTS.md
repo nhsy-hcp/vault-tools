@@ -159,6 +159,17 @@ Formatting, import sorting, and secret scanning are all pre-commit hooks
 (`ruff-format`, `ruff`'s `I` rules, and `gitleaks`), so they run automatically
 on every commit rather than from a separate task.
 
+Vault policy files (`*.hcl`, e.g. `audit-policy.hcl` and
+`audit-policy-acl-reader.hcl`) are formatted with **`vault policy fmt`**: two-space
+indent, `key = value` spacing, and a blank line between consecutive `path`
+blocks. The `vault-policy-fmt` pre-commit hook (`scripts/check-policy-fmt.sh`)
+checks this as part of `task lint`. It formats a copy in `.tmp/` and fails with a
+diff, never rewriting the file itself. Apply the fix with `task fmt:policy`. The
+check needs a `vault` binary on PATH (no server or token) and skips with a
+message without one, which is why CI, having none, still passes. Formatting is
+not the only rule for these files: every `path` rule must still map to a request
+the tool actually issues.
+
 ## Environment Variables
 
 ### Required
