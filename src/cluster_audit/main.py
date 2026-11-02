@@ -25,6 +25,7 @@ from src.cluster_audit.collector import (
     read_health,
     unauthenticated_only,
 )
+from src.cluster_audit.findings import DEFAULT_THRESHOLDS, Thresholds
 from src.cluster_audit.report import build_cluster_findings_json, build_cluster_report, collect_cluster_findings
 from src.common.exceptions import VaultConnectionError
 from src.common.file_utils import write_json, write_markdown
@@ -54,13 +55,13 @@ class ClusterAuditResult(NamedTuple):
     reads: ClusterReads
 
 
-def run_cluster_audit(vault_client: VaultClient, output_dir: str, console: Console | None = None) -> dict[str, Any] | None:
+def run_cluster_audit(vault_client: VaultClient, output_dir: str, console: Console | None = None, thresholds: Thresholds = DEFAULT_THRESHOLDS) -> dict[str, Any] | None:
     """Collect, judge and write the cluster audit. Returns the findings document, or None on failure."""
-    result = run_cluster_audit_full(vault_client, output_dir, console)
+    result = run_cluster_audit_full(vault_client, output_dir, console, thresholds)
     return result.document if result else None
 
 
-def run_cluster_audit_full(vault_client: VaultClient, output_dir: str, console: Console | None = None) -> ClusterAuditResult | None:
+def run_cluster_audit_full(vault_client: VaultClient, output_dir: str, console: Console | None = None, thresholds: Thresholds = DEFAULT_THRESHOLDS) -> ClusterAuditResult | None:
     """run_cluster_audit, also returning what was collected so full-audit can reuse it."""
     console = console or Console()
     console.print(Panel.fit(f"[bold cyan]Vault Cluster Audit[/bold cyan]\nVault address: [yellow]{vault_client.vault_addr}[/yellow]", border_style="cyan"))
@@ -96,7 +97,7 @@ def run_cluster_audit_full(vault_client: VaultClient, output_dir: str, console: 
     generated = datetime.now(UTC)
     license_status = license_result.status if license_result else None
     license_reason = license_result.unavailable_reason if license_result else None
-    findings = collect_cluster_findings(health, license_status=license_status, system_lease_ttls=lease_ttls, now=generated)
+    findings = collect_cluster_findings(health, license_status=license_status, system_lease_ttls=lease_ttls, now=generated, thresholds=thresholds)
 
     os.makedirs(output_dir, exist_ok=True)
     date_str = generated.strftime(FILE_DATE_FORMAT)

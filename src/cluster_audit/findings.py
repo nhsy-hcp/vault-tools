@@ -11,6 +11,7 @@ cluster rather than treating a finding as a verdict.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -41,6 +42,25 @@ LEASE_COUNT_WARNING = 100_000
 # scheduled start. A config write leaves next_snapshot_start stale until the
 # next run; 25h covers a daily schedule.
 SNAPSHOT_OVERDUE_MIN_GRACE_SECONDS = 25 * 3600
+
+
+@dataclass(frozen=True)
+class Thresholds:
+    """The cluster-health thresholds an operator can tune per cluster (CLI flags).
+
+    Defaults are the module constants, which are the vault-ops skill's values.
+    The rest stay constants until there is reference-cluster data to judge them.
+    """
+
+    lease_count_warning: int = LEASE_COUNT_WARNING
+    # Floor on the VT-SNAP-002 overdue grace. The schedule's own interval is
+    # always a floor too, so a daily schedule is never judged within a day; a
+    # value below 25h can fire falsely once after a schedule is lengthened,
+    # because next_snapshot_start stays stale until the next run.
+    snapshot_grace_seconds: int = SNAPSHOT_OVERDUE_MIN_GRACE_SECONDS
+
+
+DEFAULT_THRESHOLDS = Thresholds()
 
 
 def parse_version(version: str) -> tuple[int, int] | None:
@@ -238,7 +258,7 @@ def replication_link_findings(kind: str, status: dict[str, Any], peers: list[dic
     return findings
 
 
-def metric_findings(metrics: dict[str, Any] | None) -> list[Finding]:
+def metric_findings(metrics: dict[str, Any] | None, thresholds: Thresholds = DEFAULT_THRESHOLDS) -> list[Finding]:
     """VT-HLTH-005/006. An absent gauge (standby node) is not judged."""
     metrics = metrics or {}
     findings: list[Finding] = []
@@ -256,7 +276,8 @@ def metric_findings(metrics: dict[str, Any] | None) -> list[Finding]:
             )
         )
     leases = metrics.get("leases")
-    if isinstance(leases, int) and leases > LEASE_COUNT_WARNING:
+    limit = thresholds.lease_count_warning
+    if isinstance(leases, int) and leases > limit:
         findings.append(
             finding(
                 "VT-HLTH-006",
@@ -264,9 +285,9 @@ def metric_findings(metrics: dict[str, Any] | None) -> list[Finding]:
                 "cluster",
                 None,
                 "metrics",
-                f"{leases:,} outstanding leases, above the {LEASE_COUNT_WARNING:,} review threshold: large lease counts slow unseal, leader election and expiration.",
+                f"{leases:,} outstanding leases, above the {limit:,} review threshold: large lease counts slow unseal, leader election and expiration.",
                 leases=leases,
-                threshold=LEASE_COUNT_WARNING,
+                threshold=limit,
             )
         )
     return findings
@@ -314,7 +335,7 @@ def audit_device_findings(devices: list[dict[str, Any]] | None) -> list[Finding]
     return findings
 
 
-def snapshot_findings(snapshots: dict[str, Any] | None, now: datetime) -> list[Finding]:
+def snapshot_findings(snapshots: dict[str, Any] | None, now: datetime, thresholds: Thresholds = DEFAULT_THRESHOLDS) -> list[Finding]:
     """VT-SNAP-001..003. None (CE, no raft, unreadable) and never-run configs are not judged."""
     if snapshots is None:
         return []
@@ -330,7 +351,7 @@ def snapshot_findings(snapshots: dict[str, Any] | None, now: datetime) -> list[F
         # A run in progress has started, so it is not overdue however long it
         # takes; a failing config still fires through consecutive_errors.
         if last_start and next_start and not cfg.get("in_progress"):
-            grace = max((next_start - last_start).total_seconds(), SNAPSHOT_OVERDUE_MIN_GRACE_SECONDS)
+            grace = max((next_start - last_start).total_seconds(), thresholds.snapshot_grace_seconds)
             late = (now - next_start).total_seconds()
             overdue = int(late) // 60 * 60 if late > grace else 0
         if errors or overdue:
@@ -347,6 +368,9 @@ def snapshot_findings(snapshots: dict[str, Any] | None, now: datetime) -> list[F
                     overdue_seconds=overdue,
                     last_snapshot_end=cfg.get("last_snapshot_end"),
                     next_snapshot_start=cfg.get("next_snapshot_start"),
+                    # Only when tuned, so a default run's evidence (and a diff
+                    # against one) is unchanged.
+                    **({"grace_seconds": thresholds.snapshot_grace_seconds} if thresholds.snapshot_grace_seconds != SNAPSHOT_OVERDUE_MIN_GRACE_SECONDS else {}),
                 )
             )
         if cfg.get("storage_scheme") == "file":
@@ -371,7 +395,7 @@ def reference_time(health: dict[str, Any]) -> datetime:
     return datetime.fromtimestamp(server_time, UTC) if isinstance(server_time, int) and server_time > 0 else datetime.now(UTC)
 
 
-def health_findings(health: dict[str, Any] | None, now: datetime | None = None) -> list[Finding]:
+def health_findings(health: dict[str, Any] | None, now: datetime | None = None, thresholds: Thresholds = DEFAULT_THRESHOLDS) -> list[Finding]:
     """Every cluster health rule except license and lease, which have their own sources."""
     if not health:
         return []
@@ -444,7 +468,7 @@ def health_findings(health: dict[str, Any] | None, now: datetime | None = None) 
                 min_supported=minimum,
             )
         )
-    findings += metric_findings(health.get("metrics"))
+    findings += metric_findings(health.get("metrics"), thresholds)
     findings += audit_device_findings(health.get("audit_devices"))
-    findings += snapshot_findings(health.get("snapshots"), now)
+    findings += snapshot_findings(health.get("snapshots"), now, thresholds)
     return findings

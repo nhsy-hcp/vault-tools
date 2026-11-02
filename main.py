@@ -14,6 +14,7 @@
 import argparse
 import importlib.metadata
 import os
+import re
 import sys
 import uuid
 from collections.abc import Callable
@@ -23,6 +24,7 @@ from typing import Any
 from rich.console import Console
 
 from src.activity_export.main import run_activity_export
+from src.cluster_audit.findings import DEFAULT_THRESHOLDS, Thresholds
 from src.cluster_audit.main import run_cluster_audit
 from src.common.config import GlobalConfig
 from src.common.exceptions import ConfigurationError, VaultToolsError
@@ -232,6 +234,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exit 2 when coverage is incomplete (a namespace or scope was denied or errored).",
     )
 
+    # Cluster-health thresholds, shared by every command that judges cluster
+    # health. Defaults are the vault-ops skill's values (Thresholds).
+    threshold_opts = argparse.ArgumentParser(add_help=False)
+    threshold_opts.add_argument(
+        "--lease-count-warning",
+        type=_positive_int,
+        default=DEFAULT_THRESHOLDS.lease_count_warning,
+        metavar="N",
+        help=f"VT-HLTH-006 fires above this many outstanding leases on the active node. Default: {DEFAULT_THRESHOLDS.lease_count_warning:,}.",
+    )
+    threshold_opts.add_argument(
+        "--snapshot-grace",
+        type=_duration_seconds,
+        default=DEFAULT_THRESHOLDS.snapshot_grace_seconds,
+        metavar="DURATION",
+        help=(
+            "VT-SNAP-002 treats an automated snapshot as overdue only this long (e.g. 2h, 90m, 1d) past its scheduled start, "
+            "and never sooner than the schedule's own interval. Lower it for sub-daily schedules; below 25h it can fire falsely once "
+            "after a schedule is lengthened, until the next run. Default: 25h."
+        ),
+    )
+
     # Namespace walk, shared by every command that traverses the tree.
     walk_opts = argparse.ArgumentParser(add_help=False)
     walk_opts.add_argument("-w", "--workers", type=int, default=4, help="Number of worker threads.")
@@ -259,7 +283,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser_full = subparsers.add_parser(
         "full-audit",
         description="Run every audit and export (cluster, namespace, identity, activity, entity) and write a combined report.",
-        parents=[common, gating, walk_opts, policy_opts, window_opts],
+        parents=[common, gating, threshold_opts, walk_opts, policy_opts, window_opts],
     )
     parser_full.add_argument("--list-entities", action="store_true", help="Also write identity entity names, metadata and aliases (confidential).")
     # cluster-audit always runs: it supplies the cluster name and node state.
@@ -270,13 +294,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Namespace Audit command
-    subparsers.add_parser("namespace-audit", description="Audit Vault namespaces.", parents=[common, gating, walk_opts, policy_opts])
+    subparsers.add_parser("namespace-audit", description="Audit Vault namespaces.", parents=[common, gating, threshold_opts, walk_opts, policy_opts])
 
     # Cluster Audit command
     subparsers.add_parser(
         "cluster-audit",
         description="Audit cluster health: seal, HA, replication, raft, audit devices, snapshots, metrics.",
-        parents=[common, gating],
+        parents=[common, gating, threshold_opts],
     )
 
     # Identity Audit command
@@ -315,6 +339,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_DURATION = re.compile(r"^(\d+)([smhd]?)$")
+_DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _duration_seconds(value: str) -> int:
+    """argparse type: "90m", "2h", "1d" or plain seconds, as a positive number of seconds."""
+    match = _DURATION.match(value.strip().lower())
+    if not match or int(match[1]) == 0:
+        raise argparse.ArgumentTypeError(f"invalid duration {value!r}: use a positive number with an optional s, m, h or d suffix (e.g. 2h)")
+    return int(match[1]) * _DURATION_UNITS[match[2]]
+
+
+def _positive_int(value: str) -> int:
+    """argparse type: an integer above zero."""
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"invalid value {value!r}: must be a positive integer")
+    return number
+
+
+def _thresholds(args: argparse.Namespace) -> Thresholds:
+    """The cluster-health thresholds from the threshold_opts flags."""
+    return Thresholds(lease_count_warning=args.lease_count_warning, snapshot_grace_seconds=args.snapshot_grace)
+
+
 def _gate(document: dict[str, Any] | None, args: argparse.Namespace) -> int:
     """Exit code for a findings document; a missing one is a failed run."""
     # The command has already printed why; a failed audit must not pass a CI
@@ -332,13 +384,14 @@ def _cmd_namespace_audit(args: argparse.Namespace, vault_client: VaultClient, gl
         output_dir=global_config.output_dir,
         collect_sentinel=not args.no_sentinel,
         names_only=args.names_only,
+        thresholds=_thresholds(args),
     )
     return _gate(auditor.audit_cluster(), args)
 
 
 def _cmd_cluster_audit(args: argparse.Namespace, vault_client: VaultClient, global_config: GlobalConfig, logger) -> int:
     logger.info("command_execution_started", command="cluster-audit")
-    return _gate(run_cluster_audit(vault_client, global_config.output_dir), args)
+    return _gate(run_cluster_audit(vault_client, global_config.output_dir, thresholds=_thresholds(args)), args)
 
 
 def _cmd_identity_audit(args: argparse.Namespace, vault_client: VaultClient, global_config: GlobalConfig, logger) -> int:
@@ -369,6 +422,7 @@ def _cmd_full_audit(args: argparse.Namespace, vault_client: VaultClient, global_
         start_date=start_date,
         end_date=end_date,
         skip=skip,
+        thresholds=_thresholds(args),
     )
     return _gate(document, args)
 
