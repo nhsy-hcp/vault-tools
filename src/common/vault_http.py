@@ -187,6 +187,21 @@ def clean_path(path: str) -> str:
     return path
 
 
+def data_of(payload: dict[str, Any]) -> dict[str, Any]:
+    """A response's ``data`` block, or the payload itself when it has none.
+
+    Most endpoints wrap their result in ``data``; a few (sys/health,
+    sys/metrics, some sys/ reads) return it at the top level.
+    """
+    data = payload.get("data")
+    return data if isinstance(data, dict) else payload
+
+
+def keys_of(payload: dict[str, Any]) -> list[str]:
+    """The ``data.keys`` of a LIST response; ``[]`` when absent."""
+    return list((payload.get("data") or {}).get("keys") or [])
+
+
 class NamespacedClient:
     """Read-only Vault client bound to one namespace, over a shared session.
 

@@ -674,6 +674,12 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
   `_summarise_error_body`: the Sentinel `"unsupported path"` heuristic matches
   on it. `.response` is kept, so `sanitise_error` reports `"Forbidden (HTTP
   403)"` where hvac's exceptions gave the class name only.
+- **Collectors call `read`/`list` directly** on the yielded client (there is
+  no reader wrapper). `data_of(payload)` unwraps a response's `data` block,
+  falling back to the payload for top-level answers such as `sys/health`, and
+  `keys_of(payload)` returns a LIST's `data.keys`. They are plain functions on
+  response dicts, not client methods, so test fakes only implement `read` and
+  `list`.
 - **`VaultClient.get` chains** its `VaultAPIError`/`VaultPermissionError` from
   the `vault_http` exception (`from e`); activity-export and the license probe
   test `e.__cause__` for `InvalidPath`.

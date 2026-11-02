@@ -24,7 +24,7 @@ from src.common import vault_http
 from src.common.exceptions import VaultPermissionError
 from src.common.findings import iso_utc, parse_time
 from src.common.vault_client import VaultClient
-from src.common.vault_http import HEALTH_PARAMS
+from src.common.vault_http import HEALTH_PARAMS, NamespacedClient, data_of, keys_of
 
 logger = logging.getLogger(__name__)
 
@@ -115,28 +115,11 @@ def unauthenticated_only(health: dict[str, Any]) -> str | None:
     return None
 
 
-class RawReader:
-    """GET-only helper over one NamespacedClient; raises vault_http exceptions unchanged."""
-
-    def __init__(self, client: Any):
-        self.client = client
-
-    def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self.client.read(path, params=params)
-
-    def data(self, path: str) -> dict[str, Any]:
-        payload = self.get(path)
-        return payload["data"] if isinstance(payload.get("data"), dict) else payload
-
-    def list(self, path: str) -> list[str]:
-        return list((self.client.list(path).get("data") or {}).get("keys") or [])
-
-
 def read_health(vault_client: VaultClient) -> dict[str, Any] | None:
     """Unauthenticated sys/health, answering for every node state. None if unreachable."""
     try:
         with vault_client.get_client() as client:
-            return RawReader(client).get("sys/health", params=HEALTH_PARAMS)
+            return client.read("sys/health", params=HEALTH_PARAMS)
     except Exception as e:
         logger.debug(f"Could not read sys/health: {e}")
         return None
@@ -159,7 +142,7 @@ def collect_cluster_health(
     coverage = coverage or ClusterCoverage()
     try:
         with vault_client.get_client() as client:
-            return _collect(RawReader(client), health_status, coverage), coverage
+            return _collect(client, health_status, coverage), coverage
     except Exception as e:  # pragma: no cover - defensive: never sink the caller's run
         logger.debug(f"Cluster health collection failed: {e}")
         coverage.error("cluster health", e)
@@ -196,9 +179,9 @@ def empty_health(health: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _optional(reader: RawReader, coverage: ClusterCoverage, path: str) -> dict[str, Any] | None:
+def _optional(client: NamespacedClient, coverage: ClusterCoverage, path: str) -> dict[str, Any] | None:
     try:
-        return reader.data(path)
+        return data_of(client.read(path))
     except vault_http.Forbidden:
         coverage.deny(path)
     except vault_http.InvalidPath:
@@ -208,11 +191,11 @@ def _optional(reader: RawReader, coverage: ClusterCoverage, path: str) -> dict[s
     return None
 
 
-def _collect(reader: RawReader, health_status: dict[str, Any] | None, coverage: ClusterCoverage) -> dict[str, Any]:
+def _collect(client: NamespacedClient, health_status: dict[str, Any] | None, coverage: ClusterCoverage) -> dict[str, Any]:
     health = health_status
     if health is None:
         try:
-            health = reader.get("sys/health", params=HEALTH_PARAMS)
+            health = client.read("sys/health", params=HEALTH_PARAMS)
         except vault_http.InvalidPath:
             health = {}
         except (vault_http.VaultError, requests.exceptions.RequestException) as e:
@@ -223,11 +206,11 @@ def _collect(reader: RawReader, health_status: dict[str, Any] | None, coverage: 
 
     if health.get("sealed") is True or health.get("initialized") is False:
         # Every other endpoint answers 503 "Vault is sealed"; seal-status is unauthenticated.
-        if (seal := _optional(reader, coverage, "sys/seal-status")) is not None:
+        if (seal := _optional(client, coverage, "sys/seal-status")) is not None:
             result["seal"] = {k: seal.get(k) for k in ("type", "t", "n", "progress", "migration", "recovery_seal")}
         return result
 
-    if (leader := _optional(reader, coverage, "sys/leader")) is not None:
+    if (leader := _optional(client, coverage, "sys/leader")) is not None:
         result["leader"] = {
             "ha_enabled": leader.get("ha_enabled"),
             "is_self": leader.get("is_self"),
@@ -235,7 +218,7 @@ def _collect(reader: RawReader, health_status: dict[str, Any] | None, coverage: 
             "leader_address_present": bool(leader.get("leader_address")),
             "raft_committed_index": leader.get("raft_committed_index"),
         }
-    if (repl := _optional(reader, coverage, "sys/replication/status")) is not None:
+    if (repl := _optional(client, coverage, "sys/replication/status")) is not None:
         if isinstance(repl.get("mode"), str):
             # e.g. {"mode": "unsupported"} on storage that cannot replicate (dev/inmem).
             result["replication"] = {"mode": repl["mode"]}
@@ -243,21 +226,21 @@ def _collect(reader: RawReader, health_status: dict[str, Any] | None, coverage: 
             result["replication"] = {kind: replication_summary(repl.get(kind) or {}) for kind in ("dr", "performance")}
             perf = result["replication"]["performance"]
             if perf.get("mode") == "primary" and not dr_secondary:
-                perf["paths_filters"] = collect_paths_filters(reader, coverage, perf.get("known_secondaries") or [])
+                perf["paths_filters"] = collect_paths_filters(client, coverage, perf.get("known_secondaries") or [])
     if dr_secondary:
         return result
-    result["raft"] = collect_raft(reader, coverage)
-    result["audit_devices"] = collect_audit_devices(reader, coverage)
+    result["raft"] = collect_raft(client, coverage)
+    result["audit_devices"] = collect_audit_devices(client, coverage)
     # Automated snapshots are Enterprise and raft only; elsewhere the endpoint 404s like "none configured".
     if result["enterprise"] and result["raft"] is not None:
-        result["snapshots"] = collect_snapshots(reader, coverage)
-    result["metrics"] = collect_metrics(reader, coverage)
+        result["snapshots"] = collect_snapshots(client, coverage)
+    result["metrics"] = collect_metrics(client, coverage)
     return result
 
 
-def collect_metrics(reader: RawReader, coverage: ClusterCoverage) -> dict[str, Any] | None:
+def collect_metrics(client: NamespacedClient, coverage: ClusterCoverage) -> dict[str, Any] | None:
     try:
-        payload = reader.get("sys/metrics")
+        payload = client.read("sys/metrics")
     except vault_http.Forbidden:
         coverage.deny("sys/metrics")
         return None
@@ -291,12 +274,12 @@ def metrics_timestamp(value: Any) -> str | None:
         return None
 
 
-def collect_raft(reader: RawReader, coverage: ClusterCoverage) -> dict[str, Any] | None:
+def collect_raft(client: NamespacedClient, coverage: ClusterCoverage) -> dict[str, Any] | None:
     """Integrated storage peers and autopilot; None when the cluster does not use raft."""
 
     def read(path: str) -> dict[str, Any] | None:
         try:
-            return reader.data(path)
+            return data_of(client.read(path))
         except vault_http.Forbidden:
             coverage.deny(path)
         except vault_http.InvalidPath:
@@ -332,10 +315,10 @@ def collect_raft(reader: RawReader, coverage: ClusterCoverage) -> dict[str, Any]
     return raft
 
 
-def collect_audit_devices(reader: RawReader, coverage: ClusterCoverage) -> list[dict[str, Any]] | None:
+def collect_audit_devices(client: NamespacedClient, coverage: ClusterCoverage) -> list[dict[str, Any]] | None:
     """Enabled audit devices (sys/audit needs read+sudo); None when unreadable."""
     try:
-        devices = reader.data("sys/audit")
+        devices = data_of(client.read("sys/audit"))
     except vault_http.Forbidden:
         coverage.deny("sys/audit")
         return None
@@ -371,14 +354,14 @@ def snapshot_status(status: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def collect_snapshots(reader: RawReader, coverage: ClusterCoverage) -> dict[str, Any] | None:
+def collect_snapshots(client: NamespacedClient, coverage: ClusterCoverage) -> dict[str, Any] | None:
     """Automated snapshot config names plus each one's status.
 
     The configs themselves are never read: they return storage credentials in plaintext.
     """
     base = "sys/storage/raft/snapshot-auto"
     try:
-        names = reader.list(f"{base}/config")
+        names = keys_of(client.list(f"{base}/config"))
     except vault_http.Forbidden:
         coverage.deny(f"{base}/config")
         return None
@@ -391,7 +374,7 @@ def collect_snapshots(reader: RawReader, coverage: ClusterCoverage) -> dict[str,
     for name in sorted(names):
         status: dict[str, Any] | None = None
         try:
-            status = reader.data(f"{base}/status/{name}")
+            status = data_of(client.read(f"{base}/status/{name}"))
         except vault_http.Forbidden:
             coverage.deny(f"{base}/status")
         except vault_http.InvalidPath:
@@ -441,14 +424,14 @@ def replication_summary(status: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
-def collect_paths_filters(reader: RawReader, coverage: ClusterCoverage, secondary_ids: list[str]) -> list[dict[str, Any]] | None:
+def collect_paths_filters(client: NamespacedClient, coverage: ClusterCoverage, secondary_ids: list[str]) -> list[dict[str, Any]] | None:
     """Performance paths filters per known secondary; a denial makes the whole list None."""
     base = "sys/replication/performance/primary"
     filters: list[dict[str, Any]] = []
     dynamic_denied = False
     for secondary_id in sorted(secondary_ids):
         try:
-            data = reader.data(f"{base}/paths-filter/{secondary_id}")
+            data = data_of(client.read(f"{base}/paths-filter/{secondary_id}"))
         except vault_http.Forbidden:
             coverage.deny(f"{base}/paths-filter")
             return None
@@ -462,7 +445,7 @@ def collect_paths_filters(reader: RawReader, coverage: ClusterCoverage, secondar
         dynamic: int | None = None
         try:
             if not dynamic_denied:
-                dynamic = len((reader.data(f"{base}/dynamic-filter/{secondary_id}") or {}).get("dynamic_filtered_mounts") or [])
+                dynamic = len((data_of(client.read(f"{base}/dynamic-filter/{secondary_id}")) or {}).get("dynamic_filtered_mounts") or [])
         except vault_http.Forbidden:
             dynamic_denied = True
             coverage.deny(f"{base}/dynamic-filter")
