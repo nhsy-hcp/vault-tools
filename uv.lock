@@ -287,18 +287,6 @@ wheels = [
 ]
 
 [[package]]
-name = "hvac"
-version = "2.2.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "requests" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ea/96/3d08ba4b59491941c83e46034c19d1b62c6966147bb2bb144788cf7c989c/hvac-2.2.0.tar.gz", hash = "sha256:e4b0248c5672cb9a6f5974e7c8f5271a09c6c663cbf8ab11733a227f3d2db2c2", size = 330973, upload-time = "2024-04-27T22:39:53.483Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/82/cd/75dee999d3347bc2b91beafc74eaa2d44d2851887b5a030894f74d72027e/hvac-2.2.0-py3-none-any.whl", hash = "sha256:f287a19940c6fc518c723f8276cc9927f7400734303ee5872ac2e84539466d8d", size = 155214, upload-time = "2024-04-27T22:39:51.237Z" },
-]
-
-[[package]]
 name = "identify"
 version = "2.6.19"
 source = { registry = "https://pypi.org/simple" }
@@ -906,13 +894,13 @@ name = "vault-tools"
 version = "3.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "hvac" },
     { name = "pandas" },
     { name = "python-json-logger" },
     { name = "requests" },
     { name = "rich" },
     { name = "structlog" },
     { name = "tenacity" },
+    { name = "urllib3" },
 ]
 
 [package.optional-dependencies]
@@ -926,7 +914,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "hvac", specifier = "==2.2.0" },
     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23.0" },
     { name = "pandas", specifier = ">=2.3.0,<3.0.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0.0" },
@@ -938,6 +925,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.2" },
     { name = "structlog", specifier = ">=23.1.0" },
     { name = "tenacity", specifier = ">=8.2.3" },
+    { name = "urllib3", specifier = ">=2.5.0,<3.0.0" },
 ]
 provides-extras = ["dev"]
 

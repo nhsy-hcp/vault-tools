@@ -125,7 +125,6 @@ class TestSetupLogging:
         from src.common.logging_config import setup_logging
 
         setup_logging(debug=False, json_logs=False)
-        assert logging.getLogger("hvac").level == logging.WARNING
         assert logging.getLogger("requests").level == logging.WARNING
         assert logging.getLogger("urllib3").level == logging.WARNING
 
@@ -133,11 +132,11 @@ class TestSetupLogging:
         from src.common.logging_config import setup_logging
 
         setup_logging(debug=True, json_logs=False)
-        # In debug mode the suppression block is skipped — hvac logger should
-        # not be forced to WARNING by setup_logging itself.  We re-run
+        # In debug mode the suppression block is skipped — the requests logger
+        # should not be forced to WARNING by setup_logging itself.  We re-run
         # non-debug to confirm the suppression path is exercised.
         setup_logging(debug=False, json_logs=False)
-        assert logging.getLogger("hvac").level == logging.WARNING
+        assert logging.getLogger("requests").level == logging.WARNING
 
     def test_setup_logging_json_mode(self):
         from src.common.logging_config import setup_logging
