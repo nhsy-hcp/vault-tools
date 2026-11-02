@@ -305,7 +305,9 @@ export VAULT_TOOLS_DEBUG="true"                 # Default: false
 
 These three are the complete set. Everything else is a CLI flag — `--workers`,
 `--output-dir`, `--no-sentinel`, `--start-date`/`--end-date`, `--names-only`,
-`--list-entities` (`--list` on identity-audit), `--skip`/`--only`, `--fail-on`/`--fail-on-gaps`. Rate limiting uses
+`--list-entities` (`--list` on identity-audit), `--skip`/`--only`, `--fail-on`/`--fail-on-gaps`,
+`--lease-count-warning`/`--snapshot-grace` (the `threshold_opts` parent parser
+on cluster-, namespace- and full-audit). Rate limiting uses
 `NamespaceAuditor`'s constructor defaults (batch 100, sleep 3s) and is not
 currently exposed on the CLI.
 
@@ -762,6 +764,25 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
 - **Thresholds are the skill's heuristics** (100,000 leases, 60s lag, 2s skew,
   25h snapshot grace, `MIN_SUPPORTED_VERSION` 1.19, which goes stale). None has
   been measured against the reference cluster yet.
+- **Two are tunable, as a `Thresholds` object** (`cluster_audit/findings.py`):
+  `--lease-count-warning` and `--snapshot-grace`. It is parsed once in
+  `main.py::_thresholds` and passed as one `thresholds=` argument
+  (`run_cluster_audit*`, `run_full_audit`, `NamespaceAuditor` →
+  `AuditData.thresholds` → `collect_findings`), never as loose ints. Its
+  defaults are the module constants, so a default run uses the
+  skill's values. `grace_seconds` is added to VT-SNAP-002 evidence only when tuned,
+  so a default run diffs clean against an older one. The rest stay constants
+  until there is data.
+- **VT-SNAP-002 keeps `max(interval, grace)`.** The interval can't be read
+  (snapshot configs hold storage credentials) and `next_snapshot_start` stays
+  stale after a schedule change, so the 25h floor guards against a false alarm;
+  operators with sub-daily schedules lower it per run. A run `in_progress` is
+  never overdue (it has started); a failing one still fires on
+  `consecutive_errors`.
+- **VT-LEASE-001 rarely fires, by design.** It is the skill's rule on the
+  *default* TTL, and Vault caps the default at the max, so only a cluster that
+  raised both past 768h trips it. Per-mount max overrides are VT-MOUNT-002; a
+  cluster-ceiling rule would need a new skill rule ID first.
 - **Measured on the dev stack** (Vault 2.1, primary + DR + performance
   secondary, 2026-11-02):
   - **Canary age is not write idleness.** Vault refreshes the canary itself
