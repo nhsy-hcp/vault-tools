@@ -29,10 +29,10 @@
 # Assign this policy to a token created in the ROOT namespace.
 
 # --- Token self-inspection ---------------------------------------------------
-# validate_connection() calls hvac's is_authenticated(), which is a
-# GET auth/token/lookup-self. hvac swallows a 403 there and returns False, so
-# without this rule the tool aborts with "Vault client is not authenticated ...
-# check your VAULT_TOKEN", which points at entirely the wrong cause.
+# validate_connection() checks the token with a GET auth/token/lookup-self and
+# treats a 403 there as "not authenticated", so without this rule the tool
+# aborts with "Vault client is not authenticated ... check your VAULT_TOKEN",
+# which points at entirely the wrong cause.
 #
 # Vault's built-in "default" policy already grants this, so a token created the
 # usual way inherits it. It is stated explicitly here so the policy is
@@ -44,11 +44,11 @@ path "auth/token/lookup-self" {
 # --- Connection validation ---------------------------------------------------
 # Deliberately absent: sys/health, sys/seal-status and sys/init.
 #
-# read_health_status(), is_sealed() and is_initialized() are the three checks
-# validate_connection() runs, and all three are UNAUTHENTICATED Vault endpoints
-# -- an ACL rule for them grants nothing. They are also always issued against
-# the root namespace, because validate_connection() uses the default
-# namespace="" client, so nested variants would be doubly dead.
+# validate_connection() reads sys/health once, which also reports sealed and
+# initialized. sys/health, sys/seal-status and sys/init are all UNAUTHENTICATED
+# Vault endpoints -- an ACL rule for them grants nothing. They are also always
+# issued against the root namespace, because validate_connection() uses the
+# default namespace="" client, so nested variants would be doubly dead.
 
 # --- namespace-audit: cluster lease defaults ---------------------------------
 # GET sys/config/state/sanitized, read once per run against the root namespace,
@@ -133,7 +133,7 @@ path "sys/storage/raft/snapshot-auto/status/*" {
 }
 
 # --- namespace-audit: auth methods -------------------------------------------
-# list_auth_methods() -> GET sys/auth, once per namespace visited. The traversal
+# GET sys/auth, once per namespace visited. The traversal
 # scopes each request with get_client(namespace_path), so every nesting level is
 # genuinely reached.
 path "sys/auth" {
@@ -161,7 +161,7 @@ path "+/+/+/+/+/sys/auth" {
 }
 
 # --- namespace-audit: secret engines -----------------------------------------
-# list_mounted_secrets_engines() -> GET sys/mounts, once per namespace visited.
+# GET sys/mounts, once per namespace visited.
 path "sys/mounts" {
   capabilities = ["read"]
 }
@@ -187,9 +187,9 @@ path "+/+/+/+/+/sys/mounts" {
 }
 
 # --- namespace-audit: child namespace discovery ------------------------------
-# list_namespaces() -> LIST sys/namespaces. This is what drives the recursive
+# LIST sys/namespaces. This is what drives the recursive
 # walk: without it at a given level, the audit stops there. Enterprise only; on
-# Community the tool treats the InvalidPath response as "no children" and
+# Community the tool treats the 404 response as "no children" and
 # carries on.
 path "sys/namespaces" {
   capabilities = ["list"]
@@ -216,7 +216,7 @@ path "+/+/+/+/+/sys/namespaces" {
 }
 
 # --- namespace-audit: ACL policies -------------------------------------------
-# list_acl_policies() -> LIST sys/policies/acl, once per namespace visited. The
+# LIST sys/policies/acl, once per namespace visited. The
 # report lists which policies each namespace defines, minus Vault's own
 # "default", "root" and "default-ceiling", which exist everywhere.
 #
@@ -251,7 +251,7 @@ path "+/+/+/+/+/sys/policies/acl" {
 }
 
 # --- namespace-audit: Sentinel governing policies (names only) ---------------
-# list_egp_policies()/list_rgp_policies() -> LIST sys/policies/{egp,rgp}.
+# LIST sys/policies/{egp,rgp}.
 # Sentinel policies are namespace-local, so these need the same per-level
 # treatment as the rules above.
 #

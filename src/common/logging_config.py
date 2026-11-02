@@ -143,7 +143,6 @@ def setup_logging(debug: bool = False, json_logs: bool = False) -> None:
     # These libraries produce INFO/DEBUG chatter that obscures vault-tools output.
     # In debug mode all levels are intentionally left unrestricted for diagnosis.
     if not debug:
-        logging.getLogger("hvac").setLevel(logging.WARNING)
         logging.getLogger("requests").setLevel(logging.WARNING)
         logging.getLogger("urllib3").setLevel(logging.WARNING)
 
