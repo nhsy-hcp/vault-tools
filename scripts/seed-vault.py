@@ -3,16 +3,17 @@
 
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["hvac>=2.2.0", "requests>=2.32"]
+# dependencies = ["requests>=2.32"]
 # ///
 
 import argparse
 import os
 import sys
 import threading
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 
-import hvac
 import requests
 
 VAULT_ADDR = os.getenv("VAULT_ADDR", "https://127.0.0.1:8310")
@@ -27,8 +28,76 @@ if VAULT_VERIFY is False:
 _stats_lock = threading.Lock()
 _stats: dict[str, int] = {"added": 0, "skipped": 0, "errors": 0}
 
+
+class VaultError(Exception):
+    """A Vault response of 400 or above; str() carries the status and Vault's errors."""
+
+    def __init__(self, status: int, errors: list[str], method: str, path: str):
+        self.status = status
+        self.errors = errors
+        super().__init__(f"{status}: {', '.join(errors) or '<no errors>'}, on {method} {path}")
+
+
+class InvalidPathError(VaultError):
+    """HTTP 404."""
+
+
+class VaultAPI:
+    """A minimal Vault HTTP client for seeding the dev stack (writes allowed, unlike vault-tools)."""
+
+    _session = requests.Session()
+    _session.verify = VAULT_VERIFY
+
+    def __init__(self, token: str = VAULT_TOKEN, namespace: str | None = None):
+        self.token = token
+        self.namespace = namespace or ""
+
+    def request(self, method: str, path: str, json: dict | None = None, params: dict | None = None) -> dict[str, Any] | None:
+        headers = {"X-Vault-Token": self.token, "X-Vault-Request": "true"}
+        if self.namespace:
+            headers["X-Vault-Namespace"] = self.namespace
+        path = path.lstrip("/")
+        response = self._session.request(method, f"{VAULT_ADDR}/v1/{path}", headers=headers, json=json, params=params, timeout=30)
+        if response.status_code >= 400:
+            try:
+                errors = [str(e) for e in response.json().get("errors") or []]
+            except ValueError:
+                errors = [response.text[:200]] if response.text else []
+            cls = InvalidPathError if response.status_code == 404 else VaultError
+            raise cls(response.status_code, errors, method, path)
+        if response.status_code == 204 or not response.content:
+            return None
+        return response.json()
+
+    def read(self, path: str) -> dict[str, Any] | None:
+        """GET; None when the path does not exist."""
+        try:
+            return self.request("GET", path)
+        except InvalidPathError:
+            return None
+
+    def list(self, path: str) -> dict[str, Any] | None:
+        return self.request("GET", path, params={"list": "true"})
+
+    def write(self, path: str, data: dict | None = None, method: str = "POST") -> dict[str, Any] | None:
+        return self.request(method, path, json=data or {})
+
+    def is_authenticated(self) -> bool:
+        try:
+            self.request("GET", "auth/token/lookup-self")
+        except VaultError as exc:
+            if exc.status == 403:
+                return False
+            raise
+        return True
+
+
+def q(name: str) -> str:
+    return urllib.parse.quote(name)
+
+
 # Errors a Vault API call can raise; anything else is a bug and should surface
-VAULT_ERRORS = (hvac.exceptions.VaultError, requests.exceptions.RequestException)
+VAULT_ERRORS = (VaultError, requests.exceptions.RequestException)
 
 
 def _record(key: str, n: int = 1) -> None:
@@ -429,8 +498,8 @@ KV_SECRETS: dict[str, dict[str, str]] = {
 }
 
 
-def get_client(namespace: str | None = None) -> hvac.Client:
-    client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN, namespace=namespace, verify=VAULT_VERIFY)
+def get_client(namespace: str | None = None) -> VaultAPI:
+    client = VaultAPI(namespace=namespace)
     # is_authenticated() raises on transport failure rather than returning False,
     # so an unreachable Vault must be caught separately from a bad token.
     try:
@@ -450,7 +519,7 @@ def get_client(namespace: str | None = None) -> hvac.Client:
     return client
 
 
-def create_namespace(root_client: hvac.Client, path: str) -> bool:
+def create_namespace(root_client: VaultAPI, path: str) -> bool:
     """Create a namespace using path-based routing from the root client.
 
     For nested namespaces (e.g. 'engineering/backend'), uses
@@ -460,9 +529,9 @@ def create_namespace(root_client: hvac.Client, path: str) -> bool:
     try:
         if "/" in path:
             parent, name = path.rsplit("/", 1)
-            root_client.adapter.request("POST", f"/v1/{parent}/sys/namespaces/{name}", json={})
+            root_client.write(f"{parent}/sys/namespaces/{name}")
         else:
-            root_client.sys.create_namespace(path)
+            root_client.write(f"sys/namespaces/{path}")
         print("  [+] created")
         _record("added")
         return True
@@ -480,9 +549,9 @@ def create_namespace(root_client: hvac.Client, path: str) -> bool:
         raise RuntimeError(f"cannot create namespace {path}: {exc}") from exc
 
 
-def enable_auth(client: hvac.Client, method_type: str, path: str, description: str) -> None:
+def enable_auth(client: VaultAPI, method_type: str, path: str, description: str) -> None:
     try:
-        client.sys.enable_auth_method(method_type=method_type, path=path, description=description)
+        client.write(f"sys/auth/{path}", {"type": method_type, "description": description})
         print(f"    [+] auth/{path}")
         _record("added")
     except VAULT_ERRORS as exc:
@@ -492,14 +561,9 @@ def enable_auth(client: hvac.Client, method_type: str, path: str, description: s
         raise
 
 
-def enable_secrets_engine(client: hvac.Client, path: str, engine_type: str, options: dict, description: str) -> None:
+def enable_secrets_engine(client: VaultAPI, path: str, engine_type: str, options: dict, description: str) -> None:
     try:
-        client.sys.enable_secrets_engine(
-            backend_type=engine_type,
-            path=path,
-            options=options,
-            description=description,
-        )
+        client.write(f"sys/mounts/{path}", {"type": engine_type, "description": description, "options": options})
         print(f"    [+] {path}/ ({engine_type})")
         _record("added")
     except VAULT_ERRORS as exc:
@@ -509,14 +573,12 @@ def enable_secrets_engine(client: hvac.Client, path: str, engine_type: str, opti
         raise
 
 
-def create_approles(client: hvac.Client) -> None:
+def create_approles(client: VaultAPI) -> None:
     for role in APPROLES:
         try:
-            client.auth.approle.create_or_update_approle(
-                role_name=role["name"],
-                token_ttl=role["token_ttl"],
-                token_max_ttl=role["token_max_ttl"],
-                token_policies=role["policies"],
+            client.write(
+                f"auth/approle/role/{q(role['name'])}",
+                {"token_ttl": role["token_ttl"], "token_max_ttl": role["token_max_ttl"], "token_policies": ",".join(role["policies"])},
             )
             print(f"    [+] approle/{role['name']}")
             _record("added")
@@ -525,33 +587,29 @@ def create_approles(client: hvac.Client) -> None:
             _record("errors")
 
 
-def seed_kv(client: hvac.Client, mount: str = "secret") -> None:
+def seed_kv(client: VaultAPI, mount: str = "secret") -> None:
     for secret_path, data in KV_SECRETS.items():
-        client.secrets.kv.v2.create_or_update_secret(
-            path=secret_path,
-            secret=data,
-            mount_point=mount,
-        )
+        client.write(f"{mount}/data/{secret_path}", {"options": {}, "data": data})
     print(f"    [+] {len(KV_SECRETS)} secrets written to {mount}/")
     _record("added", len(KV_SECRETS))
 
 
-def _has_pki_issuer(client: hvac.Client, mount: str) -> bool:
+def _has_pki_issuer(client: VaultAPI, mount: str) -> bool:
     try:
         resp = client.list(f"{mount}/issuers")
-    except hvac.exceptions.InvalidPath:
+    except InvalidPathError:
         return False
     return bool(resp and resp.get("data", {}).get("keys"))
 
 
-def seed_pki(client: hvac.Client, mount: str = "pki") -> None:
+def seed_pki(client: VaultAPI, mount: str = "pki") -> None:
     try:
         # Re-runs would otherwise add another root issuer each time (multi-issuer PKI)
         if not _has_pki_issuer(client, mount):
-            client.write_data(f"{mount}/root/generate/internal", data={"common_name": "Example Root CA", "ttl": "87600h"})
+            client.write(f"{mount}/root/generate/internal", data={"common_name": "Example Root CA", "ttl": "87600h"})
             print(f"    [+] {mount}/root CA")
             _record("added")
-        client.write_data(
+        client.write(
             f"{mount}/config/urls",
             data={
                 "issuing_certificates": f"{VAULT_ADDR}/v1/{mount}/ca",
@@ -564,7 +622,7 @@ def seed_pki(client: hvac.Client, mount: str = "pki") -> None:
     for role in PKI_ROLES:
         name = role["name"]
         try:
-            client.write_data(f"{mount}/roles/{name}", data={k: v for k, v in role.items() if k != "name"})
+            client.write(f"{mount}/roles/{name}", data={k: v for k, v in role.items() if k != "name"})
             print(f"    [+] {mount}/roles/{name}")
             _record("added")
         except VAULT_ERRORS as exc:
@@ -572,10 +630,10 @@ def seed_pki(client: hvac.Client, mount: str = "pki") -> None:
             _record("errors")
 
 
-def seed_transit(client: hvac.Client, mount: str = "transit") -> None:
+def seed_transit(client: VaultAPI, mount: str = "transit") -> None:
     for key_name in TRANSIT_KEYS:
         try:
-            client.write_data(f"{mount}/keys/{key_name}")
+            client.write(f"{mount}/keys/{key_name}")
             print(f"    [+] {mount}/keys/{key_name}")
             _record("added")
         except VAULT_ERRORS as exc:
@@ -583,14 +641,10 @@ def seed_transit(client: hvac.Client, mount: str = "transit") -> None:
             _record("errors")
 
 
-def create_userpass_users(client: hvac.Client) -> None:
+def create_userpass_users(client: VaultAPI) -> None:
     for user in USERPASS_USERS:
         try:
-            client.auth.userpass.create_or_update_user(
-                username=user["username"],
-                password=user["password"],
-                policies=user["policies"],
-            )
+            client.write(f"auth/userpass/users/{q(user['username'])}", {"password": user["password"], "policies": user["policies"]})
             print(f"    [+] userpass/{user['username']}")
             _record("added")
         except VAULT_ERRORS as exc:
@@ -598,27 +652,18 @@ def create_userpass_users(client: hvac.Client) -> None:
             _record("errors")
 
 
-def generate_userpass_clients(client: hvac.Client) -> None:
+def generate_userpass_clients(client: VaultAPI) -> None:
     """Login via each userpass account and read KV secrets to generate client activity."""
     kv_paths = list(KV_SECRETS.keys())
     for user in USERPASS_USERS:
         try:
-            login_resp = client.auth.userpass.login(
-                username=user["username"],
-                password=user["password"],
-                use_token=False,
-            )
+            login_resp = client.write(f"auth/userpass/login/{q(user['username'])}", {"password": user["password"]})
             user_token = login_resp["auth"]["client_token"]
-            user_client = hvac.Client(
-                url=VAULT_ADDR,
-                token=user_token,
-                namespace=client.adapter.namespace,
-                verify=VAULT_VERIFY,
-            )
+            user_client = VaultAPI(token=user_token, namespace=client.namespace)
             reads = denied = 0
             for path in kv_paths:
                 try:
-                    user_client.secrets.kv.v2.read_secret_version(path=path, mount_point="secret", raise_on_deleted_version=True)
+                    user_client.request("GET", f"secret/data/{path}")
                     reads += 1
                 except VAULT_ERRORS:
                     denied += 1
@@ -629,21 +674,21 @@ def generate_userpass_clients(client: hvac.Client) -> None:
             _record("errors")
 
 
-def _get_mount_accessor(client: hvac.Client, mount_path: str) -> str | None:
+def _get_mount_accessor(client: VaultAPI, mount_path: str) -> str | None:
     """Return the accessor for a given auth mount path (e.g. 'userpass/')."""
     try:
-        mounts = client.sys.list_auth_methods().get("data", {})
+        mounts = (client.read("sys/auth") or {}).get("data", {})
     except VAULT_ERRORS:
         return None
     entry = mounts.get(mount_path) or mounts.get(f"{mount_path}/")
     return entry.get("accessor") if entry else None
 
 
-def seed_identity(client: hvac.Client) -> None:
+def seed_identity(client: VaultAPI) -> None:
     entity_ids: dict[str, str] = {}
     for e in IDENTITY_ENTITIES:
         try:
-            client.write_data(
+            client.write(
                 "identity/entity",
                 data={
                     "name": e["name"],
@@ -668,7 +713,7 @@ def seed_identity(client: hvac.Client) -> None:
             if name not in userpass_names:
                 continue
             try:
-                client.write_data(
+                client.write(
                     "identity/entity-alias",
                     data={
                         "name": name,
@@ -700,8 +745,8 @@ def seed_identity(client: hvac.Client) -> None:
                 continue
             try:
                 # AppRole logins map to aliases named after the role_id, not the role name
-                role_id = client.auth.approle.read_role_id(role_name=role_name)["data"]["role_id"]
-                client.write_data(
+                role_id = client.request("GET", f"auth/approle/role/{q(role_name)}/role-id")["data"]["role_id"]
+                client.write(
                     "identity/entity-alias",
                     data={
                         "name": role_id,
@@ -722,7 +767,7 @@ def seed_identity(client: hvac.Client) -> None:
     for g in IDENTITY_GROUPS:
         member_ids = [entity_ids[n] for n in g.get("members", []) if n in entity_ids]
         try:
-            client.write_data(
+            client.write(
                 "identity/group",
                 data={
                     "name": g["name"],
@@ -738,33 +783,28 @@ def seed_identity(client: hvac.Client) -> None:
             _record("errors")
 
 
-def generate_approle_clients(client: hvac.Client) -> None:
+def generate_approle_clients(client: VaultAPI) -> None:
     """Login via each AppRole and read KV secrets to generate client activity."""
     kv_paths = list(KV_SECRETS.keys())
     for role in APPROLES:
         role_name = role["name"]
         try:
-            role_id_resp = client.auth.approle.read_role_id(role_name=role_name)
+            role_id_resp = client.request("GET", f"auth/approle/role/{q(role_name)}/role-id")
             role_id = role_id_resp["data"]["role_id"]
 
-            secret_id_resp = client.auth.approle.generate_secret_id(role_name=role_name)
+            secret_id_resp = client.write(f"auth/approle/role/{q(role_name)}/secret-id")
             secret_id = secret_id_resp["data"]["secret_id"]
 
-            # use_token=False prevents hvac from mutating client.token to the approle token,
-            # which would cause subsequent read_role_id calls for other roles to fail (permission denied).
-            login_resp = client.auth.approle.login(role_id=role_id, secret_id=secret_id, use_token=False)
+            # The login is made with the seeding client but never changes its token: the
+            # approle token goes to its own client, so later role-id reads keep root.
+            login_resp = client.write("auth/approle/login", {"role_id": role_id, "secret_id": secret_id})
             approle_token = login_resp["auth"]["client_token"]
 
-            approle_client = hvac.Client(
-                url=VAULT_ADDR,
-                token=approle_token,
-                namespace=client.adapter.namespace,
-                verify=VAULT_VERIFY,
-            )
+            approle_client = VaultAPI(token=approle_token, namespace=client.namespace)
             reads = denied = 0
             for path in kv_paths:
                 try:
-                    approle_client.secrets.kv.v2.read_secret_version(path=path, mount_point="secret", raise_on_deleted_version=True)
+                    approle_client.request("GET", f"secret/data/{path}")
                     reads += 1
                 except VAULT_ERRORS:
                     denied += 1
@@ -775,10 +815,10 @@ def generate_approle_clients(client: hvac.Client) -> None:
             _record("errors")
 
 
-def seed_policies(client: hvac.Client) -> None:
+def seed_policies(client: VaultAPI) -> None:
     for name, rules in ACL_POLICIES.items():
         try:
-            client.sys.create_or_update_acl_policy(name=name, policy=rules.strip())
+            client.write(f"sys/policies/acl/{q(name)}", {"policy": rules.strip()}, method="PUT")
             print(f"    [+] policy/{name}")
             _record("added")
         except VAULT_ERRORS as exc:
@@ -786,12 +826,12 @@ def seed_policies(client: hvac.Client) -> None:
             _record("errors")
 
 
-def seed_child_policies(client: hvac.Client, child_name: str) -> None:
+def seed_child_policies(client: VaultAPI, child_name: str) -> None:
     """Seed workload-specific ACL policies for a child namespace."""
     policies = CHILD_NS_POLICIES.get(child_name, {})
     for name, rules in policies.items():
         try:
-            client.sys.create_or_update_acl_policy(name=name, policy=rules.strip())
+            client.write(f"sys/policies/acl/{q(name)}", {"policy": rules.strip()}, method="PUT")
             print(f"    [+] policy/{name} (child-specific)")
             _record("added")
         except VAULT_ERRORS as exc:
@@ -799,7 +839,7 @@ def seed_child_policies(client: hvac.Client, child_name: str) -> None:
             _record("errors")
 
 
-def seed_contents(client: hvac.Client) -> None:
+def seed_contents(client: VaultAPI) -> None:
     seed_policies(client)
     for method_type, mounts in AUTH_METHODS.items():
         for m in mounts:
@@ -822,7 +862,7 @@ def seed_contents(client: hvac.Client) -> None:
     generate_userpass_clients(client)
 
 
-def _seed_grandchildren(root_client: hvac.Client, child_full: str) -> None:
+def _seed_grandchildren(root_client: VaultAPI, child_full: str) -> None:
     child = child_full.rsplit("/", maxsplit=1)[-1]
     for grandchild in GRANDCHILD_NAMESPACES.get(child, []):
         gc_full = f"{child_full}/{grandchild}"
@@ -839,7 +879,7 @@ def _seed_grandchildren(root_client: hvac.Client, child_full: str) -> None:
 def seed_namespace_tree(
     ns: str,
     parent_ns: str | None = None,
-    root_client: hvac.Client | None = None,
+    root_client: VaultAPI | None = None,
     seed_self: bool = True,
 ) -> None:
     if root_client is None:
@@ -894,7 +934,7 @@ def is_enterprise() -> bool:
     """Return True if the connected Vault cluster is Enterprise edition."""
     try:
         client = get_client(namespace=None)
-        health = client.sys.read_health_status(method="GET")
+        health = client.request("GET", "sys/health", params={"standbyok": "true", "perfstandbyok": "true"}) or {}
         return bool(health.get("enterprise", False))
     except VAULT_ERRORS:
         return False
