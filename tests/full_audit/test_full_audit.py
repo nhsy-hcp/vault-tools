@@ -346,3 +346,13 @@ class TestSkip:
         assert "node is sealed" in h.report and "not selected" not in h.report
         assert merged["coverage"]["complete"] is False
         assert "4 steps skipped" in h.report
+
+
+def test_thresholds_reach_cluster_and_namespace_audit(tmp_path):
+    from src.cluster_audit.findings import Thresholds
+
+    tuned = Thresholds(lease_count_warning=7, snapshot_grace_seconds=5400)
+    h = Harness(tmp_path)
+    h.run(thresholds=tuned)
+    assert h.args["cluster-audit"][3] == tuned
+    assert h.auditor_kwargs["thresholds"] == tuned

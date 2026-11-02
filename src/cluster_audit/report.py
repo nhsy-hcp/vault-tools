@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from src.cluster_audit.collector import ClusterCoverage
-from src.cluster_audit.findings import cluster_lease_findings, health_findings, license_findings
+from src.cluster_audit.findings import DEFAULT_THRESHOLDS, Thresholds, cluster_lease_findings, health_findings, license_findings
 from src.common.findings import Finding, build_findings_document, coverage_block, format_ttl, get_tool_version, run_block, sort_findings
 from src.common.markdown import md_escape, md_table, render_findings_table
 
@@ -296,8 +296,9 @@ def collect_cluster_findings(
     license_status: dict[str, Any] | None = None,
     system_lease_ttls: tuple[int, int] | None = None,
     now: datetime | None = None,
+    thresholds: Thresholds = DEFAULT_THRESHOLDS,
 ) -> list[Finding]:
-    findings = health_findings(health)
+    findings = health_findings(health, thresholds=thresholds)
     findings += license_findings(license_status, now)
     findings += cluster_lease_findings(system_lease_ttls[0] if system_lease_ttls else None)
     return sort_findings(findings)

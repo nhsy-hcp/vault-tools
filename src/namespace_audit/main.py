@@ -22,6 +22,7 @@ from rich.progress import (
 from rich.table import Table
 
 from src.cluster_audit.collector import ClusterReads, LicenseResult, collect_cluster_health, fetch_license_status, fetch_system_lease_ttls
+from src.cluster_audit.findings import DEFAULT_THRESHOLDS, Thresholds
 from src.common import vault_http
 from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import write_csv, write_json, write_markdown
@@ -179,6 +180,8 @@ class AuditData:
     cluster_health: dict[str, Any] | None = None
     # What those cluster reads were denied or failed on (ClusterCoverage).
     cluster_coverage: Any = None
+    # Tunable cluster-health thresholds (--lease-count-warning, --snapshot-grace).
+    thresholds: Thresholds = DEFAULT_THRESHOLDS
 
 
 class NamespaceAuditor:
@@ -195,6 +198,7 @@ class NamespaceAuditor:
         collect_sentinel: bool = True,
         names_only: bool = False,
         cluster_reads: ClusterReads | None = None,
+        thresholds: Thresholds = DEFAULT_THRESHOLDS,
     ):
         self.vault_client = vault_client
         self.worker_threads = worker_threads
@@ -219,7 +223,7 @@ class NamespaceAuditor:
         self.cluster_reads = cluster_reads
         self._queue_depth_warned = False
         self.stats = AuditStats()
-        self.data = AuditData()
+        self.data = AuditData(thresholds=thresholds)
         # Namespaces already discovered, keyed without the trailing slash. The
         # tree is finite, but a namespace can be reached only once, so this
         # guards against enqueueing (and billing an API round-trip for) the

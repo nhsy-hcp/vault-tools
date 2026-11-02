@@ -816,7 +816,7 @@ def collect_findings(
 
     # Judged against the node's own clock at collection, not ``now``: the walk
     # can take minutes, and that must not read as replication lag.
-    findings.extend(health_findings(data.cluster_health))
+    findings.extend(health_findings(data.cluster_health, thresholds=data.thresholds))
 
     return sort_findings(findings)
 

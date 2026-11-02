@@ -27,6 +27,7 @@ from rich.console import Console
 from rich.table import Table
 
 from src.activity_export.main import NOT_READ, run_activity_export
+from src.cluster_audit.findings import DEFAULT_THRESHOLDS, Thresholds
 from src.cluster_audit.main import run_cluster_audit_full
 from src.common.file_utils import latest_files, read_json, scan_files, write_json, write_markdown
 from src.common.findings import SEVERITY_ORDER, diff_documents, get_tool_version, merge_documents, run_block
@@ -95,6 +96,7 @@ def run_full_audit(
     end_date: str | None = None,
     console: Console | None = None,
     skip: frozenset[str] = frozenset(),
+    thresholds: Thresholds = DEFAULT_THRESHOLDS,
 ) -> dict[str, Any] | None:
     """Run every step and write the combined files. Returns the merged findings document, or None if Vault was unreachable.
 
@@ -121,7 +123,7 @@ def run_full_audit(
 
     def cluster_step() -> StepResult:
         nonlocal cluster
-        cluster = run_cluster_audit_full(vault_client, output_dir, console)
+        cluster = run_cluster_audit_full(vault_client, output_dir, console, thresholds)
         if cluster is None:
             return StepResult("cluster-audit", "failed", "Vault unreachable or the token was rejected — see the message above.")
         return StepResult("cluster-audit", "ok", document=cluster.document)
@@ -149,6 +151,7 @@ def run_full_audit(
                 collect_sentinel=collect_sentinel,
                 names_only=names_only,
                 cluster_reads=cluster.reads,
+                thresholds=thresholds,
             )
             document = auditor.audit_cluster()
             if document is None:
