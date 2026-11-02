@@ -236,3 +236,26 @@ def test_write_methods_are_refused(method):
 def test_client_has_no_write_methods():
     for name in ("write", "post", "put", "patch", "delete", "create", "update"):
         assert not hasattr(NamespacedClient, name)
+
+
+# ---------------------------------------------------------------------------
+# Response helpers
+# ---------------------------------------------------------------------------
+
+
+def test_data_of_unwraps_the_data_block():
+    assert vault_http.data_of({"data": {"a": 1}, "lease_id": ""}) == {"a": 1}
+
+
+@pytest.mark.parametrize("payload", [{"initialized": True}, {"data": None, "x": 1}, {"data": ["not", "a", "dict"]}, {}])
+def test_data_of_returns_the_payload_without_a_data_dict(payload):
+    """sys/health, sys/metrics and some sys/ reads answer at the top level."""
+    assert vault_http.data_of(payload) is payload
+
+
+@pytest.mark.parametrize(
+    ("payload", "keys"),
+    [({"data": {"keys": ["a", "b/"]}}, ["a", "b/"]), ({"data": {"keys": None}}, []), ({"data": None}, []), ({}, [])],
+)
+def test_keys_of(payload, keys):
+    assert vault_http.keys_of(payload) == keys

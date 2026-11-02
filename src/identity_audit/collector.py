@@ -19,7 +19,7 @@ from typing import Any
 import requests
 
 from src.activity_export.findings import client_count
-from src.cluster_audit.collector import RawReader, sanitise_error
+from src.cluster_audit.collector import sanitise_error
 from src.common import vault_http
 from src.common.vault_client import VaultClient
 
@@ -129,9 +129,8 @@ def collect_entities(
     def one_namespace(ns: str) -> tuple[str, list[Entity]]:
         try:
             with vault_client.get_client(_api_namespace(ns)) as client:
-                reader = RawReader(client)
                 try:
-                    listing = reader.get("identity/entity/id", params={"list": "true"})
+                    listing = client.list("identity/entity/id")
                 except vault_http.InvalidPath:
                     return ns, []  # no entities: Vault 404s an empty LIST
                 except vault_http.Forbidden:
@@ -142,7 +141,7 @@ def collect_entities(
                 for entity_id in sorted(key_info):
                     info = key_info[entity_id] or {}
                     try:
-                        body: dict[str, Any] | None = reader.data(f"identity/entity/id/{entity_id}")
+                        body: dict[str, Any] | None = vault_http.data_of(client.read(f"identity/entity/id/{entity_id}"))
                     except vault_http.InvalidPath:
                         # Deleted between the LIST and the read: it no longer
                         # exists, so it is neither counted nor a gap.
@@ -189,7 +188,7 @@ def read_activity(vault_client: VaultClient, path: str, coverage: IdentityCovera
     """Activity-log read at root. {} when nothing is recorded; None when denied or failed."""
     try:
         with vault_client.get_client() as client:
-            return RawReader(client).data(path)
+            return vault_http.data_of(client.read(path))
     except vault_http.Forbidden:
         coverage.denied.append(("", path))
     except vault_http.InvalidPath:
