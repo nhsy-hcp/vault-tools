@@ -17,9 +17,9 @@ def mock_vault_client():
 
     # Create a mock context manager for get_client
     mock_context_manager = MagicMock()
-    mock_hvac_client = Mock()
+    mock_client = Mock()
 
-    mock_context_manager.__enter__.return_value = mock_hvac_client
+    mock_context_manager.__enter__.return_value = mock_client
     mock_context_manager.__exit__.return_value = None
     client.get_client.return_value = mock_context_manager
 

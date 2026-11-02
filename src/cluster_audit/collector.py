@@ -18,26 +18,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-import hvac
 import requests
 
+from src.common import vault_http
 from src.common.exceptions import VaultPermissionError
 from src.common.findings import iso_utc, parse_time
 from src.common.vault_client import VaultClient
+from src.common.vault_http import HEALTH_PARAMS
 
 logger = logging.getLogger(__name__)
-
-# sys/health query that answers 200 with a body for every node state, so a
-# sealed, standby or DR-secondary node still describes itself.
-HEALTH_PARAMS = {
-    "standbyok": "true",
-    "perfstandbyok": "true",
-    "sealedcode": "200",
-    "uninitcode": "200",
-    "drsecondarycode": "200",
-    "performancestandbycode": "200",
-    "standbycode": "200",
-}
 
 # Allowlisted sys/metrics gauges: output key -> (metric name, aggregation over
 # label sets). Labels are dropped because their values carry cluster names and
@@ -105,7 +94,7 @@ class ClusterCoverage:
 
 
 def sanitise_error(exc: BaseException) -> str:
-    """Exception class plus HTTP status only: hvac messages can echo request URLs."""
+    """Exception class plus HTTP status only: VaultError messages carry request paths and Vault's error text."""
     status = getattr(getattr(exc, "response", None), "status_code", None)
     return (type(exc).__name__ + (f" (HTTP {status})" if status else ""))[:MAX_ERROR_LENGTH]
 
@@ -127,21 +116,20 @@ def unauthenticated_only(health: dict[str, Any]) -> str | None:
 
 
 class RawReader:
-    """GET-only helper over one hvac client; raises hvac exceptions unchanged."""
+    """GET-only helper over one NamespacedClient; raises vault_http exceptions unchanged."""
 
     def __init__(self, client: Any):
         self.client = client
 
     def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = self.client.adapter.get(f"/v1/{path}", params=params)
-        return response if isinstance(response, dict) else {}
+        return self.client.read(path, params=params)
 
     def data(self, path: str) -> dict[str, Any]:
         payload = self.get(path)
         return payload["data"] if isinstance(payload.get("data"), dict) else payload
 
     def list(self, path: str) -> list[str]:
-        return list((self.get(path, params={"list": "true"}).get("data") or {}).get("keys") or [])
+        return list((self.client.list(path).get("data") or {}).get("keys") or [])
 
 
 def read_health(vault_client: VaultClient) -> dict[str, Any] | None:
@@ -211,11 +199,11 @@ def empty_health(health: dict[str, Any]) -> dict[str, Any]:
 def _optional(reader: RawReader, coverage: ClusterCoverage, path: str) -> dict[str, Any] | None:
     try:
         return reader.data(path)
-    except hvac.exceptions.Forbidden:
+    except vault_http.Forbidden:
         coverage.deny(path)
-    except hvac.exceptions.InvalidPath:
+    except vault_http.InvalidPath:
         pass
-    except (hvac.exceptions.VaultError, requests.exceptions.RequestException) as e:
+    except (vault_http.VaultError, requests.exceptions.RequestException) as e:
         coverage.error(path, e)
     return None
 
@@ -225,9 +213,9 @@ def _collect(reader: RawReader, health_status: dict[str, Any] | None, coverage: 
     if health is None:
         try:
             health = reader.get("sys/health", params=HEALTH_PARAMS)
-        except hvac.exceptions.InvalidPath:
+        except vault_http.InvalidPath:
             health = {}
-        except (hvac.exceptions.VaultError, requests.exceptions.RequestException) as e:
+        except (vault_http.VaultError, requests.exceptions.RequestException) as e:
             coverage.error("sys/health", e)
             health = {}
     result = empty_health(health)
@@ -270,12 +258,12 @@ def _collect(reader: RawReader, health_status: dict[str, Any] | None, coverage: 
 def collect_metrics(reader: RawReader, coverage: ClusterCoverage) -> dict[str, Any] | None:
     try:
         payload = reader.get("sys/metrics")
-    except hvac.exceptions.Forbidden:
+    except vault_http.Forbidden:
         coverage.deny("sys/metrics")
         return None
-    except hvac.exceptions.InvalidPath:
+    except vault_http.InvalidPath:
         return None
-    except (hvac.exceptions.VaultError, requests.exceptions.RequestException) as e:
+    except (vault_http.VaultError, requests.exceptions.RequestException) as e:
         coverage.error("sys/metrics", e)
         return None
     gauges = payload.get("Gauges")
@@ -309,14 +297,14 @@ def collect_raft(reader: RawReader, coverage: ClusterCoverage) -> dict[str, Any]
     def read(path: str) -> dict[str, Any] | None:
         try:
             return reader.data(path)
-        except hvac.exceptions.Forbidden:
+        except vault_http.Forbidden:
             coverage.deny(path)
-        except hvac.exceptions.InvalidPath:
+        except vault_http.InvalidPath:
             pass
-        except hvac.exceptions.InvalidRequest as e:
+        except vault_http.InvalidRequest as e:
             if "raft storage is not in use" not in str(e):
                 coverage.error(path, e)
-        except (hvac.exceptions.VaultError, requests.exceptions.RequestException) as e:
+        except (vault_http.VaultError, requests.exceptions.RequestException) as e:
             coverage.error(path, e)
         return None
 
@@ -348,12 +336,12 @@ def collect_audit_devices(reader: RawReader, coverage: ClusterCoverage) -> list[
     """Enabled audit devices (sys/audit needs read+sudo); None when unreadable."""
     try:
         devices = reader.data("sys/audit")
-    except hvac.exceptions.Forbidden:
+    except vault_http.Forbidden:
         coverage.deny("sys/audit")
         return None
-    except hvac.exceptions.InvalidPath:
+    except vault_http.InvalidPath:
         return None
-    except (hvac.exceptions.VaultError, requests.exceptions.RequestException) as e:
+    except (vault_http.VaultError, requests.exceptions.RequestException) as e:
         coverage.error("sys/audit", e)
         return None
     rows = []
@@ -391,12 +379,12 @@ def collect_snapshots(reader: RawReader, coverage: ClusterCoverage) -> dict[str,
     base = "sys/storage/raft/snapshot-auto"
     try:
         names = reader.list(f"{base}/config")
-    except hvac.exceptions.Forbidden:
+    except vault_http.Forbidden:
         coverage.deny(f"{base}/config")
         return None
-    except hvac.exceptions.InvalidPath:
+    except vault_http.InvalidPath:
         names = []
-    except (hvac.exceptions.VaultError, requests.exceptions.RequestException) as e:
+    except (vault_http.VaultError, requests.exceptions.RequestException) as e:
         coverage.error(f"{base}/config", e)
         return None
     configs = []
@@ -404,11 +392,11 @@ def collect_snapshots(reader: RawReader, coverage: ClusterCoverage) -> dict[str,
         status: dict[str, Any] | None = None
         try:
             status = reader.data(f"{base}/status/{name}")
-        except hvac.exceptions.Forbidden:
+        except vault_http.Forbidden:
             coverage.deny(f"{base}/status")
-        except hvac.exceptions.InvalidPath:
+        except vault_http.InvalidPath:
             status = {}
-        except (hvac.exceptions.VaultError, requests.exceptions.RequestException) as e:
+        except (vault_http.VaultError, requests.exceptions.RequestException) as e:
             coverage.error(f"{base}/status", e)
         configs.append({"name": name, "status_readable": status is not None, **snapshot_status(status or {})})
     return {"configs": configs}
@@ -461,12 +449,12 @@ def collect_paths_filters(reader: RawReader, coverage: ClusterCoverage, secondar
     for secondary_id in sorted(secondary_ids):
         try:
             data = reader.data(f"{base}/paths-filter/{secondary_id}")
-        except hvac.exceptions.Forbidden:
+        except vault_http.Forbidden:
             coverage.deny(f"{base}/paths-filter")
             return None
-        except hvac.exceptions.InvalidPath:
+        except vault_http.InvalidPath:
             continue
-        except (hvac.exceptions.VaultError, requests.exceptions.RequestException) as e:
+        except (vault_http.VaultError, requests.exceptions.RequestException) as e:
             coverage.error(f"{base}/paths-filter", e)
             continue
         if not data or not data.get("mode"):
@@ -475,12 +463,12 @@ def collect_paths_filters(reader: RawReader, coverage: ClusterCoverage, secondar
         try:
             if not dynamic_denied:
                 dynamic = len((reader.data(f"{base}/dynamic-filter/{secondary_id}") or {}).get("dynamic_filtered_mounts") or [])
-        except hvac.exceptions.Forbidden:
+        except vault_http.Forbidden:
             dynamic_denied = True
             coverage.deny(f"{base}/dynamic-filter")
-        except hvac.exceptions.InvalidPath:
+        except vault_http.InvalidPath:
             dynamic = 0
-        except (hvac.exceptions.VaultError, requests.exceptions.RequestException) as e:
+        except (vault_http.VaultError, requests.exceptions.RequestException) as e:
             coverage.error(f"{base}/dynamic-filter", e)
         filters.append({"secondary_id": secondary_id, "mode": data.get("mode"), "paths": sorted(data.get("paths") or []), "dynamic_filtered_mounts": dynamic})
     return filters
@@ -543,7 +531,7 @@ def fetch_license_status(vault_client: VaultClient, is_enterprise: bool | None) 
         logger.debug(f"Permission denied reading sys/license/status ({e}); license data unavailable")
         return LicenseResult(None, "denied", is_enterprise)
     except Exception as e:
-        if is_enterprise is None and isinstance(e.__cause__, hvac.exceptions.InvalidPath):
+        if is_enterprise is None and isinstance(e.__cause__, vault_http.InvalidPath):
             logger.debug("sys/license/status not found; treating the cluster as Community Edition")
             return LicenseResult(None, None, False)
         logger.debug(f"Could not read sys/license/status ({e}); license data unavailable")

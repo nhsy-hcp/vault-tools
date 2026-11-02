@@ -4,13 +4,13 @@ import time
 from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
-import hvac
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from src.activity_export.findings import client_count, parse_activity_config, usage_findings
+from src.common import vault_http
 from src.common.audit_logger import get_audit_logger
 from src.common.exceptions import VaultPermissionError
 from src.common.file_utils import FileProcessingError, write_csv, write_json, write_markdown
@@ -77,7 +77,7 @@ def _read_optional(client: VaultClient, path: str, denied: list[tuple[str, str]]
     except VaultPermissionError:
         denied.append(("", path))
     except Exception as e:
-        if isinstance(e.__cause__, hvac.exceptions.InvalidPath):
+        if isinstance(e.__cause__, vault_http.InvalidPath):
             return {}
         errors.append(("", f"{path}: {type(e).__name__}"))
     return None

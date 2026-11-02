@@ -34,7 +34,7 @@ EXIT_OK = 0
 EXIT_GAPS = 2
 EXIT_FINDINGS = 3
 
-# The schema caps coverage error messages; a full hvac error can run to KBs.
+# The schema caps coverage error messages; a full Vault error can run to KBs.
 MAX_ERROR_MESSAGE_LENGTH = 200
 
 

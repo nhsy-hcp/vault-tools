@@ -2,15 +2,14 @@
 
 import queue
 
-import hvac
+from src.common import vault_http
+from tests.namespace_audit.fixtures import as_context_manager, make_vault_client_mock
 
-from tests.namespace_audit.fixtures import as_context_manager, make_hvac_client
 
-
-def attach(auditor, hvac_client):
+def attach(auditor, client):
     """Point the auditor's get_client at this mock and hand the mock back."""
-    auditor.vault_client.get_client.return_value = as_context_manager(hvac_client)
-    return hvac_client
+    auditor.vault_client.get_client.return_value = as_context_manager(client)
+    return client
 
 
 class TestNamespaceDataFetching:
@@ -20,10 +19,12 @@ class TestNamespaceDataFetching:
         """Test successful namespace data fetch from non-root namespace."""
         attach(
             auditor,
-            make_hvac_client(
-                list_auth_methods={"data": {"userpass/": {"type": "userpass"}}},
-                list_mounted_secrets_engines={"data": {"secret/": {"type": "kv"}}},
-                list_namespaces={"data": {"key_info": {"team-a/": {"id": "123"}}}},
+            make_vault_client_mock(
+                {
+                    ("read", "sys/auth"): {"data": {"userpass/": {"type": "userpass"}}},
+                    ("read", "sys/mounts"): {"data": {"secret/": {"type": "kv"}}},
+                    ("list", "sys/namespaces"): {"data": {"key_info": {"team-a/": {"id": "123"}}}},
+                }
             ),
         )
 
@@ -40,8 +41,8 @@ class TestNamespaceDataFetching:
 
     def test_fetch_namespace_data_invalid_path(self, auditor):
         """Test namespace data fetch with invalid path."""
-        client = attach(auditor, make_hvac_client())
-        client.sys.list_namespaces.side_effect = hvac.exceptions.InvalidPath()
+        client = attach(auditor, make_vault_client_mock())
+        client.at("list", "sys/namespaces").side_effect = vault_http.InvalidPath()
 
         path_queue = queue.Queue()
         auditor._traverse_namespace("test/", path_queue)
@@ -52,8 +53,8 @@ class TestNamespaceDataFetching:
 
     def test_fetch_namespace_data_forbidden(self, auditor):
         """Test namespace data fetch with forbidden access."""
-        client = attach(auditor, make_hvac_client())
-        client.sys.list_auth_methods.side_effect = hvac.exceptions.Forbidden()
+        client = attach(auditor, make_vault_client_mock())
+        client.at("read", "sys/auth").side_effect = vault_http.Forbidden()
 
         path_queue = queue.Queue()
         auditor._traverse_namespace("test/", path_queue)
@@ -66,8 +67,8 @@ class TestNamespaceDataFetching:
 
     def test_traverse_namespace_error_handling(self, auditor):
         """Test error handling during namespace traversal."""
-        client = attach(auditor, make_hvac_client())
-        client.sys.list_auth_methods.side_effect = Exception("Unexpected error")
+        client = attach(auditor, make_vault_client_mock())
+        client.at("read", "sys/auth").side_effect = Exception("Unexpected error")
 
         path_queue = queue.Queue()
         auditor._traverse_namespace("test/", path_queue)
@@ -84,10 +85,12 @@ class TestNamespacePathProcessing:
         """Test processing the root namespace."""
         attach(
             auditor,
-            make_hvac_client(
-                list_auth_methods={"data": {"token/": {"type": "token"}}},
-                list_mounted_secrets_engines={"data": {"sys/": {"type": "system"}}},
-                list_namespaces={"data": {"key_info": {"prod/": {"id": "456"}}}},
+            make_vault_client_mock(
+                {
+                    ("read", "sys/auth"): {"data": {"token/": {"type": "token"}}},
+                    ("read", "sys/mounts"): {"data": {"sys/": {"type": "system"}}},
+                    ("list", "sys/namespaces"): {"data": {"key_info": {"prod/": {"id": "456"}}}},
+                }
             ),
         )
 
@@ -107,10 +110,12 @@ class TestNamespacePathProcessing:
         """Test that deeply nested namespaces still discover their own children."""
         attach(
             auditor,
-            make_hvac_client(
-                list_auth_methods={"data": {"ldap/": {"type": "ldap"}}},
-                list_mounted_secrets_engines={"data": {"database/": {"type": "database"}}},
-                list_namespaces={"data": {"key_info": {"dev/": {"id": "789"}}}},
+            make_vault_client_mock(
+                {
+                    ("read", "sys/auth"): {"data": {"ldap/": {"type": "ldap"}}},
+                    ("read", "sys/mounts"): {"data": {"database/": {"type": "database"}}},
+                    ("list", "sys/namespaces"): {"data": {"key_info": {"dev/": {"id": "789"}}}},
+                }
             ),
         )
 
@@ -126,7 +131,7 @@ class TestNamespacePathProcessing:
 
     def test_already_visited_child_is_not_requeued(self, auditor):
         """A namespace reported twice is only enqueued once."""
-        attach(auditor, make_hvac_client(list_namespaces={"data": {"key_info": {"dev/": {"id": "789"}}}}))
+        attach(auditor, make_vault_client_mock({("list", "sys/namespaces"): {"data": {"key_info": {"dev/": {"id": "789"}}}}}))
 
         path_queue = queue.Queue()
         auditor._traverse_namespace("prod/", path_queue)
@@ -142,8 +147,8 @@ class TestNamespacePathProcessing:
 
     def test_empty_namespace_processing(self, auditor):
         """Test processing namespace with no auth methods or secret engines."""
-        client = attach(auditor, make_hvac_client())
-        client.sys.list_namespaces.side_effect = hvac.exceptions.InvalidPath()
+        client = attach(auditor, make_vault_client_mock())
+        client.at("list", "sys/namespaces").side_effect = vault_http.InvalidPath()
 
         path_queue = queue.Queue()
         auditor._traverse_namespace("empty/", path_queue)
@@ -158,14 +163,14 @@ class TestAclPolicyCollection:
     """Names only, with Vault's own everywhere-policies filtered out."""
 
     def test_names_are_stored_sorted(self, auditor):
-        attach(auditor, make_hvac_client(list_acl_policies={"data": {"keys": ["kv-writer", "admin", "auditor"]}}))
+        attach(auditor, make_vault_client_mock({("list", "sys/policies/acl"): {"data": {"keys": ["kv-writer", "admin", "auditor"]}}}))
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
         assert auditor.data.acl_policies["team-a"] == ["admin", "auditor", "kv-writer"]
 
     def test_builtin_policies_are_excluded(self, auditor):
-        attach(auditor, make_hvac_client(list_acl_policies={"data": {"keys": ["default", "root", "default-ceiling", "admin"]}}))
+        attach(auditor, make_vault_client_mock({("list", "sys/policies/acl"): {"data": {"keys": ["default", "root", "default-ceiling", "admin"]}}}))
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
@@ -175,7 +180,7 @@ class TestAclPolicyCollection:
         """`default-ceiling` is excluded, but a user policy that merely starts
         with `default` is real configuration and must survive."""
         keys = ["default", "default-admin", "default-ceiling", "default-ceiling-override", "rooted"]
-        attach(auditor, make_hvac_client(list_acl_policies={"data": {"keys": keys}}))
+        attach(auditor, make_vault_client_mock({("list", "sys/policies/acl"): {"data": {"keys": keys}}}))
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
@@ -184,15 +189,15 @@ class TestAclPolicyCollection:
     def test_namespace_with_only_builtins_still_gets_a_key(self, auditor):
         """Twelve namespaces on the reference cluster are in this state. An
         absent key would read as 'not audited' rather than 'nothing defined'."""
-        attach(auditor, make_hvac_client(list_acl_policies={"data": {"keys": ["default", "default-ceiling"]}}))
+        attach(auditor, make_vault_client_mock({("list", "sys/policies/acl"): {"data": {"keys": ["default", "default-ceiling"]}}}))
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
         assert auditor.data.acl_policies["team-a"] == []
 
     def test_forbidden_is_recorded_as_an_access_gap(self, auditor):
-        client = attach(auditor, make_hvac_client())
-        client.sys.list_acl_policies.side_effect = hvac.exceptions.Forbidden()
+        client = attach(auditor, make_vault_client_mock())
+        client.at("list", "sys/policies/acl").side_effect = vault_http.Forbidden()
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
@@ -202,8 +207,8 @@ class TestAclPolicyCollection:
         assert "team-a" in auditor.data.auth_methods
 
     def test_invalid_path_yields_an_empty_list(self, auditor):
-        client = attach(auditor, make_hvac_client())
-        client.sys.list_acl_policies.side_effect = hvac.exceptions.InvalidPath()
+        client = attach(auditor, make_vault_client_mock())
+        client.at("list", "sys/policies/acl").side_effect = vault_http.InvalidPath()
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
@@ -211,8 +216,8 @@ class TestAclPolicyCollection:
         assert auditor.stats.error_count == 0
 
     def test_unexpected_error_is_counted_not_swallowed(self, auditor):
-        client = attach(auditor, make_hvac_client())
-        client.sys.list_acl_policies.side_effect = RuntimeError("boom")
+        client = attach(auditor, make_vault_client_mock())
+        client.at("list", "sys/policies/acl").side_effect = RuntimeError("boom")
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
@@ -226,11 +231,13 @@ class TestSentinelPolicyCollection:
     def _with_policies(self, auditor):
         client = attach(
             auditor,
-            make_hvac_client(
-                list_egp_policies={"data": {"keys": ["deny-root"]}},
-                list_rgp_policies={"data": {"keys": ["require-mfa"]}},
-                read_egp_policy={"data": {"name": "deny-root", "enforcement_level": "advisory", "paths": ["*"], "policy": "main = rule { true }"}},
-                read_rgp_policy={"data": {"name": "require-mfa", "enforcement_level": "hard-mandatory", "policy": "main = rule { true }"}},
+            make_vault_client_mock(
+                {
+                    ("list", "sys/policies/egp"): {"data": {"keys": ["deny-root"]}},
+                    ("list", "sys/policies/rgp"): {"data": {"keys": ["require-mfa"]}},
+                    ("read", "sys/policies/egp/*"): {"data": {"name": "deny-root", "enforcement_level": "advisory", "paths": ["*"], "policy": "main = rule { true }"}},
+                    ("read", "sys/policies/rgp/*"): {"data": {"name": "require-mfa", "enforcement_level": "hard-mandatory", "policy": "main = rule { true }"}},
+                }
             ),
         )
         return client
@@ -246,8 +253,8 @@ class TestSentinelPolicyCollection:
 
     def test_unsupported_path_marks_the_cluster_and_is_not_an_error(self, auditor):
         """Community and unlicensed Enterprise 404 with 'unsupported path'."""
-        client = attach(auditor, make_hvac_client())
-        client.sys.list_egp_policies.side_effect = hvac.exceptions.InvalidPath("1 error occurred:\n\t* unsupported path\n\n")
+        client = attach(auditor, make_vault_client_mock())
+        client.at("list", "sys/policies/egp").side_effect = vault_http.InvalidPath("1 error occurred:\n\t* unsupported path\n\n")
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
@@ -262,31 +269,31 @@ class TestSentinelPolicyCollection:
         Regression: only 'unsupported path' was recognised, so a 2.x Community
         cluster was reported as having Sentinel with zero policies.
         """
-        client = attach(auditor, make_hvac_client())
-        client.sys.list_egp_policies.side_effect = hvac.exceptions.InvalidPath("enterprise-only feature")
+        client = attach(auditor, make_vault_client_mock())
+        client.at("list", "sys/policies/egp").side_effect = vault_http.InvalidPath("enterprise-only feature")
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
         assert auditor.sentinel_supported is False
-        assert client.sys.list_rgp_policies.call_count == 0
+        assert client.at("list", "sys/policies/rgp").call_count == 0
         assert auditor.stats.error_count == 0
 
     def test_unsupported_cluster_is_probed_only_once(self, auditor):
         """The short-circuit caps a Community run at two extra API calls."""
-        client = attach(auditor, make_hvac_client())
-        client.sys.list_egp_policies.side_effect = hvac.exceptions.InvalidPath("unsupported path")
+        client = attach(auditor, make_vault_client_mock())
+        client.at("list", "sys/policies/egp").side_effect = vault_http.InvalidPath("unsupported path")
 
         auditor._traverse_namespace("a/", queue.Queue())
         auditor._traverse_namespace("b/", queue.Queue())
         auditor._traverse_namespace("c/", queue.Queue())
 
-        assert client.sys.list_egp_policies.call_count == 1
-        assert client.sys.list_rgp_policies.call_count == 0
+        assert client.at("list", "sys/policies/egp").call_count == 1
+        assert client.at("list", "sys/policies/rgp").call_count == 0
 
     def test_plain_invalid_path_means_no_policies_not_no_sentinel(self, auditor):
         """Vault 404s an empty LIST too — that must not disable collection."""
-        client = attach(auditor, make_hvac_client())
-        client.sys.list_egp_policies.side_effect = hvac.exceptions.InvalidPath()
+        client = attach(auditor, make_vault_client_mock())
+        client.at("list", "sys/policies/egp").side_effect = vault_http.InvalidPath()
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
@@ -295,8 +302,8 @@ class TestSentinelPolicyCollection:
         assert auditor.stats.error_count == 0
 
     def test_forbidden_list_is_recorded_as_an_access_gap(self, auditor):
-        client = attach(auditor, make_hvac_client())
-        client.sys.list_egp_policies.side_effect = hvac.exceptions.Forbidden()
+        client = attach(auditor, make_vault_client_mock())
+        client.at("list", "sys/policies/egp").side_effect = vault_http.Forbidden()
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
@@ -307,23 +314,25 @@ class TestSentinelPolicyCollection:
 
     def test_unreadable_bodies_keep_the_names_and_stop_reading(self, auditor):
         """A token without the Sentinel add-on: names kept, one 403, no gap rows."""
-        client = attach(auditor, make_hvac_client(list_egp_policies={"data": {"keys": ["a", "b", "c"]}}))
-        client.sys.read_egp_policy.side_effect = hvac.exceptions.Forbidden()
+        client = attach(auditor, make_vault_client_mock({("list", "sys/policies/egp"): {"data": {"keys": ["a", "b", "c"]}}}))
+        client.at("read", "sys/policies/egp/*").side_effect = vault_http.Forbidden()
 
         auditor._traverse_namespace("team-a/", queue.Queue())
         auditor._traverse_namespace("team-b/", queue.Queue())
 
         assert auditor.data.egp_policies["team-a"] == {"a": {"name": "a"}, "b": {"name": "b"}, "c": {"name": "c"}}
-        assert client.sys.read_egp_policy.call_count == 1
+        assert client.at("read", "sys/policies/egp/*").call_count == 1
         assert auditor.stats.forbidden_namespaces == []
         assert auditor._body_status("sentinel") == "not readable"
 
     def test_bodies_are_reduced_and_never_stored(self, auditor):
         client = attach(
             auditor,
-            make_hvac_client(
-                list_egp_policies={"data": {"keys": ["p"]}},
-                read_egp_policy={"data": {"name": "p", "enforcement_level": "advisory", "paths": ["*"], "policy": "main = rule { true }"}},
+            make_vault_client_mock(
+                {
+                    ("list", "sys/policies/egp"): {"data": {"keys": ["p"]}},
+                    ("read", "sys/policies/egp/*"): {"data": {"name": "p", "enforcement_level": "advisory", "paths": ["*"], "policy": "main = rule { true }"}},
+                }
             ),
         )
 
@@ -331,16 +340,16 @@ class TestSentinelPolicyCollection:
 
         stored = auditor.data.egp_policies["team-a"]["p"]
         assert "policy" not in stored and stored["always_true"] is True and len(stored["sha256"]) == 16
-        assert client.sys.read_egp_policy.call_count == 1
+        assert client.at("read", "sys/policies/egp/*").call_count == 1
 
     def test_names_only_lists_sentinel_without_reading(self, auditor):
         auditor.names_only = True
-        client = attach(auditor, make_hvac_client(list_egp_policies={"data": {"keys": ["p"]}}))
+        client = attach(auditor, make_vault_client_mock({("list", "sys/policies/egp"): {"data": {"keys": ["p"]}}}))
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
         assert auditor.data.egp_policies["team-a"] == {"p": {"name": "p"}}
-        client.sys.read_egp_policy.assert_not_called()
+        client.at("read", "sys/policies/egp/*").assert_not_called()
 
     def test_collection_can_be_disabled(self, auditor):
         auditor.collect_sentinel = False
@@ -348,13 +357,13 @@ class TestSentinelPolicyCollection:
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
-        assert client.sys.list_egp_policies.call_count == 0
+        assert client.at("list", "sys/policies/egp").call_count == 0
         assert auditor.data.egp_policies == {}
         assert auditor.sentinel_supported is None
 
     def test_namespaces_without_policies_get_no_entry(self, auditor):
         """An empty dict per namespace would put a blank row in every table."""
-        attach(auditor, make_hvac_client())
+        attach(auditor, make_vault_client_mock())
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 

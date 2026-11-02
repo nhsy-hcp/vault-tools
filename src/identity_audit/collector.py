@@ -16,11 +16,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
-import hvac
 import requests
 
 from src.activity_export.findings import client_count
 from src.cluster_audit.collector import RawReader, sanitise_error
+from src.common import vault_http
 from src.common.vault_client import VaultClient
 
 logger = logging.getLogger(__name__)
@@ -85,10 +85,10 @@ def discover_namespaces(vault_client: VaultClient, workers: int = 4, coverage: I
     def children(ns: str) -> list[str]:
         try:
             with vault_client.get_client(_api_namespace(ns)) as client:
-                keys = (client.sys.list_namespaces().get("data") or {}).get("key_info") or {}
-        except hvac.exceptions.InvalidPath:
+                keys = (client.list("sys/namespaces").get("data") or {}).get("key_info") or {}
+        except vault_http.InvalidPath:
             return []
-        except hvac.exceptions.Forbidden:
+        except vault_http.Forbidden:
             coverage.denied.append((ns, "child namespaces (subtree not audited)"))
             return []
         except Exception as e:
@@ -132,9 +132,9 @@ def collect_entities(
                 reader = RawReader(client)
                 try:
                     listing = reader.get("identity/entity/id", params={"list": "true"})
-                except hvac.exceptions.InvalidPath:
+                except vault_http.InvalidPath:
                     return ns, []  # no entities: Vault 404s an empty LIST
-                except hvac.exceptions.Forbidden:
+                except vault_http.Forbidden:
                     coverage.denied.append((ns, "identity entities"))
                     return ns, []
                 key_info = (listing.get("data") or {}).get("key_info") or {}
@@ -143,15 +143,15 @@ def collect_entities(
                     info = key_info[entity_id] or {}
                     try:
                         body: dict[str, Any] | None = reader.data(f"identity/entity/id/{entity_id}")
-                    except hvac.exceptions.InvalidPath:
+                    except vault_http.InvalidPath:
                         # Deleted between the LIST and the read: it no longer
                         # exists, so it is neither counted nor a gap.
                         continue
-                    except hvac.exceptions.Forbidden:
+                    except vault_http.Forbidden:
                         # The listing still names it, so the entity is counted;
                         # one access-gap row per namespace, not one per entity.
                         body, denied = None, True
-                    except (hvac.exceptions.VaultError, requests.exceptions.RequestException) as e:
+                    except (vault_http.VaultError, requests.exceptions.RequestException) as e:
                         # A 5xx or timeout is not a token problem: report it as
                         # an error, once per namespace, so nobody widens a policy.
                         body = None
@@ -190,9 +190,9 @@ def read_activity(vault_client: VaultClient, path: str, coverage: IdentityCovera
     try:
         with vault_client.get_client() as client:
             return RawReader(client).data(path)
-    except hvac.exceptions.Forbidden:
+    except vault_http.Forbidden:
         coverage.denied.append(("", path))
-    except hvac.exceptions.InvalidPath:
+    except vault_http.InvalidPath:
         return {}
     except Exception as e:
         coverage.errors.append(("", sanitise_error(e)))

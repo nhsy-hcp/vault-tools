@@ -1,51 +1,80 @@
 """Improved fixtures for namespace audit tests."""
 
+import urllib.parse
 from contextlib import contextmanager
 from unittest.mock import MagicMock, Mock
 
-import hvac
 import pytest
 
+from src.common import vault_http
 from src.common.vault_client import ConnectionInfo, VaultClient
 from src.namespace_audit.main import NamespaceAuditor
 
+# Every endpoint the namespace walk reads, keyed by (operation, path). A path
+# ending in "/*" takes the last segment as its one argument: a policy name.
+DEFAULT_ROUTES = {
+    ("read", "sys/auth"): {"data": {}},
+    ("read", "sys/mounts"): {"data": {}},
+    ("list", "sys/namespaces"): {"data": {"key_info": {}}},
+    ("list", "sys/policies/acl"): {"data": {"keys": []}},
+    ("list", "sys/policies/egp"): {"data": {"keys": []}},
+    ("list", "sys/policies/rgp"): {"data": {"keys": []}},
+    ("read", "sys/policies/acl/*"): {"data": {"name": "", "policy": ""}},
+    ("read", "sys/policies/egp/*"): {"data": {}},
+    ("read", "sys/policies/rgp/*"): {"data": {}},
+}
 
-def make_hvac_client(**overrides):
-    """Build a mock hvac client with every endpoint the traversal calls stubbed.
 
-    Use this rather than a bare ``Mock()``: an unstubbed ``list_egp_policies()``
-    returns a Mock, and ``Mock`` has no ``__getitem__``, so the collector's
-    ``[...]["keys"]`` raises TypeError and the traversal records a spurious
-    error. Stubbing centrally means adding a collector does not break every test
-    in this package.
+class FakeVault:
+    """Stands in for NamespacedClient: ``read``/``list`` route by path to one Mock per endpoint.
 
-    Pass ``sys.``-prefixed names as keyword arguments to override one endpoint,
-    e.g. ``make_hvac_client(list_namespaces={"data": {"key_info": {}}})``.
+    Configure or inspect an endpoint through ``at(op, path)``, e.g.
+    ``client.at("list", "sys/policies/egp").side_effect = vault_http.Forbidden()``
+    or ``client.at("read", "sys/policies/acl/*").call_count``. Any path without a
+    route raises InvalidPath: that keeps the cluster health collector's reads
+    inert ("not applicable"), so no health finding fires in unrelated tests.
     """
-    client = Mock()
-    defaults = {
-        "list_auth_methods": {"data": {}},
-        "list_mounted_secrets_engines": {"data": {}},
-        "list_namespaces": {"data": {"key_info": {}}},
-        "list_acl_policies": {"data": {"keys": []}},
-        "list_egp_policies": {"data": {"keys": []}},
-        "list_rgp_policies": {"data": {"keys": []}},
-        "read_egp_policy": {"data": {}},
-        "read_rgp_policy": {"data": {}},
-        "read_acl_policy": {"data": {"name": "", "policy": ""}},
-    }
-    for name, value in {**defaults, **overrides}.items():
-        getattr(client.sys, name).return_value = value
-    # Raw GETs come from the cluster health collector. 404 everywhere means
-    # "not applicable", so no block is populated and no health finding fires.
-    client.adapter.get.side_effect = hvac.exceptions.InvalidPath()
-    return client
+
+    def __init__(self, routes):
+        self.endpoints = {}
+        for key, value in routes.items():
+            endpoint = Mock()
+            endpoint.return_value = value
+            self.endpoints[key] = endpoint
+        self.read = Mock(side_effect=lambda path, params=None: self._call("read", path))
+        self.list = Mock(side_effect=lambda path: self._call("list", path))
+
+    def at(self, op, path):
+        return self.endpoints[(op, path)]
+
+    def _call(self, op, path):
+        if (op, path) in self.endpoints:
+            return self.endpoints[(op, path)]()
+        prefix, _, name = path.rpartition("/")
+        if (op, f"{prefix}/*") in self.endpoints:
+            return self.endpoints[(op, f"{prefix}/*")](urllib.parse.unquote(name))
+        raise vault_http.InvalidPath()
 
 
-def as_context_manager(hvac_client):
-    """Wrap a mock hvac client the way VaultClient.get_client yields it."""
+def make_vault_client_mock(routes=None):
+    """A FakeVault with every endpoint the traversal reads stubbed.
+
+    Use this rather than a bare ``Mock()``: an unstubbed read returns a Mock,
+    and ``Mock`` has no ``__getitem__``, so the collector's ``[...]["keys"]``
+    raises TypeError and the traversal records a spurious error. Stubbing
+    centrally means adding a collector does not break every test in this
+    package, so add every new collector endpoint to DEFAULT_ROUTES.
+
+    ``routes`` overrides endpoints by (op, path), e.g.
+    ``make_vault_client_mock({("list", "sys/namespaces"): {"data": {"key_info": {}}}})``.
+    """
+    return FakeVault({**DEFAULT_ROUTES, **(routes or {})})
+
+
+def as_context_manager(client):
+    """Wrap a fake client the way VaultClient.get_client yields it."""
     manager = MagicMock()
-    manager.__enter__.return_value = hvac_client
+    manager.__enter__.return_value = client
     manager.__exit__.return_value = None
     return manager
 
@@ -62,29 +91,14 @@ def mock_vault_client():
     # Mock validate_connection method
     client.validate_connection.return_value = ConnectionInfo("test-cluster", "1.17.0+ent", True, "d33099d9-206e-53c2-4e50-44fb62ac69a6")
 
-    # Create a mock context manager for get_client
-    mock_context_manager = MagicMock()
-    mock_hvac_client = Mock()
-
-    # Set up default hvac client responses
-    mock_hvac_client.sys.list_auth_methods.return_value = {"data": {"userpass/": {"type": "userpass"}}}
-    mock_hvac_client.sys.list_mounted_secrets_engines.return_value = {"data": {"secret/": {"type": "kv"}}}
-    mock_hvac_client.sys.list_namespaces.return_value = {"data": {"key_info": {"team-a/": {"id": "123"}}}}
-    mock_hvac_client.sys.list_acl_policies.return_value = {"data": {"keys": []}}
-    # Sentinel defaults are not optional: mock_hvac_client is a bare Mock, so an
-    # unstubbed list_egp_policies() returns a Mock whose ["data"]["keys"] is
-    # another Mock, which then fails to iterate — breaking every traversal test
-    # rather than just the Sentinel ones. Empty keys is the common case anyway.
-    mock_hvac_client.sys.list_egp_policies.return_value = {"data": {"keys": []}}
-    mock_hvac_client.sys.list_rgp_policies.return_value = {"data": {"keys": []}}
-    mock_hvac_client.sys.read_egp_policy.return_value = {"data": {}}
-    mock_hvac_client.sys.read_rgp_policy.return_value = {"data": {}}
-    # See make_hvac_client: keeps the cluster health collector inert.
-    mock_hvac_client.adapter.get.side_effect = hvac.exceptions.InvalidPath()
-
-    mock_context_manager.__enter__.return_value = mock_hvac_client
-    mock_context_manager.__exit__.return_value = None
-    client.get_client.return_value = mock_context_manager
+    fake = make_vault_client_mock(
+        {
+            ("read", "sys/auth"): {"data": {"userpass/": {"type": "userpass"}}},
+            ("read", "sys/mounts"): {"data": {"secret/": {"type": "kv"}}},
+            ("list", "sys/namespaces"): {"data": {"key_info": {"team-a/": {"id": "123"}}}},
+        }
+    )
+    client.get_client.return_value = as_context_manager(fake)
 
     return client
 
