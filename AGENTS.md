@@ -64,6 +64,7 @@ and is where most of these checks were first written.
 ├── src/
 │   ├── common/
 │   │   ├── vault_client.py         # Centralized Vault API client
+│   │   ├── vault_http.py           # Read-only HTTP client (NamespacedClient) and exceptions
 │   │   ├── config.py               # Configuration management
 │   │   ├── file_utils.py           # File I/O utilities (JSON/CSV/markdown)
 │   │   ├── exceptions.py           # VaultToolsError hierarchy
@@ -121,7 +122,7 @@ and is where most of these checks were first written.
 │   │   ├── test_integration_simple.py
 │   │   ├── test_integration.py
 │   │   └── test_default.py
-│   ├── common/               # includes test_findings.py (model, diff, exit codes)
+│   ├── common/               # includes test_findings.py (model, diff, exit codes) and test_vault_http.py
 │   ├── activity_export/      # Tests for API & data processing
 │   │   ├── conftest.py
 │   │   ├── fixtures.py
@@ -137,6 +138,7 @@ and is where most of these checks were first written.
 │   ├── findings_diff/        # diff, including the no-argument auto-pick
 │   ├── entity_export/        # Package marker only; tests live in activity_export/
 │   ├── test_cli_parsing.py   # Argparse-level tests and main() exit codes, no Vault required
+│   ├── test_no_hvac.py       # Guard: hvac is neither imported nor declared
 │   └── test_ce.py            # CE smoke tests (marker `ce`), run only by task test:ce
 ├── inputs/                   # Input files for scripts
 └── outputs/                  # Generated reports (configurable)
@@ -279,10 +281,10 @@ export VAULT_SKIP_VERIFY="true"        # Optional: no verification; wins over VA
 
 TLS settings are read in `main.py::create_vault_client` and become
 `VaultClient.verify` (`False`, a CA path or `True`). It is set on the pooled
-`requests.Session` as well as passed to hvac. hvac replaces its own `verify`
-argument with a supplied session's whenever that is truthy, and a new Session's
-is `True`, so passing it only to `hvac.Client` silently ignored
-`VAULT_SKIP_VERIFY` (and would ignore a CA bundle). A test pins this.
+`requests.Session`, which every request goes through; `NamespacedClient` never
+passes a `verify` of its own. (Under hvac, which replaced its own `verify` with
+the session's, `VAULT_SKIP_VERIFY` was silently ignored.) A test sends a request
+through the real `Session.request` and pins the `verify` that reaches `send`.
 
 ### Optional Configuration
 
@@ -310,6 +312,8 @@ currently exposed on the CLI.
    line in `_SUBCOMMANDS_HELP`.
 2. **Common Utilities (`src/common/`)**:
    - `vault_client.py`: Centralized Vault client with connection validation and enhanced error handling
+   - `vault_http.py`: The HTTP layer under it — `NamespacedClient` and the
+     `VaultError` hierarchy (see "Vault HTTP client" below)
    - `config.py`: Centralized configuration management with environment variable support
    - `file_utils.py`: Shared file I/O utilities — `write_json`, `write_csv`,
      `write_csv_stream`, `write_markdown`, `read_json`, `read_csv`. All wrap
@@ -423,7 +427,7 @@ the root level to WARNING by default (DEBUG under `--debug`, INFO under
 
 There is deliberately **no response cache**. One existed, keyed on
 `sys/auth`/`sys/mounts`/`sys/policies` prefixes, but the traversal reads those
-through hvac inside `get_client()` and never through `VaultClient.get()`, so it
+through `NamespacedClient` inside `get_client()` and never through `VaultClient.get()`, so it
 could not fire; the only paths that do reach `get()` are not in that prefix list.
 It reported `Hits: 0 | Misses: 1` on every run. Reinstating one only makes sense
 alongside a call path that actually re-reads something — note the `visited` set
@@ -432,10 +436,12 @@ already guarantees each namespace is walked once.
 ### Vault token policies: read-only, least privilege
 
 - **The tool issues only GET and LIST requests.** Every Vault call goes
-  through hvac's `read_*`/`list_*`/`is_*` helpers or raw GETs (`RawReader`,
-  `VaultClient.get`). `VaultClient.post()` exists but is unused; do not start
-  using it, and never add a call that writes, tunes, enables, revokes or
-  deletes anything in Vault.
+  through `NamespacedClient.read`/`list` (a LIST is a GET with `?list=true`,
+  which Vault authorises against the `list` capability) or `VaultClient.get`.
+  `NamespacedClient.request()` refuses any method but GET and there is no
+  `post()`; `tests/common/test_vault_http.py` pins both. Never add a write
+  method, or a call that writes, tunes, enables, revokes or deletes anything in
+  Vault.
 - **Policy files grant `read` and `list` only.** That covers `policies/audit-policy.hcl`
   and the add-ons `policies/audit-policy-acl-reader.hcl` and
   `policies/audit-policy-sentinel-reader.hcl`. Never `create`, `update`, `patch` or
@@ -467,7 +473,7 @@ already guarantees each namespace is walked once.
 ### ACL policy collection
 
 `NamespaceAuditor._fetch_acl_policies()` lists `sys/policies/acl` once per
-namespace via hvac's `list_acl_policies()` and stores the sorted names on
+namespace (`client.list("sys/policies/acl")`) and stores the sorted names on
 `AuditData.acl_policies`.
 
 - **The token is the source of truth for policy bodies.** `policies/audit-policy.hcl`
@@ -521,9 +527,8 @@ namespace via hvac's `list_acl_policies()` and stores the sorted names on
 ### Sentinel EGP/RGP collection
 
 `NamespaceAuditor._fetch_sentinel_policies()` runs inside the same `get_client()`
-block as the auth and engine collectors, using hvac's native
-`list_egp_policies()` / `read_egp_policy()` (in
-`hvac/api/system_backend/policies.py`, *not* `policy.py`, which is ACL-only).
+block as the auth and engine collectors: `LIST sys/policies/{egp,rgp}`, then
+`GET sys/policies/{egp,rgp}/<name>` for each body. Names are URL-quoted.
 
 - **`self.sentinel_supported` is tri-state and load-bearing.** `None` = never
   probed, `True` = the endpoint answered, `False` = the cluster has no Sentinel.
@@ -571,7 +576,7 @@ delegates to `cluster_audit.collector.fetch_license_status`, which
   only in `vault_client.py` — the report reads the flag, never the string.
 - **Unknown edition is probed, not skipped.** `False` makes no call. `None`
   calls the endpoint anyway: a 404 (`VaultAPIError` caused by
-  `hvac.exceptions.InvalidPath`) settles it as Community and records nothing;
+  `vault_http.InvalidPath`) settles it as Community and records nothing;
   a success settles it as Enterprise. A 404 on a known-Enterprise cluster is an
   error, not a Community signal.
 - **Every failure keeps its reason** on `AuditData.license_unavailable_reason`:
@@ -644,13 +649,38 @@ or unit tests will write real files to disk. Patch the `file_utils` function,
 not the `_write_*` method — replacing the method means no test ever runs it.
 
 When adding a per-namespace collector, add its endpoint to
-`tests/namespace_audit/fixtures.py::make_hvac_client` as well. The mock hvac
-client is a bare `Mock`, which has no `__getitem__`, so an unstubbed call makes
-the collector's subscript raise `TypeError` and every traversal test records a
-spurious error rather than failing where the gap is. Both that fixture and
-`mock_vault_client` set `adapter.get.side_effect = InvalidPath()`, so the
-cluster health collector's raw GETs find nothing and raise no finding in
-unrelated tests. Keep it that way.
+`tests/namespace_audit/fixtures.py::DEFAULT_ROUTES` as well, keyed by
+`(op, path)` (`("list", "sys/policies/acl")`; a trailing `/*` takes a policy
+name). `make_vault_client_mock(routes)` overrides endpoints, and
+`client.at(op, path)` is that endpoint's Mock for `side_effect`/`call_count`.
+Without a route, a test's stubbed response would be missing and every traversal
+test would record a spurious error rather than failing where the gap is. Any
+path without a route raises `InvalidPath`, so the cluster health collector's
+reads find nothing and raise no finding in unrelated tests. Keep it that way.
+
+### Vault HTTP client (`src/common/vault_http.py`)
+
+hvac was removed in 3.2.0; this module replaces the part of it the tool used.
+
+- **`NamespacedClient`** is what `VaultClient.get_client(namespace, timeout)`
+  yields: `request`, `read` (`{}` on 204) and `list` over the pooled session.
+  `X-Vault-Namespace` is sent only for a non-empty namespace; `X-Vault-Token`
+  and `X-Vault-Request` always. Paths lose a leading `/` and `v1/` prefix and
+  have `//` collapsed, as hvac did.
+- **Exceptions keep hvac's names** (`Forbidden`, `InvalidPath`, …; ruff's N818
+  is silenced for that file), one per status code, `UnexpectedError` for the
+  rest. `str(e)` carries Vault's `errors` text, bounded by
+  `_summarise_error_body`: the Sentinel `"unsupported path"` heuristic matches
+  on it. `.response` is kept, so `sanitise_error` reports `"Forbidden (HTTP
+  403)"` where hvac's exceptions gave the class name only.
+- **`VaultClient.get` chains** its `VaultAPIError`/`VaultPermissionError` from
+  the `vault_http` exception (`from e`); activity-export and the license probe
+  test `e.__cause__` for `InvalidPath`.
+- **`validate_connection`** makes two calls: `sys/health` with `HEALTH_PARAMS`
+  (every node state answers 200, and the body says sealed and initialized) and
+  `auth/token/lookup-self`, where a 403 means "not authenticated".
+- `scripts/seed-vault.py` is standalone (PEP 723) and carries its own small
+  `VaultAPI` with writes; it never imports `src`.
 
 ### Findings model and findings.json (`src/common/findings.py`)
 
@@ -681,8 +711,8 @@ unrelated tests. Keep it that way.
 
 - **`collect_cluster_health` never raises.** Every read is optional. A 403 goes
   to `ClusterCoverage.denied` (by endpoint path) and other failures to `errors`,
-  recorded as exception class plus HTTP status only, because hvac messages can
-  echo URLs. A 404 means "not applicable". The block then stays `None`, and the
+  recorded as exception class plus HTTP status only, because `VaultError`
+  messages carry request paths and Vault's own error text. A 404 means "not applicable". The block then stays `None`, and the
   finding checks never judge `None`.
 - **Allowlist, don't copy.** No addresses (leader, peers, audit sockets), cluster
   IDs, file paths, snapshot URLs, storage credentials, error text or metric
