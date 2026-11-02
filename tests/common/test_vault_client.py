@@ -224,14 +224,27 @@ class TestValidateConnection:
         with pytest.raises(VaultConnectionError, match="sealed"):
             self._validate(client, self._make_health(sealed=True))
 
-    def test_uninitialised_reports_sealed_first(self, client):
-        """An uninitialised node is also sealed; that check comes first, as it did."""
-        with pytest.raises(VaultConnectionError, match="sealed"):
+    def test_uninitialised_reports_not_initialized(self, client):
+        """An uninitialised node also reports sealed, but "unseal" cannot work before init."""
+        with pytest.raises(VaultConnectionError, match="not initialized"):
             self._validate(client, self._make_health(sealed=True, initialized=False))
 
-    def test_not_authenticated_raises(self, client):
+    def test_dr_secondary_named_not_blamed_on_address(self, client):
+        with pytest.raises(VaultConnectionError, match="DR secondary") as excinfo:
+            self._validate(client, self._make_health(replication_dr_mode="secondary"), lookup=make_response(400, {"errors": ["path disabled"]}))
+        assert "VAULT_ADDR (" not in str(excinfo.value)
+
+    @pytest.mark.parametrize("status", [400, 401, 403])
+    def test_not_authenticated_raises(self, client, status):
         with pytest.raises(VaultConnectionError, match="not authenticated"):
-            self._validate(client, self._make_health(), lookup=make_response(403, {"errors": ["permission denied"]}))
+            self._validate(client, self._make_health(), lookup=make_response(status, {"errors": ["permission denied"]}))
+
+    @pytest.mark.parametrize("status", [404, 500, 503])
+    def test_lookup_self_other_error_is_not_blamed_on_address(self, client, status):
+        with pytest.raises(VaultConnectionError, match=f"lookup-self returned HTTP {status}") as excinfo:
+            self._validate(client, self._make_health(), lookup=make_response(status, {"errors": ["boom"]}))
+        assert "network connectivity" not in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, vault_http.VaultError)
 
     def test_not_initialized_raises(self, client):
         with pytest.raises(VaultConnectionError, match="not initialized"):
@@ -245,10 +258,6 @@ class TestValidateConnection:
         with pytest.raises(VaultConnectionError, match="Vault API error") as excinfo:
             self._validate(client, make_response(500, {"errors": ["boom"]}))
         assert isinstance(excinfo.value.__cause__, vault_http.InternalServerError)
-
-    def test_lookup_self_other_error_wrapped(self, client):
-        with pytest.raises(VaultConnectionError, match="Vault API error"):
-            self._validate(client, self._make_health(), lookup=make_response(500, {"errors": ["boom"]}))
 
     def test_generic_exception_wrapped(self, client):
         with patch.object(client.session, "request", side_effect=OSError("network down")), pytest.raises(VaultConnectionError, match="Connection error"):
@@ -285,9 +294,10 @@ class TestVaultClientGet:
             client.get("sys/mounts")
         assert request.call_args.kwargs["method"] == "GET"
 
-    def test_non_200_success_raises_api_error(self, client):
-        with self._patched(client, make_response(202, {})), pytest.raises(VaultAPIError, match="202"):
-            client.get("sys/whatever")
+    def test_other_2xx_is_decoded_as_success(self, client):
+        """Every status of 400 or above raises in the client, so anything else is a success."""
+        with self._patched(client, make_response(202, {"data": {"ok": True}})):
+            assert client.get("sys/whatever") == {"data": {"ok": True}}
 
     def test_get_204_no_content_returns_empty(self, client):
         """204 means the query matched nothing, which is a success, not a failure."""
@@ -435,7 +445,8 @@ class TestAdapterRetryConfiguration:
         adapter = client.session.get_adapter("https://vault.example.com")
         assert "GET" in adapter.max_retries.allowed_methods
 
-    def test_exhausted_retries_raise_vault_connection_error(self, client):
-        """RetryError would otherwise land in the generic 'Unexpected error' branch."""
-        with patch.object(client.session, "request", side_effect=requests.exceptions.RetryError("too many retries")), pytest.raises(VaultConnectionError, match="Retries exhausted"):
+    def test_exhausted_status_retries_surface_the_status(self, client):
+        """raise_on_status=False returns the last response, so the status maps to its exception."""
+        with patch.object(client.session, "request", return_value=make_response(503, {"errors": ["sealed"]})), pytest.raises(VaultAPIError, match="sealed") as excinfo:
             client.get("sys/mounts")
+        assert isinstance(excinfo.value.__cause__, vault_http.VaultDown)

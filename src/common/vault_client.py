@@ -21,7 +21,7 @@ from .exceptions import (  # noqa: F401
     VaultDataError,
     VaultPermissionError,
 )
-from .vault_http import HEALTH_PARAMS, NamespacedClient, _summarise_error_body
+from .vault_http import HEALTH_PARAMS, NamespacedClient
 
 
 class ConnectionInfo(NamedTuple):
@@ -113,8 +113,9 @@ class VaultClient:
         """Validate Vault connection and return connection information.
 
         One sys/health read (answering 200 for every node state) settles
-        sealed and initialised; auth/token/lookup-self settles authentication,
-        a 403 meaning the token is not valid.
+        initialised, sealed and DR-secondary; auth/token/lookup-self settles
+        authentication. A 400, 401 or 403 there means the token is not valid;
+        any other failure is reported as such, not blamed on the address.
         """
         try:
             with self.get_client() as client:
@@ -123,16 +124,23 @@ class VaultClient:
                 if not health_status:
                     raise VaultConnectionError(f"Invalid health status response: {health_status}")
 
+                # Initialised first: an uninitialised node also reports sealed,
+                # and "unseal" is no use before "vault operator init".
+                if health_status.get("initialized") is False:
+                    raise VaultConnectionError("Vault cluster is not initialized. Please initialize the cluster using 'vault operator init'.")
+
                 if health_status.get("sealed") is True:
                     raise VaultConnectionError("Vault cluster is sealed. Please unseal the cluster using 'vault operator unseal' or ensure auto-unseal is properly configured.")
 
+                if health_status.get("replication_dr_mode") == "secondary":
+                    raise VaultConnectionError("This node is a DR secondary, which answers only unauthenticated endpoints. Run cluster-audit against it, or point VAULT_ADDR at the primary.")
+
                 try:
                     client.read("auth/token/lookup-self")
-                except vault_http.Forbidden:
+                except (vault_http.InvalidRequest, vault_http.Unauthorized, vault_http.Forbidden):
                     raise VaultConnectionError("Vault client is not authenticated. Please check your VAULT_TOKEN environment variable and ensure the token has not expired or been revoked.") from None
-
-                if health_status.get("initialized") is False:
-                    raise VaultConnectionError("Vault cluster is not initialized. Please initialize the cluster using 'vault operator init'.")
+                except vault_http.VaultError as e:
+                    raise VaultConnectionError(f"Could not verify the token: auth/token/lookup-self returned HTTP {e.status} ({e}).") from e
 
                 cluster_name = health_status.get("cluster_name", "unknown")
                 vault_version = health_status.get("version")
@@ -178,8 +186,6 @@ class VaultClient:
                     # the empty result the caller would have got from a 200.
                     self.logger.debug(f"No content (204) for GET {path}; returning empty result")
                     result = []
-                elif response.status_code != 200:
-                    raise VaultAPIError(f"GET {path} failed with status {response.status_code}: {_summarise_error_body(response)}")
                 else:
                     try:
                         # Attempt to parse as a single JSON object first
@@ -201,10 +207,6 @@ class VaultClient:
             raise VaultAPIError(f"Invalid path {path}: {e}. Verify the path exists and is accessible.") from e
         except vault_http.VaultError as e:
             raise VaultAPIError(f"Vault API error on GET {path}: {e}") from e
-        except requests.exceptions.RetryError as e:
-            # Adapter-level retries exhausted (V2). Classified as a connection
-            # problem so callers' existing VaultConnectionError handling applies.
-            raise VaultConnectionError(f"Retries exhausted for GET {path} after repeated retryable responses (see status_forcelist). Check Vault health and load.") from e
         except requests.exceptions.ConnectionError as e:
             raise VaultConnectionError(f"Connection failed for GET {path}. Check network connectivity and Vault address.") from e
         except requests.exceptions.Timeout as e:

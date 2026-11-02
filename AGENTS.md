@@ -139,6 +139,7 @@ and is where most of these checks were first written.
 │   ├── entity_export/        # Package marker only; tests live in activity_export/
 │   ├── test_cli_parsing.py   # Argparse-level tests and main() exit codes, no Vault required
 │   ├── test_no_hvac.py       # Guard: hvac is neither imported nor declared
+│   ├── test_seed_vault.py    # The seeder's VaultAPI and skip checks (loaded by path)
 │   └── test_ce.py            # CE smoke tests (marker `ce`), run only by task test:ce
 ├── inputs/                   # Input files for scripts
 └── outputs/                  # Generated reports (configurable)
@@ -677,10 +678,18 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
   the `vault_http` exception (`from e`); activity-export and the license probe
   test `e.__cause__` for `InvalidPath`.
 - **`validate_connection`** makes two calls: `sys/health` with `HEALTH_PARAMS`
-  (every node state answers 200, and the body says sealed and initialized) and
-  `auth/token/lookup-self`, where a 403 means "not authenticated".
+  (every node state answers 200) and `auth/token/lookup-self`. From the health
+  body it checks initialized before sealed (an uninitialised node also reports
+  sealed, and "unseal" is no use before init), then names a DR secondary rather
+  than letting its token rejection read as a bad token. On lookup-self a 400,
+  401 or 403 means "not authenticated"; any other failure is reported as
+  "could not verify the token" with its status, never blamed on `VAULT_ADDR`.
+  cluster-audit reads health first and skips this for sealed and DR nodes.
 - `scripts/seed-vault.py` is standalone (PEP 723) and carries its own small
-  `VaultAPI` with writes; it never imports `src`.
+  `VaultAPI` with writes; it never imports `src`. Its skip checks ("already
+  exists", "path is taken", …) match `VaultAPI.error_text(exc)` and the status,
+  never `str(exc)`, which ends with the request path.
+  `tests/test_seed_vault.py` loads it by file path.
 
 ### Findings model and findings.json (`src/common/findings.py`)
 

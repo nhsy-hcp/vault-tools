@@ -42,6 +42,17 @@ class InvalidPathError(VaultError):
     """HTTP 404."""
 
 
+def _error_strings(response: requests.Response) -> list[str]:
+    """Vault's ``errors`` list, or the start of the body when it is not a Vault error document."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict) and isinstance(payload.get("errors"), list):
+        return [str(e) for e in payload["errors"]]
+    return [response.text[:200]] if response.text else []
+
+
 class VaultAPI:
     """A minimal Vault HTTP client for seeding the dev stack (writes allowed, unlike vault-tools)."""
 
@@ -59,10 +70,7 @@ class VaultAPI:
         path = path.lstrip("/")
         response = self._session.request(method, f"{VAULT_ADDR}/v1/{path}", headers=headers, json=json, params=params, timeout=30)
         if response.status_code >= 400:
-            try:
-                errors = [str(e) for e in response.json().get("errors") or []]
-            except ValueError:
-                errors = [response.text[:200]] if response.text else []
+            errors = _error_strings(response)
             cls = InvalidPathError if response.status_code == 404 else VaultError
             raise cls(response.status_code, errors, method, path)
         if response.status_code == 204 or not response.content:
@@ -83,13 +91,25 @@ class VaultAPI:
         return self.request(method, path, json=data or {})
 
     def is_authenticated(self) -> bool:
+        """False for a rejected token (400, 401, 403); other failures raise VaultError."""
         try:
             self.request("GET", "auth/token/lookup-self")
         except VaultError as exc:
-            if exc.status == 403:
+            if exc.status in (400, 401, 403):
                 return False
             raise
         return True
+
+    @staticmethod
+    def error_text(exc: Exception) -> str:
+        """Vault's own error strings, lower-cased, without the request path.
+
+        Skip checks match on this rather than str(exc), so a word in a mount or
+        namespace path ("existing", "404") cannot turn a real failure into a skip.
+        """
+        if isinstance(exc, VaultError):
+            return " ".join(exc.errors).lower()
+        return str(exc).lower()
 
 
 def q(name: str) -> str:
@@ -510,6 +530,12 @@ def get_client(namespace: str | None = None) -> VaultAPI:
             file=sys.stderr,
         )
         sys.exit(1)
+    except VaultError as exc:
+        print(
+            f"ERROR: cannot verify the token at {VAULT_ADDR} (is the node sealed?): {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if not authenticated:
         print(
             f"ERROR: not authenticated (addr={VAULT_ADDR}, ns={namespace})",
@@ -536,12 +562,13 @@ def create_namespace(root_client: VaultAPI, path: str) -> bool:
         _record("added")
         return True
     except VAULT_ERRORS as exc:
-        msg = str(exc)
-        if "already exists" in msg.lower() or "existing" in msg.lower():
+        msg = VaultAPI.error_text(exc)
+        status = getattr(exc, "status", None)
+        if "already exists" in msg or "existing" in msg:
             print("  [skip] already exists")
             _record("skipped")
             return True
-        if "404" in msg or "unsupported" in msg.lower() or "path not found" in msg.lower():
+        if status == 404 or "unsupported" in msg or "path not found" in msg:
             print("  [skip] namespaces not supported (CE/dev mode)")
             _record("skipped")
             return False
@@ -555,7 +582,8 @@ def enable_auth(client: VaultAPI, method_type: str, path: str, description: str)
         print(f"    [+] auth/{path}")
         _record("added")
     except VAULT_ERRORS as exc:
-        if "already in use" in str(exc).lower() or "path is taken" in str(exc).lower():
+        msg = VaultAPI.error_text(exc)
+        if "already in use" in msg or "path is taken" in msg:
             _record("skipped")
             return
         raise
@@ -567,7 +595,8 @@ def enable_secrets_engine(client: VaultAPI, path: str, engine_type: str, options
         print(f"    [+] {path}/ ({engine_type})")
         _record("added")
     except VAULT_ERRORS as exc:
-        if "already in use" in str(exc).lower() or "path is taken" in str(exc).lower() or "existing mount" in str(exc).lower():
+        msg = VaultAPI.error_text(exc)
+        if "already in use" in msg or "path is taken" in msg or "existing mount" in msg:
             _record("skipped")
             return
         raise
@@ -724,7 +753,7 @@ def seed_identity(client: VaultAPI) -> None:
                 print(f"    [+] identity/alias userpass/{name}")
                 _record("added")
             except VAULT_ERRORS as exc:
-                if "already exists" in str(exc).lower():
+                if "already exists" in VaultAPI.error_text(exc):
                     print(f"    [skip] identity/alias userpass/{name} (exists)")
                     _record("skipped")
                 else:
@@ -757,7 +786,7 @@ def seed_identity(client: VaultAPI) -> None:
                 print(f"    [+] identity/alias approle/{role_name} -> {entity_name}")
                 _record("added")
             except VAULT_ERRORS as exc:
-                if "already exists" in str(exc).lower():
+                if "already exists" in VaultAPI.error_text(exc):
                     print(f"    [skip] identity/alias approle/{role_name} (exists)")
                     _record("skipped")
                 else:
