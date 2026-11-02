@@ -223,7 +223,7 @@ Two things about pytest 9 worth knowing before debugging a script against it:
 ### Code Quality
 
 ```bash
-# Run all linting, formatting, and secret-scanning checks
+# Run all checks on every tracked file, plus untracked non-ignored ones
 task lint
 
 # Run the same checks the pre-commit hook runs, on staged files only
@@ -237,6 +237,11 @@ uv run pre-commit run gitleaks --all-files
 Formatting, import sorting, and secret scanning are all pre-commit hooks
 (`ruff-format`, `ruff`'s `I` rules, and `gitleaks`), so they run automatically
 on every commit rather than from a separate task.
+
+`pre-commit run --all-files` covers tracked files only, so `task lint` also runs
+the hooks on untracked, non-ignored files (`git ls-files --others
+--exclude-standard`). A new file therefore fails `task lint` rather than passing
+it and then failing at commit.
 
 Vault policy files (`*.hcl`, e.g. `policies/audit-policy.hcl` and
 `policies/audit-policy-acl-reader.hcl`) are formatted with **`vault policy fmt`**: two-space
