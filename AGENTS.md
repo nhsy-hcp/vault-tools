@@ -60,7 +60,8 @@ and is where most of these checks were first written.
 │   ├── audit-token.sh        # task token:audit / token:policies / token:pr
 │   ├── audit-dev.sh          # task audit:dev
 │   ├── test-ce.sh            # task test:ce
-│   └── e2e.sh                # task test:e2e
+│   ├── e2e.sh                # task test:e2e
+│   └── threshold-margins.py  # Calibration aid: margin to each health threshold (uv run, project env)
 ├── src/
 │   ├── common/
 │   │   ├── vault_client.py         # Centralized Vault API client
@@ -140,6 +141,8 @@ and is where most of these checks were first written.
 │   ├── test_cli_parsing.py   # Argparse-level tests and main() exit codes, no Vault required
 │   ├── test_no_hvac.py       # Guard: hvac is neither imported nor declared
 │   ├── test_seed_vault.py    # The seeder's VaultAPI and skip checks (loaded by path)
+│   ├── test_thresholds.py    # --lease-count-warning / --snapshot-grace and the Thresholds object
+│   ├── test_threshold_margins.py # scripts/threshold-margins.py (loaded by path)
 │   └── test_ce.py            # CE smoke tests (marker `ce`), run only by task test:ce
 ├── inputs/                   # Input files for scripts
 └── outputs/                  # Generated reports (configurable)
@@ -773,6 +776,15 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
     should count as healthy is unsettled: measure on the reference cluster before
     widening `HEALTHY_REPLICATION_STATES`. The DR secondary was not reindexed (it
     needs a DR operation token).
+- **Calibrating against a real cluster.** Run `vault-tools cluster-audit` with
+  `VAULT_ADDR` on each node in turn (never a load balancer, which samples a
+  different node per run), several times and at busy periods, then
+  `uv run scripts/threshold-margins.py <dir>/*-cluster-health-*.json`. It
+  prints, per file, the node role, the sample time and each judged value
+  against its threshold, with the margin and whether it fires. It imports the
+  thresholds rather than copying them, so it must run in the project
+  environment, not as a PEP 723 script. It reads files only. Change a constant
+  only with the measurement behind it, recorded in its comment.
 
 ### Identity audit (`src/identity_audit/`)
 
