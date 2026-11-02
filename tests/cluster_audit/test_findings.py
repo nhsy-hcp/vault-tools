@@ -67,6 +67,22 @@ class TestReplication:
         peer = {"node_id": "dr-1", "connection_status": "connected", "last_heartbeat": NOW.isoformat(), "replication_primary_canary_age_ms": 120_000}
         assert _ids(health_findings(self._repl(secondaries=[peer]))) == ["VT-REPL-001"]
 
+    @pytest.mark.parametrize("canary_ms", [15, 1007])
+    def test_idle_primary_canary_is_not_lag(self, canary_ms):
+        """Measured on the dev stack (Vault 2.1, 2026-11-02): Vault refreshes the canary
+        itself about once a second, so on an idle primary its age cycles 0-1,007 ms and the
+        primary's last_wal keeps climbing with no client writes. A canary past 60s
+        therefore means the stream is not arriving, not that nobody wrote."""
+        peer = {"node_id": "dr-1", "connection_status": "connected", "last_heartbeat": (NOW - timedelta(seconds=5)).isoformat(), "replication_primary_canary_age_ms": canary_ms}
+        assert health_findings(self._repl(secondaries=[peer])) == []
+
+    @pytest.mark.parametrize(("mode", "state"), [("primary", "running"), ("secondary", "stream-wals")])
+    def test_states_seen_through_a_reindex_are_healthy(self, mode, state):
+        """Measured on the dev stack: reindexing the primary or a performance secondary left
+        every node in running/stream-wals; merkle-diff/merkle-sync did not appear there."""
+        replication = {"dr": {"mode": mode, "state": state, "secondaries": [], "primaries": []}, "performance": {"mode": "disabled"}}
+        assert health_findings(_health(replication=replication)) == []
+
     def test_stale_heartbeat_uses_the_node_clock(self):
         peer = {"node_id": "dr-1", "connection_status": "connected", "last_heartbeat": (NOW - timedelta(minutes=5)).isoformat()}
         [f] = health_findings(self._repl(secondaries=[peer]))

@@ -759,6 +759,20 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
 - **Thresholds are the skill's heuristics** (100,000 leases, 60s lag, 2s skew,
   25h snapshot grace, `MIN_SUPPORTED_VERSION` 1.19, which goes stale). None has
   been measured against the reference cluster yet.
+- **Measured on the dev stack** (Vault 2.1, primary + DR + performance
+  secondary, 2026-11-02):
+  - **Canary age is not write idleness.** Vault refreshes the canary itself
+    about once a second: over 5 idle minutes and 5 minutes with a write every
+    30s, `replication_primary_canary_age_ms` cycled 0-1,007 ms on both sides,
+    heartbeats stayed under 5s, and the primary's `last_wal` kept climbing with
+    no client writes. VT-REPL-001's 60s canary check therefore means the stream
+    is not arriving, and an idle primary does not trip it.
+  - **Reindex showed no transient states.** `sys/replication/reindex` on the
+    primary and on the performance secondary finished in under a second, and
+    every node stayed `running`/`stream-wals`. Whether `merkle-diff`/`merkle-sync`
+    should count as healthy is unsettled: measure on the reference cluster before
+    widening `HEALTHY_REPLICATION_STATES`. The DR secondary was not reindexed (it
+    needs a DR operation token).
 
 ### Identity audit (`src/identity_audit/`)
 
