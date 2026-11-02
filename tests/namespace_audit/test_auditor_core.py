@@ -5,9 +5,9 @@ import queue
 import threading
 from unittest.mock import Mock, patch
 
-import hvac
 import pytest
 
+from src.common import vault_http
 from src.common.vault_client import ConnectionInfo, VaultAPIError, VaultConnectionError, VaultPermissionError
 from src.namespace_audit.main import PROGRESS_DESCRIPTION, AuditData, AuditStats, NamespaceAuditor
 from src.namespace_audit.report import reduce_sentinel_policy
@@ -441,14 +441,14 @@ class TestSystemLeaseTtlFetch:
         auditor.vault_client.get.assert_called_once_with("sys/config/state/sanitized")
 
     def test_accepts_an_unwrapped_payload(self, auditor):
-        """Some responses arrive already unwrapped by hvac."""
+        """Some responses arrive without the data wrapper."""
         auditor.vault_client.get = Mock(return_value={"default_lease_ttl": 3600, "max_lease_ttl": 86400})
 
         assert auditor._fetch_system_lease_ttls() == (3600, 86400)
 
     def test_permission_denied_degrades_to_none(self, auditor):
         """The policy rule is optional; a 403 must not sink the audit."""
-        auditor.vault_client.get = Mock(side_effect=hvac.exceptions.Forbidden("denied"))
+        auditor.vault_client.get = Mock(side_effect=vault_http.Forbidden("denied"))
 
         assert auditor._fetch_system_lease_ttls() is None
 
@@ -503,7 +503,7 @@ class TestLicenseStatusFetch:
 
     def test_unknown_edition_probes_and_404_means_community(self, auditor):
         error = VaultAPIError("Invalid path sys/license/status")
-        error.__cause__ = hvac.exceptions.InvalidPath()
+        error.__cause__ = vault_http.InvalidPath()
         auditor.vault_client.get.side_effect = error
         auditor.data.is_enterprise = None
 
@@ -520,7 +520,7 @@ class TestLicenseStatusFetch:
 
     def test_404_on_known_enterprise_is_an_error(self, auditor):
         error = VaultAPIError("Invalid path sys/license/status")
-        error.__cause__ = hvac.exceptions.InvalidPath()
+        error.__cause__ = vault_http.InvalidPath()
         auditor.vault_client.get.side_effect = error
         assert auditor._fetch_license_status(True) is None
         assert auditor.data.license_unavailable_reason.startswith("error: ")

@@ -67,9 +67,9 @@ def test_bad_token_returns_none(tmp_path):
 
 
 def test_denied_reads_make_coverage_incomplete(tmp_path):
-    import hvac
+    from src.common import vault_http
 
-    routes = enterprise_routes(**{"sys/audit": hvac.exceptions.Forbidden()})
+    routes = enterprise_routes(**{"sys/audit": vault_http.Forbidden()})
     document, _, markdown = _run(_connected(routes), tmp_path)
     assert document["coverage"]["denied"] == [{"namespace": "/", "scope": "sys/audit"}]
     assert document["coverage"]["complete"] is False

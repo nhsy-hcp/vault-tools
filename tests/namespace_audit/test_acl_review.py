@@ -4,9 +4,9 @@ import json
 import queue
 from datetime import UTC, datetime
 
-import hvac
 import pytest
 
+from src.common import vault_http
 from src.namespace_audit.acl import (
     AclRule,
     acl_policy_findings,
@@ -18,7 +18,7 @@ from src.namespace_audit.acl import (
 )
 from src.namespace_audit.main import NamespaceAuditor
 from src.namespace_audit.report import build_findings_json, build_markdown_report
-from tests.namespace_audit.fixtures import as_context_manager, make_hvac_client
+from tests.namespace_audit.fixtures import as_context_manager, make_vault_client_mock
 
 ADMIN = 'path "*" {\n  capabilities = ["create", "read", "update", "delete", "list", "sudo"]\n}\n'
 READER = '# read only\npath "secret/data/app/*" { capabilities = ["read", "list"] }\n'
@@ -126,18 +126,18 @@ class TestCollection:
 
     def _auditor(self, mock_vault_client, **kwargs):
         auditor = NamespaceAuditor(mock_vault_client, **kwargs)
-        client = make_hvac_client(list_acl_policies={"data": {"keys": ["admin", "default", "root"]}})
+        client = make_vault_client_mock({("list", "sys/policies/acl"): {"data": {"keys": ["admin", "default", "root"]}}})
         mock_vault_client.get_client.return_value = as_context_manager(client)
         return auditor, client
 
     def test_bodies_are_read_by_default_with_root_skipped(self, mock_vault_client):
         auditor, client = self._auditor(mock_vault_client)
-        client.sys.read_acl_policy.side_effect = lambda name: {"data": {"name": name, "policy": ADMIN if name == "admin" else READER}}
+        client.at("read", "sys/policies/acl/*").side_effect = lambda name: {"data": {"name": name, "policy": ADMIN if name == "admin" else READER}}
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
         assert sorted(auditor.data.acl_assessments["team-a"]) == ["admin", "default"]
-        assert [c.args[0] for c in client.sys.read_acl_policy.call_args_list] == ["admin", "default"]
+        assert [c.args[0] for c in client.at("read", "sys/policies/acl/*").call_args_list] == ["admin", "default"]
         # The names list keeps excluding built-ins.
         assert auditor.data.acl_policies["team-a"] == ["admin"]
         assert auditor._body_status("acl") == "assessed"
@@ -145,12 +145,12 @@ class TestCollection:
     def test_a_denial_stops_reading_and_is_not_an_access_gap(self, mock_vault_client):
         """A token without the add-on: one 403, then no more reads and no gap rows."""
         auditor, client = self._auditor(mock_vault_client)
-        client.sys.read_acl_policy.side_effect = hvac.exceptions.Forbidden()
+        client.at("read", "sys/policies/acl/*").side_effect = vault_http.Forbidden()
 
         auditor._traverse_namespace("team-a/", queue.Queue())
         auditor._traverse_namespace("team-b/", queue.Queue())
 
-        assert client.sys.read_acl_policy.call_count == 1
+        assert client.at("read", "sys/policies/acl/*").call_count == 1
         assert auditor.stats.forbidden_namespaces == []
         assert auditor.data.acl_assessments == {}
         assert auditor._body_status("acl") == "not readable"
@@ -160,7 +160,7 @@ class TestCollection:
 
         auditor._traverse_namespace("team-a/", queue.Queue())
 
-        client.sys.read_acl_policy.assert_not_called()
+        client.at("read", "sys/policies/acl/*").assert_not_called()
         assert auditor.data.acl_assessments == {}
         assert auditor._body_status("acl") == "names only"
 

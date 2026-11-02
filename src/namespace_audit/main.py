@@ -3,11 +3,11 @@ import os
 import queue
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-import hvac
 import pandas as pd
 from rich.console import Console
 from rich.panel import Panel
@@ -22,6 +22,7 @@ from rich.progress import (
 from rich.table import Table
 
 from src.cluster_audit.collector import ClusterReads, LicenseResult, collect_cluster_health, fetch_license_status, fetch_system_lease_ttls
+from src.common import vault_http
 from src.common.audit_logger import get_audit_logger
 from src.common.file_utils import write_csv, write_json, write_markdown
 from src.common.utils import FILE_DATE_FORMAT, file_prefix, normalise_namespace_path
@@ -493,13 +494,13 @@ class NamespaceAuditor:
         Vault edition, so there is no capability to probe for and no tri-state.
         """
         try:
-            names = client.sys.list_acl_policies()["data"]["keys"] or []
-        except hvac.exceptions.InvalidPath:
+            names = client.list("sys/policies/acl")["data"]["keys"] or []
+        except vault_http.InvalidPath:
             # Vault 404s an empty LIST. Every namespace has at least "default",
             # so this is unlikely in practice, but it is not an error.
             logger.debug(f"No ACL policies in {display_path}")
             return [], {}
-        except hvac.exceptions.Forbidden:
+        except vault_http.Forbidden:
             # Debug, not warning -- see the note in _list_and_read: one line per
             # namespace would print straight through the live progress bar.
             logger.debug(f"Permission denied listing ACL policies for: {display_path}")
@@ -524,11 +525,11 @@ class NamespaceAuditor:
         assessments: dict[str, AclAssessment] = {}
         for name in sorted(n for n in names if n != "root"):
             try:
-                body = (client.sys.read_acl_policy(name).get("data") or {}).get("policy")
-            except hvac.exceptions.Forbidden:
+                body = (client.read(f"sys/policies/acl/{urllib.parse.quote(name)}").get("data") or {}).get("policy")
+            except vault_http.Forbidden:
                 self._note_body_read("acl", denied=True)
                 break
-            except hvac.exceptions.InvalidPath:
+            except vault_http.InvalidPath:
                 continue  # deleted between list and read
             except Exception as e:
                 logger.debug(f"Could not read ACL policy '{name}' in {display_path}: {e}")
@@ -580,9 +581,8 @@ class NamespaceAuditor:
         firing and every namespace simply re-probes to an empty result.
         """
         try:
-            lister = client.sys.list_egp_policies if kind == "egp" else client.sys.list_rgp_policies
-            names = lister()["data"]["keys"] or []
-        except hvac.exceptions.InvalidPath as e:
+            names = client.list(f"sys/policies/{kind}")["data"]["keys"] or []
+        except vault_http.InvalidPath as e:
             if any(marker in str(e).lower() for marker in SENTINEL_UNSUPPORTED_MARKERS):
                 with self.thread_lock:
                     first = self.sentinel_supported is None
@@ -594,7 +594,7 @@ class NamespaceAuditor:
             logger.debug(f"No sentinel {kind.upper()} policies in {display_path}")
             self._mark_sentinel_supported()
             return {}
-        except hvac.exceptions.Forbidden:
+        except vault_http.Forbidden:
             # Debug, not warning: this fires once per namespace, and a token
             # missing the rule outright produced 268 lines on a 134-namespace
             # cluster — printed straight through the live progress bar. The
@@ -615,11 +615,10 @@ class NamespaceAuditor:
         policies: dict[str, Any] = {name: {"name": name} for name in names}
         if not self._bodies_wanted("sentinel"):
             return policies
-        reader = client.sys.read_egp_policy if kind == "egp" else client.sys.read_rgp_policy
         for name in names:
             try:
-                raw = reader(name)["data"]
-            except hvac.exceptions.Forbidden:
+                raw = client.read(f"sys/policies/{kind}/{urllib.parse.quote(name)}")["data"]
+            except vault_http.Forbidden:
                 # The token lacks policies/audit-policy-sentinel-reader.hcl: a choice,
                 # not a gap. Stop reading; the report says "not readable" once.
                 self._note_body_read("sentinel", denied=True)
@@ -732,11 +731,11 @@ class NamespaceAuditor:
         try:
             with self.vault_client.get_client(namespace_path) as client:
                 logger.debug(f"Fetching auth methods for namespace: {display_path}")
-                auth_methods = client.sys.list_auth_methods()["data"]
+                auth_methods = client.read("sys/auth")["data"]
                 logger.debug(f"Found {len(auth_methods)} auth methods for namespace: {display_path}")
 
                 logger.debug(f"Fetching secrets engines for namespace: {display_path}")
-                secret_engines = client.sys.list_mounted_secrets_engines()["data"]
+                secret_engines = client.read("sys/mounts")["data"]
                 logger.debug(f"Found {len(secret_engines)} secret engines for namespace: {display_path}")
 
                 acl_policies, acl_assessments = self._fetch_acl_policies(client, display_path)
@@ -766,7 +765,7 @@ class NamespaceAuditor:
                 # starting point. The visited set below keeps the walk finite.
                 try:
                     logger.debug(f"Attempting to list child namespaces for: {display_path}")
-                    raw_namespaces_response = client.sys.list_namespaces()
+                    raw_namespaces_response = client.list("sys/namespaces")
                     child_namespaces = raw_namespaces_response["data"]["key_info"]
 
                     if child_namespaces:
@@ -802,9 +801,9 @@ class NamespaceAuditor:
                                 self._warn_on_queue_depth(path_queue)
                     else:
                         logger.debug(f"No child namespaces found for {display_path}")
-                except hvac.exceptions.InvalidPath:
+                except vault_http.InvalidPath:
                     logger.debug(f"InvalidPath exception for {display_path} - no child namespaces available")
-                except hvac.exceptions.Forbidden:
+                except vault_http.Forbidden:
                     # The auth methods and engines above were already captured;
                     # only the subtree below this namespace is lost, so record
                     # the gap without discarding what this namespace returned.
@@ -812,7 +811,7 @@ class NamespaceAuditor:
                     logger.debug(f"Permission denied listing child namespaces for: {display_path}")
                     self.stats.increment_forbidden(display_path, "child namespaces (subtree not audited)")
 
-        except hvac.exceptions.Forbidden:
+        except vault_http.Forbidden:
             logger.debug(f"Permission denied for namespace: {display_path}")
             self.stats.increment_forbidden(display_path, "whole namespace (no data collected)")
         except Exception as e:

@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from typing import Any
 from unittest.mock import Mock
 
-import hvac
+from src.common import vault_http
 
 HEALTHY = {
     "initialized": True,
@@ -19,36 +19,38 @@ HEALTHY = {
 }
 
 
-class FakeAdapter:
+class FakeNamespacedClient:
+    """Stands in for NamespacedClient: read/list answer from ``routes``, unrouted paths 404."""
+
     def __init__(self, routes: dict[str, Any]):
         self.routes = routes
         self.calls: list[str] = []
 
-    def get(self, url: str, params: dict | None = None):
-        path = url.removeprefix("/v1/")
+    def read(self, path: str, params: dict | None = None):
         self.calls.append(path)
         if path not in self.routes:
-            raise hvac.exceptions.InvalidPath()
+            raise vault_http.InvalidPath()
         value = self.routes[path]
         if isinstance(value, BaseException):
             raise value
         return value
 
+    def list(self, path: str):
+        return self.read(path, params={"list": "true"})
+
 
 def fake_vault_client(routes: dict[str, Any], vault_addr: str = "https://vault.example.com:8200") -> Mock:
-    """A VaultClient whose get_client() yields an hvac client backed by ``routes``."""
-    adapter = FakeAdapter(routes)
-    hvac_client = Mock()
-    hvac_client.adapter = adapter
+    """A VaultClient whose get_client() yields a NamespacedClient fake backed by ``routes``."""
+    fake = FakeNamespacedClient(routes)
 
     @contextmanager
     def get_client(*_args, **_kwargs):
-        yield hvac_client
+        yield fake
 
     client = Mock()
     client.vault_addr = vault_addr
     client.get_client.side_effect = get_client
-    client.adapter = adapter
+    client.fake = fake
     return client
 
 

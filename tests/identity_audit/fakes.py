@@ -4,8 +4,7 @@ from contextlib import contextmanager
 from typing import Any
 from unittest.mock import Mock
 
-import hvac
-
+from src.common import vault_http
 from src.common.vault_client import ConnectionInfo
 
 
@@ -38,24 +37,27 @@ def fake_identity_client(tree: dict[str, list[str]], entities: dict[str, list[di
     def get_client(namespace_path="", **_kwargs):
         client = Mock()
 
-        def get(url, params=None):
-            path = url.removeprefix("/v1/")
+        def read(path, params=None):
             calls.append((namespace_path, path))
             value = routes.get((namespace_path, path))
             if value is None:
-                raise hvac.exceptions.InvalidPath()
+                raise vault_http.InvalidPath()
             if isinstance(value, BaseException):
                 raise value
             return value
 
-        client.adapter.get.side_effect = get
-        children = tree.get(namespace_path)
-        if isinstance(children, BaseException):
-            client.sys.list_namespaces.side_effect = children
-        elif children:
-            client.sys.list_namespaces.return_value = {"data": {"key_info": {f"{c}/": {} for c in children}}}
-        else:
-            client.sys.list_namespaces.side_effect = hvac.exceptions.InvalidPath()
+        def list_(path):
+            if path == "sys/namespaces":
+                children = tree.get(namespace_path)
+                if isinstance(children, BaseException):
+                    raise children
+                if not children:
+                    raise vault_http.InvalidPath()
+                return {"data": {"key_info": {f"{c}/": {} for c in children}}}
+            return read(path, params={"list": "true"})
+
+        client.read.side_effect = read
+        client.list.side_effect = list_
         yield client
 
     vault = Mock()

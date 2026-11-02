@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-import hvac
 import jsonschema
 from rich.console import Console
 
+from src.common import vault_http
 from src.identity_audit.collector import active_entity_clients, collect_entities, discover_namespaces
 from src.identity_audit.findings import ENTITY_ACTIVE_RATIO_WARNING, ENTITY_RULE_MIN_ENTITIES, entity_findings
 from src.identity_audit.main import run_identity_audit
@@ -29,7 +29,7 @@ class TestDiscovery:
         from src.identity_audit.collector import IdentityCoverage
 
         coverage = IdentityCoverage()
-        vault = fake_identity_client({"": ["team-a"], "team-a/": hvac.exceptions.Forbidden()}, {})
+        vault = fake_identity_client({"": ["team-a"], "team-a/": vault_http.Forbidden()}, {})
         assert discover_namespaces(vault, coverage=coverage) == ["", "team-a"]
         assert coverage.denied == [("team-a", "child namespaces (subtree not audited)")]
 
@@ -44,14 +44,14 @@ class TestCollection:
 
     def test_denied_body_counts_the_entity_and_records_one_gap(self):
         bodies = [entity("e1"), entity("e2")]
-        extra = {("", "identity/entity/id/e1"): hvac.exceptions.Forbidden(), ("", "identity/entity/id/e2"): hvac.exceptions.Forbidden()}
+        extra = {("", "identity/entity/id/e1"): vault_http.Forbidden(), ("", "identity/entity/id/e2"): vault_http.Forbidden()}
         vault = fake_identity_client({}, {"": bodies}, extra)
         entities, coverage = collect_entities(vault, [""])
         assert [e.disabled for e in entities[""]] == [None, None]
         assert coverage.denied == [("", "identity entity details")]
 
     def test_denied_listing(self):
-        vault = fake_identity_client({}, {}, {("", "identity/entity/id"): hvac.exceptions.Forbidden()})
+        vault = fake_identity_client({}, {}, {("", "identity/entity/id"): vault_http.Forbidden()})
         entities, coverage = collect_entities(vault, [""])
         assert entities == {"": []} and coverage.denied == [("", "identity entities")]
 
@@ -67,7 +67,7 @@ class TestRules:
         assert _ids(found) == ["VT-ID-001", "VT-ID-002", "VT-ID-003"]
 
     def test_unread_body_is_not_an_orphan(self):
-        vault = fake_identity_client({}, {"": [entity("e1", aliases=())]}, {("", "identity/entity/id/e1"): hvac.exceptions.Forbidden()})
+        vault = fake_identity_client({}, {"": [entity("e1", aliases=())]}, {("", "identity/entity/id/e1"): vault_http.Forbidden()})
         entities, _ = collect_entities(vault, [""])
         assert entity_findings(entities) == []
 
@@ -141,13 +141,13 @@ class TestReadFailures:
     """Regressions: only a 403 is a permission gap."""
 
     def test_entity_deleted_mid_walk_is_dropped_not_a_gap(self):
-        vault = fake_identity_client({}, {"": [entity("e1"), entity("e2")]}, {("", "identity/entity/id/e1"): hvac.exceptions.InvalidPath()})
+        vault = fake_identity_client({}, {"": [entity("e1"), entity("e2")]}, {("", "identity/entity/id/e1"): vault_http.InvalidPath()})
         entities, coverage = collect_entities(vault, [""])
         assert [e.id for e in entities[""]] == ["e2"]
         assert coverage.complete
 
     def test_server_error_is_an_error_not_a_denial(self):
-        extra = {("", "identity/entity/id/e1"): hvac.exceptions.InternalServerError(), ("", "identity/entity/id/e2"): hvac.exceptions.InternalServerError()}
+        extra = {("", "identity/entity/id/e1"): vault_http.InternalServerError(), ("", "identity/entity/id/e2"): vault_http.InternalServerError()}
         vault = fake_identity_client({}, {"": [entity("e1"), entity("e2")]}, extra)
         entities, coverage = collect_entities(vault, [""])
         assert coverage.denied == []

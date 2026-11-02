@@ -1,11 +1,12 @@
 """Tests for src/common/vault_client.py."""
 
 import json
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import patch
 
 import pytest
 import requests
 
+from src.common import vault_http
 from src.common.exceptions import (
     VaultAPIError,
     VaultConnectionError,
@@ -13,6 +14,7 @@ from src.common.exceptions import (
     VaultPermissionError,
 )
 from src.common.vault_client import ConnectionInfo, VaultClient
+from src.common.vault_http import NamespacedClient
 from tests.fake_secrets import fake_token
 
 # ---------------------------------------------------------------------------
@@ -69,12 +71,41 @@ class TestVaultClientInit:
             mock_dw.assert_called_once()
 
 
-class TestTlsVerification:
-    """VAULT_SKIP_VERIFY and VAULT_CACERT must reach the requests that hvac sends.
+def make_response(status: int = 200, body=None, *, raw: bytes | None = None) -> requests.Response:
+    """A real requests.Response, as session.request would return it."""
+    response = requests.Response()
+    response.status_code = status
+    if raw is not None:
+        response._content = raw
+    elif body is None:
+        response._content = b""
+    else:
+        response._content = json.dumps(body).encode()
+        response.headers["Content-Type"] = "application/json"
+    return response
 
-    hvac swaps its own `verify` argument for a supplied session's whenever that
-    is truthy, and a new Session's is True, so a value passed only to
-    hvac.Client was silently replaced and skip-verify never took effect.
+
+def route(responses: dict):
+    """A session.request side effect answering by URL path suffix."""
+
+    def _request(method, url, **kwargs):
+        for suffix, response in responses.items():
+            if url.endswith(suffix):
+                if isinstance(response, BaseException):
+                    raise response
+                return response
+        return make_response(404, {"errors": []})
+
+    return _request
+
+
+class TestTlsVerification:
+    """VAULT_SKIP_VERIFY and VAULT_CACERT must reach every request.
+
+    Verification is set on the pooled session, which NamespacedClient sends
+    through without a `verify` of its own. Under hvac, a value passed only to
+    hvac.Client was silently replaced by the session's, and skip-verify never
+    took effect; these tests pin that the session carries it.
     """
 
     @pytest.mark.parametrize(
@@ -86,20 +117,20 @@ class TestTlsVerification:
             (True, "/tmp/ca.pem", False),
         ],
     )
-    def test_verify_reaches_the_adapter(self, skip, cacert, expected):
+    def test_verify_is_on_the_session(self, skip, cacert, expected):
         c = VaultClient(vault_addr="https://vault.example.com", vault_token="s.test", vault_skip_verify=skip, vault_cacert=cacert)
         assert c.verify == expected
         assert c.session.verify == expected
-        with c.get_client() as hvac_client:
-            assert hvac_client.adapter._kwargs["verify"] == expected
+        with c.get_client() as nc:
+            assert nc.session is c.session
 
-    def test_request_is_sent_with_verify(self):
-        c = VaultClient(vault_addr="https://vault.example.com", vault_token="s.test", vault_skip_verify=True)
-        with patch.object(c.session, "request") as request:
-            request.return_value = Mock(status_code=200, ok=True, headers={}, json=lambda: {}, text="{}")
-            with c.get_client() as hvac_client:
-                hvac_client.adapter.get("/v1/sys/health")
-        assert request.call_args.kwargs["verify"] is False
+    @pytest.mark.parametrize("skip,cacert,expected", [(True, None, False), (False, "/tmp/ca.pem", "/tmp/ca.pem")])
+    def test_request_is_sent_with_verify(self, skip, cacert, expected):
+        """Through the real Session.request, so merge_environment_settings applies the session's verify."""
+        c = VaultClient(vault_addr="https://vault.example.com", vault_token="s.test", vault_skip_verify=skip, vault_cacert=cacert)
+        with patch.object(c.session, "send", return_value=make_response(200, {})) as send:
+            c.get("sys/health")
+        assert send.call_args.kwargs["verify"] == expected
 
 
 # ---------------------------------------------------------------------------
@@ -108,15 +139,29 @@ class TestTlsVerification:
 
 
 class TestGetClient:
-    def test_yields_hvac_client(self, client):
-        import hvac
-
+    def test_yields_namespaced_client(self, client):
         with client.get_client("") as c:
-            assert isinstance(c, hvac.Client)
+            assert isinstance(c, NamespacedClient)
+            assert c.session is client.session
+            assert c.addr == "https://vault.example.com"
+            assert c.token == "s.testtoken1234"
+            assert c.namespace == ""
 
     def test_namespace_forwarded(self, client):
-        with client.get_client("team-a/") as _:
-            assert True  # just verify no error
+        with client.get_client("team-a/") as c:
+            assert c.namespace == "team-a/"
+
+    def test_root_sends_no_namespace_header(self, client):
+        with patch.object(client.session, "request", return_value=make_response(200, {})) as request:
+            client.get("sys/mounts")
+        headers = request.call_args.kwargs["headers"]
+        assert "X-Vault-Namespace" not in headers
+        assert headers["X-Vault-Token"] == "s.testtoken1234"
+
+    def test_namespace_header_sent(self, client):
+        with patch.object(client.session, "request", return_value=make_response(200, {})) as request:
+            client.get("sys/mounts", namespace="team-a/")
+        assert request.call_args.kwargs["headers"]["X-Vault-Namespace"] == "team-a/"
 
 
 # ---------------------------------------------------------------------------
@@ -125,147 +170,89 @@ class TestGetClient:
 
 
 class TestValidateConnection:
-    def _make_health(self, cluster_name="test-cluster", version="1.17.0+ent", cluster_id="d33099d9-206e-53c2-4e50-44fb62ac69a6"):
-        return {
+    def _make_health(self, cluster_name="test-cluster", version="1.17.0+ent", cluster_id="d33099d9-206e-53c2-4e50-44fb62ac69a6", **overrides):
+        health = {
             "cluster_name": cluster_name,
             "cluster_id": cluster_id,
             "sealed": False,
             "initialized": True,
             "version": version,
         }
+        health.update(overrides)
+        return health
+
+    def _validate(self, client, health, lookup=None):
+        responses = {"/v1/sys/health": make_response(200, health) if isinstance(health, dict) else health}
+        responses["/v1/auth/token/lookup-self"] = lookup if lookup is not None else make_response(200, {"data": {}})
+        with patch.object(client.session, "request", side_effect=route(responses)) as request:
+            return client.validate_connection(), request
 
     def test_success(self, client):
-        mock_hvac = MagicMock()
-        mock_hvac.sys.read_health_status.return_value = self._make_health()
-        mock_hvac.sys.is_sealed.return_value = False
-        mock_hvac.is_authenticated.return_value = True
-        mock_hvac.sys.is_initialized.return_value = True
-
-        with patch.object(client, "get_client") as mock_gc:
-            mock_gc.return_value.__enter__ = Mock(return_value=mock_hvac)
-            mock_gc.return_value.__exit__ = Mock(return_value=False)
-            info = client.validate_connection()
-
+        info, _ = self._validate(client, self._make_health())
         assert isinstance(info, ConnectionInfo)
         assert info.cluster_name == "test-cluster"
         assert info.vault_version == "1.17.0+ent"
         assert info.is_enterprise is True
         assert info.cluster_id == "d33099d9-206e-53c2-4e50-44fb62ac69a6"
 
+    def test_reads_health_with_every_state_code_and_lookup_self(self, client):
+        _, request = self._validate(client, self._make_health())
+        urls = [call.kwargs["url"] for call in request.call_args_list]
+        assert urls == ["https://vault.example.com/v1/sys/health", "https://vault.example.com/v1/auth/token/lookup-self"]
+        assert request.call_args_list[0].kwargs["params"] == vault_http.HEALTH_PARAMS
+        assert all(call.kwargs["method"] == "GET" for call in request.call_args_list)
+
     def test_success_ce(self, client):
-        mock_hvac = MagicMock()
-        mock_hvac.sys.read_health_status.return_value = self._make_health(version="1.16.0")
-        mock_hvac.sys.is_sealed.return_value = False
-        mock_hvac.is_authenticated.return_value = True
-        mock_hvac.sys.is_initialized.return_value = True
-
-        with patch.object(client, "get_client") as mock_gc:
-            mock_gc.return_value.__enter__ = Mock(return_value=mock_hvac)
-            mock_gc.return_value.__exit__ = Mock(return_value=False)
-            info = client.validate_connection()
-
-        assert isinstance(info, ConnectionInfo)
-        assert info.cluster_name == "test-cluster"
+        info, _ = self._validate(client, self._make_health(version="1.16.0"))
         assert info.vault_version == "1.16.0"
         assert info.is_enterprise is False
-        assert info.cluster_id == "d33099d9-206e-53c2-4e50-44fb62ac69a6"
 
     def test_cluster_id_none_when_absent(self, client):
-        mock_hvac = MagicMock()
-        mock_hvac.sys.read_health_status.return_value = self._make_health(cluster_id=None)
-        mock_hvac.sys.is_sealed.return_value = False
-        mock_hvac.is_authenticated.return_value = True
-        mock_hvac.sys.is_initialized.return_value = True
-
         health = self._make_health()
         health.pop("cluster_id")
-        mock_hvac.sys.read_health_status.return_value = health
-
-        with patch.object(client, "get_client") as mock_gc:
-            mock_gc.return_value.__enter__ = Mock(return_value=mock_hvac)
-            mock_gc.return_value.__exit__ = Mock(return_value=False)
-            info = client.validate_connection()
-
+        info, _ = self._validate(client, health)
         assert info.cluster_id is None
 
     def test_edition_unknown_when_version_absent(self, client):
-        mock_hvac = MagicMock()
         health = self._make_health()
         health.pop("version")
-        mock_hvac.sys.read_health_status.return_value = health
-        mock_hvac.sys.is_sealed.return_value = False
-        mock_hvac.is_authenticated.return_value = True
-        mock_hvac.sys.is_initialized.return_value = True
-
-        with patch.object(client, "get_client") as mock_gc:
-            mock_gc.return_value.__enter__ = Mock(return_value=mock_hvac)
-            mock_gc.return_value.__exit__ = Mock(return_value=False)
-            info = client.validate_connection()
-
+        info, _ = self._validate(client, health)
         assert info.vault_version is None
         assert info.is_enterprise is None
 
     def test_sealed_raises(self, client):
-        mock_hvac = MagicMock()
-        mock_hvac.sys.read_health_status.return_value = self._make_health()
-        mock_hvac.sys.is_sealed.return_value = True
+        with pytest.raises(VaultConnectionError, match="sealed"):
+            self._validate(client, self._make_health(sealed=True))
 
-        with patch.object(client, "get_client") as mock_gc:
-            mock_gc.return_value.__enter__ = Mock(return_value=mock_hvac)
-            mock_gc.return_value.__exit__ = Mock(return_value=False)
-            with pytest.raises(VaultConnectionError, match="sealed"):
-                client.validate_connection()
+    def test_uninitialised_reports_sealed_first(self, client):
+        """An uninitialised node is also sealed; that check comes first, as it did."""
+        with pytest.raises(VaultConnectionError, match="sealed"):
+            self._validate(client, self._make_health(sealed=True, initialized=False))
 
     def test_not_authenticated_raises(self, client):
-        mock_hvac = MagicMock()
-        mock_hvac.sys.read_health_status.return_value = self._make_health()
-        mock_hvac.sys.is_sealed.return_value = False
-        mock_hvac.is_authenticated.return_value = False
-
-        with patch.object(client, "get_client") as mock_gc:
-            mock_gc.return_value.__enter__ = Mock(return_value=mock_hvac)
-            mock_gc.return_value.__exit__ = Mock(return_value=False)
-            with pytest.raises(VaultConnectionError, match="not authenticated"):
-                client.validate_connection()
+        with pytest.raises(VaultConnectionError, match="not authenticated"):
+            self._validate(client, self._make_health(), lookup=make_response(403, {"errors": ["permission denied"]}))
 
     def test_not_initialized_raises(self, client):
-        mock_hvac = MagicMock()
-        mock_hvac.sys.read_health_status.return_value = self._make_health()
-        mock_hvac.sys.is_sealed.return_value = False
-        mock_hvac.is_authenticated.return_value = True
-        mock_hvac.sys.is_initialized.return_value = False
-
-        with patch.object(client, "get_client") as mock_gc:
-            mock_gc.return_value.__enter__ = Mock(return_value=mock_hvac)
-            mock_gc.return_value.__exit__ = Mock(return_value=False)
-            with pytest.raises(VaultConnectionError, match="not initialized"):
-                client.validate_connection()
+        with pytest.raises(VaultConnectionError, match="not initialized"):
+            self._validate(client, self._make_health(initialized=False))
 
     def test_invalid_health_response_raises(self, client):
-        mock_hvac = MagicMock()
-        mock_hvac.sys.read_health_status.return_value = "not-a-dict"
-
-        with patch.object(client, "get_client") as mock_gc:
-            mock_gc.return_value.__enter__ = Mock(return_value=mock_hvac)
-            mock_gc.return_value.__exit__ = Mock(return_value=False)
-            with pytest.raises(VaultConnectionError):
-                client.validate_connection()
+        with pytest.raises(VaultConnectionError):
+            self._validate(client, make_response(200, ["not-a-dict"]))
 
     def test_vault_error_wrapped(self, client):
-        import hvac
+        with pytest.raises(VaultConnectionError, match="Vault API error") as excinfo:
+            self._validate(client, make_response(500, {"errors": ["boom"]}))
+        assert isinstance(excinfo.value.__cause__, vault_http.InternalServerError)
 
-        with patch.object(client, "get_client") as mock_gc:
-            mock_gc.return_value.__enter__ = Mock(side_effect=hvac.exceptions.VaultError("boom"))
-            mock_gc.return_value.__exit__ = Mock(return_value=False)
-            with pytest.raises(VaultConnectionError):
-                client.validate_connection()
+    def test_lookup_self_other_error_wrapped(self, client):
+        with pytest.raises(VaultConnectionError, match="Vault API error"):
+            self._validate(client, self._make_health(), lookup=make_response(500, {"errors": ["boom"]}))
 
     def test_generic_exception_wrapped(self, client):
-        with patch.object(client, "get_client") as mock_gc:
-            mock_gc.return_value.__enter__ = Mock(side_effect=OSError("network down"))
-            mock_gc.return_value.__exit__ = Mock(return_value=False)
-            with pytest.raises(VaultConnectionError):
-                client.validate_connection()
+        with patch.object(client.session, "request", side_effect=OSError("network down")), pytest.raises(VaultConnectionError, match="Connection error"):
+            client.validate_connection()
 
 
 # ---------------------------------------------------------------------------
@@ -274,229 +261,87 @@ class TestValidateConnection:
 
 
 class TestVaultClientGet:
-    def _mock_response(self, status=200, json_data=None, text="", content=b"{}"):
-        r = Mock(spec=requests.Response)
-        r.status_code = status
-        r.text = text or json.dumps(json_data or {})
-        r.json.return_value = json_data or {}
-        r.content = content
-        return r
-
-    def _patched_get(self, client, response):
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.return_value = response
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        return patch.object(client, "get_client", return_value=cm)
+    def _patched(self, client, response):
+        if isinstance(response, BaseException):
+            return patch.object(client.session, "request", side_effect=response)
+        return patch.object(client.session, "request", return_value=response)
 
     def test_successful_get_returns_dict(self, client):
-        resp = self._mock_response(json_data={"data": {"key": "val"}})
-        with self._patched_get(client, resp):
-            result = client.get("sys/internal/counters/activity")
-        assert result == {"data": {"key": "val"}}
+        with self._patched(client, make_response(200, {"data": {"key": "val"}})):
+            assert client.get("sys/internal/counters/activity") == {"data": {"key": "val"}}
 
-    def test_non_200_raises_api_error(self, client):
-        resp = self._mock_response(status=404, text="not found")
-        with self._patched_get(client, resp), pytest.raises(VaultAPIError, match="404"):
-            client.get("sys/nonexistent")
+    def test_get_strips_leading_slash_and_v1(self, client):
+        with self._patched(client, make_response(200, {})) as request:
+            client.get("/v1/sys/mounts")
+        assert request.call_args.kwargs["url"] == "https://vault.example.com/v1/sys/mounts"
+
+    def test_get_keeps_v1_inside_a_path(self, client):
+        with self._patched(client, make_response(200, {})) as request:
+            client.get("kv/v1/data")
+        assert request.call_args.kwargs["url"] == "https://vault.example.com/v1/kv/v1/data"
+
+    def test_get_is_a_get(self, client):
+        with self._patched(client, make_response(200, {})) as request:
+            client.get("sys/mounts")
+        assert request.call_args.kwargs["method"] == "GET"
+
+    def test_non_200_success_raises_api_error(self, client):
+        with self._patched(client, make_response(202, {})), pytest.raises(VaultAPIError, match="202"):
+            client.get("sys/whatever")
 
     def test_get_204_no_content_returns_empty(self, client):
         """204 means the query matched nothing, which is a success, not a failure."""
-        resp = self._mock_response(status=204, text="", content=b"")
-        with self._patched_get(client, resp):
-            result = client.get("sys/internal/counters/activity/export")
-        assert result == []
+        with self._patched(client, make_response(204)):
+            assert client.get("sys/internal/counters/activity/export") == []
 
     def test_ndjson_response_parsed_as_list(self, client):
-        ndjson = '{"a":1}\n{"b":2}\n'
-        mock_resp = Mock(spec=requests.Response)
-        mock_resp.status_code = 200
-        mock_resp.text = ndjson
-        mock_resp.json.side_effect = json.JSONDecodeError("Extra data", ndjson, 7)
-        mock_resp.content = ndjson.encode()
-
-        with self._patched_get(client, mock_resp):
+        with self._patched(client, make_response(200, raw=b'{"a":1}\n{"b":2}\n')):
             result = client.get("sys/internal/counters/activity/export")
-        assert isinstance(result, list)
-        assert result[0] == {"a": 1}
+        assert result == [{"a": 1}, {"b": 2}]
 
     def test_bad_json_raises_api_error(self, client):
-        # VaultDataError is raised internally then wrapped by the outer except as VaultAPIError
-        mock_resp = Mock(spec=requests.Response)
-        mock_resp.status_code = 200
-        mock_resp.text = "not json at all"
-        mock_resp.json.side_effect = json.JSONDecodeError("bad", "x", 0)
-        mock_resp.content = b"not json at all"
-
-        with self._patched_get(client, mock_resp), pytest.raises((VaultDataError, VaultAPIError)):
+        with self._patched(client, make_response(200, raw=b"not json at all")), pytest.raises((VaultDataError, VaultAPIError)):
             client.get("sys/internal/counters")
 
-    def test_hvac_dict_response_returned_directly(self, client):
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.return_value = {"direct": True}
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        with patch.object(client, "get_client", return_value=cm):
-            result = client.get("sys/internal/counters")
-        assert result == {"direct": True}
-
     def test_forbidden_raises_permission_error(self, client):
-        import hvac
-
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.side_effect = hvac.exceptions.Forbidden("denied")
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultPermissionError):
+        with self._patched(client, make_response(403, {"errors": ["permission denied"]})), pytest.raises(VaultPermissionError) as excinfo:
             client.get("secret/restricted")
+        assert isinstance(excinfo.value.__cause__, vault_http.Forbidden)
 
-    def test_invalid_path_raises_api_error(self, client):
-        import hvac
+    def test_invalid_path_raises_api_error_chained(self, client):
+        """activity_export and fetch_license_status test __cause__ for InvalidPath."""
+        with self._patched(client, make_response(404, {"errors": []})), pytest.raises(VaultAPIError) as excinfo:
+            client.get("sys/license/status")
+        assert isinstance(excinfo.value.__cause__, vault_http.InvalidPath)
+        assert not isinstance(excinfo.value, VaultPermissionError)
 
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.side_effect = hvac.exceptions.InvalidPath("bad path")
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultAPIError):
-            client.get("bad/path")
+    def test_other_vault_error_raises_api_error(self, client):
+        with self._patched(client, make_response(500, {"errors": ["boom"]})), pytest.raises(VaultAPIError, match="boom") as excinfo:
+            client.get("sys/mounts")
+        assert isinstance(excinfo.value.__cause__, vault_http.InternalServerError)
 
     def test_connection_error_raises_connection_error(self, client):
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.side_effect = requests.exceptions.ConnectionError("down")
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultConnectionError):
+        with self._patched(client, requests.exceptions.ConnectionError("down")), pytest.raises(VaultConnectionError):
             client.get("sys/health")
 
     def test_timeout_raises_connection_error(self, client):
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.side_effect = requests.exceptions.Timeout("timed out")
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultConnectionError):
+        with self._patched(client, requests.exceptions.Timeout("timed out")), pytest.raises(VaultConnectionError):
             client.get("sys/health")
 
     def test_unexpected_error_raises_api_error(self, client):
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.side_effect = RuntimeError("unexpected")
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultAPIError):
-            client.get("sys/health")
-
-    def test_unexpected_response_type_raises_data_or_api_error(self, client):
-        # VaultDataError raised internally, propagates as VaultAPIError via outer except
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.return_value = 12345  # neither dict nor Response
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        with patch.object(client, "get_client", return_value=cm), pytest.raises((VaultDataError, VaultAPIError)):
+        with self._patched(client, RuntimeError("unexpected")), pytest.raises(VaultAPIError):
             client.get("sys/health")
 
     def test_get_with_params(self, client):
-        resp = self._mock_response(json_data={"data": {}})
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.return_value = resp
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        with patch.object(client, "get_client", return_value=cm):
+        with self._patched(client, make_response(200, {"data": {}})) as request:
             result = client.get("sys/internal/counters/activity", params={"start_time": "2024-01-01"})
         assert isinstance(result, dict)
+        assert request.call_args.kwargs["params"] == {"start_time": "2024-01-01"}
 
 
-# ---------------------------------------------------------------------------
-# post()
-# ---------------------------------------------------------------------------
-
-
-class TestVaultClientPost:
-    def _patched_post(self, client, response):
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.return_value = response
-        mock_hvac.url = "https://vault.example.com"
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        return patch.object(client, "get_client", return_value=cm)
-
-    def test_successful_post_returns_dict(self, client):
-        r = Mock(spec=requests.Response)
-        r.status_code = 200
-        r.json.return_value = {"result": "ok"}
-        r.content = b'{"result":"ok"}'
-
-        with self._patched_post(client, r):
-            result = client.post("auth/token/create", data={"ttl": "1h"})
-        assert result == {"result": "ok"}
-
-    def test_post_204_no_content_returns_empty(self, client):
-        r = Mock(spec=requests.Response)
-        r.status_code = 204
-        r.content = b""
-
-        with self._patched_post(client, r):
-            result = client.post("sys/seal")
-        assert result == {}
-
-    def test_post_non_200_raises(self, client):
-        r = Mock(spec=requests.Response)
-        r.status_code = 403
-        r.text = "forbidden"
-        r.content = b"forbidden"
-
-        with self._patched_post(client, r), pytest.raises(VaultAPIError, match="403"):
-            client.post("auth/token/create")
-
-    def test_post_bad_json_raises_data_or_api_error(self, client):
-        # VaultDataError raised internally, propagates as VaultAPIError via outer except
-        r = Mock(spec=requests.Response)
-        r.status_code = 200
-        r.json.side_effect = json.JSONDecodeError("bad", "x", 0)
-        r.content = b"not-json"
-
-        with self._patched_post(client, r), pytest.raises((VaultDataError, VaultAPIError)):
-            client.post("auth/token/create")
-
-    def test_post_forbidden_raises_permission_error(self, client):
-        import hvac
-
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.side_effect = hvac.exceptions.Forbidden("denied")
-        mock_hvac.url = "https://vault.example.com"
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultPermissionError):
-            client.post("auth/token/create")
-
-    def test_post_connection_error_raises(self, client):
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.side_effect = requests.exceptions.ConnectionError("down")
-        mock_hvac.url = "https://vault.example.com"
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultConnectionError):
-            client.post("auth/token/create")
-
-    def test_post_timeout_raises(self, client):
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.side_effect = requests.exceptions.Timeout("timed out")
-        mock_hvac.url = "https://vault.example.com"
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultConnectionError):
-            client.post("auth/token/create")
+class TestReadOnly:
+    def test_no_post_method(self, client):
+        assert not hasattr(client, "post")
 
 
 class TestErrorBodySummarisation:
@@ -507,117 +352,67 @@ class TestErrorBodySummarisation:
     that is explicitly meant to be safe to retain and ship.
     """
 
-    def _response(self, *, body: bytes, json_payload=None):
-        response = MagicMock(spec=requests.Response)
-        response.content = body
-        if json_payload is None:
-            response.json.side_effect = ValueError("no json")
-        else:
-            response.json.return_value = json_payload
-        return response
-
     def test_keeps_vault_error_strings(self):
-        from src.common.vault_client import _summarise_error_body
-
-        response = self._response(body=b"{}", json_payload={"errors": ["permission denied"]})
-        assert _summarise_error_body(response) == "permission denied"
+        assert vault_http._summarise_error_body(make_response(403, {"errors": ["permission denied"]})) == "permission denied"
 
     def test_joins_multiple_errors(self):
-        from src.common.vault_client import _summarise_error_body
-
-        response = self._response(body=b"{}", json_payload={"errors": ["a", "b"]})
-        assert _summarise_error_body(response) == "a; b"
+        assert vault_http._summarise_error_body(make_response(400, {"errors": ["a", "b"]})) == "a; b"
 
     def test_does_not_quote_non_json_body(self):
-        from src.common.vault_client import _summarise_error_body
-
         token = fake_token("hvs", "CAESIJq3mNotARealTokenValue123")
-        summary = _summarise_error_body(self._response(body=token.encode()))
+        summary = vault_http._summarise_error_body(make_response(500, raw=token.encode()))
         assert token not in summary
         assert "non-JSON body" in summary
 
     def test_does_not_quote_unrecognised_json_body(self):
-        from src.common.vault_client import _summarise_error_body
-
         token = fake_token("hvs", "CAESIJnotarealvalue")
-        response = self._response(body=b"{}", json_payload={"data": {"token": token}})
-        summary = _summarise_error_body(response)
+        summary = vault_http._summarise_error_body(make_response(500, {"data": {"token": token}}))
         assert token not in summary
         assert "unrecognised JSON body" in summary
 
     def test_truncates_oversized_error_list(self):
-        from src.common.vault_client import _summarise_error_body
-
-        response = self._response(body=b"{}", json_payload={"errors": ["x" * 2000]})
-        summary = _summarise_error_body(response)
+        summary = vault_http._summarise_error_body(make_response(400, {"errors": ["x" * 2000]}))
         assert len(summary) < 2000
         assert summary.endswith("...[truncated]")
 
     def test_get_failure_message_excludes_raw_body(self, client):
-        response = MagicMock(spec=requests.Response)
-        response.status_code = 403
-        response.content = b'{"errors":["permission denied"]}'
-        response.json.return_value = {"errors": ["permission denied"]}
-
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.return_value = response
-        mock_hvac.url = "https://vault.example.com"
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-
-        with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultAPIError) as excinfo:
+        token = fake_token("hvs", "CAESIJnotarealvalue")
+        with patch.object(client.session, "request", return_value=make_response(500, raw=token.encode())), pytest.raises(VaultAPIError) as excinfo:
             client.get("sys/mounts")
+        assert token not in str(excinfo.value)
 
-        message = str(excinfo.value)
-        assert "permission denied" in message
-        assert "403" in message
+    def test_get_failure_message_keeps_vault_errors(self, client):
+        with patch.object(client.session, "request", return_value=make_response(403, {"errors": ["permission denied"]})), pytest.raises(VaultPermissionError) as excinfo:
+            client.get("sys/mounts")
+        assert "permission denied" in str(excinfo.value.__cause__)
 
 
 class TestPerRequestTimeout:
     """V4: a single heavy call can get more headroom than the client default."""
 
     def test_get_client_defaults_to_client_timeout(self, client):
-        with patch("src.common.vault_client.hvac.Client") as mock_client, client.get_client("ns"):
-            pass
-        assert mock_client.call_args.kwargs["timeout"] == client.hvac_timeout
+        with client.get_client("ns") as c:
+            assert c.timeout == client.request_timeout == 30
 
     def test_get_client_honours_override(self, client):
-        with patch("src.common.vault_client.hvac.Client") as mock_client, client.get_client("ns", timeout=120):
-            pass
-        assert mock_client.call_args.kwargs["timeout"] == 120
+        with client.get_client("ns", timeout=120) as c:
+            assert c.timeout == 120
 
-    def _ok_client_cm(self, payload):
-        """A get_client() stand-in whose adapter returns a successful response."""
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.return_value = payload
-        mock_hvac.url = "https://vault.example.com"
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-        return cm
+    def test_constructor_timeout(self):
+        c = VaultClient(vault_addr="https://vault.example.com", vault_token="s.test", request_timeout=5)
+        with patch.object(c.session, "request", return_value=make_response(200, {})) as request:
+            c.get("sys/mounts")
+        assert request.call_args.kwargs["timeout"] == 5
 
     def test_get_passes_timeout_through(self, client):
-        cm = self._ok_client_cm({"data": {}})
-        with patch.object(client, "get_client", return_value=cm) as mock_get_client:
+        with patch.object(client.session, "request", return_value=make_response(200, {})) as request:
             client.get("sys/mounts", timeout=99)
-        assert mock_get_client.call_args.kwargs["timeout"] == 99
+        assert request.call_args.kwargs["timeout"] == 99
 
-    def test_get_defaults_timeout_to_none(self, client):
-        """None means 'use the client default', resolved inside get_client."""
-        cm = self._ok_client_cm({"data": {}})
-        with patch.object(client, "get_client", return_value=cm) as mock_get_client:
+    def test_get_defaults_timeout_to_client_default(self, client):
+        with patch.object(client.session, "request", return_value=make_response(200, {})) as request:
             client.get("sys/mounts")
-        assert mock_get_client.call_args.kwargs["timeout"] is None
-
-    def test_post_passes_timeout_through(self, client):
-        response = MagicMock(spec=requests.Response)
-        response.status_code = 204
-        response.content = b""
-        cm = self._ok_client_cm(response)
-        with patch.object(client, "get_client", return_value=cm) as mock_get_client:
-            client.post("auth/token/create", timeout=99)
-        assert mock_get_client.call_args.kwargs["timeout"] == 99
+        assert request.call_args.kwargs["timeout"] == client.request_timeout
 
 
 class TestAdapterRetryConfiguration:
@@ -636,18 +431,11 @@ class TestAdapterRetryConfiguration:
         for status in (429, 500, 502, 503, 504):
             assert status in adapter.max_retries.status_forcelist
 
-    def test_post_is_retryable(self, client):
+    def test_get_is_retryable(self, client):
         adapter = client.session.get_adapter("https://vault.example.com")
-        assert "POST" in adapter.max_retries.allowed_methods
+        assert "GET" in adapter.max_retries.allowed_methods
 
     def test_exhausted_retries_raise_vault_connection_error(self, client):
         """RetryError would otherwise land in the generic 'Unexpected error' branch."""
-        mock_hvac = MagicMock()
-        mock_hvac.adapter.request.side_effect = requests.exceptions.RetryError("too many retries")
-        mock_hvac.url = "https://vault.example.com"
-        cm = MagicMock()
-        cm.__enter__ = Mock(return_value=mock_hvac)
-        cm.__exit__ = Mock(return_value=False)
-
-        with patch.object(client, "get_client", return_value=cm), pytest.raises(VaultConnectionError, match="Retries exhausted"):
+        with patch.object(client.session, "request", side_effect=requests.exceptions.RetryError("too many retries")), pytest.raises(VaultConnectionError, match="Retries exhausted"):
             client.get("sys/mounts")

@@ -2,16 +2,15 @@
 
 import json
 
-import hvac
-
 from src.cluster_audit.collector import collect_cluster_health, fetch_license_status, unauthenticated_only
+from src.common import vault_http
 from tests.cluster_audit.fakes import HEALTHY, enterprise_routes, fake_vault_client
 
 
 def _collect(routes, health_status=None):
     client = fake_vault_client(routes)
     health, coverage = collect_cluster_health(client, health_status)
-    return health, coverage, client.adapter.calls
+    return health, coverage, client.fake.calls
 
 
 class TestNodeStates:
@@ -64,20 +63,20 @@ class TestNodeStates:
 
 class TestCoverage:
     def test_denials_are_recorded_by_endpoint_and_leave_the_block_none(self):
-        routes = enterprise_routes(**{"sys/audit": hvac.exceptions.Forbidden(), "sys/metrics": hvac.exceptions.Forbidden()})
+        routes = enterprise_routes(**{"sys/audit": vault_http.Forbidden(), "sys/metrics": vault_http.Forbidden()})
         health, coverage, _ = _collect(routes)
         assert health["audit_devices"] is None and health["metrics"] is None
         assert coverage.denied == ["sys/audit", "sys/metrics"]
 
     def test_errors_keep_only_the_class_and_status(self):
-        routes = enterprise_routes(**{"sys/leader": hvac.exceptions.InternalServerError("boom at https://internal-host:8200/v1/sys/leader")})
+        routes = enterprise_routes(**{"sys/leader": vault_http.InternalServerError("boom at https://internal-host:8200/v1/sys/leader")})
         _, coverage, _ = _collect(routes)
         assert coverage.errors == [("sys/leader", "InternalServerError")]
 
     def test_raft_not_in_use_is_not_an_error(self):
         routes = enterprise_routes()
         for path in ("sys/storage/raft/configuration", "sys/storage/raft/autopilot/configuration", "sys/storage/raft/autopilot/state"):
-            routes[path] = hvac.exceptions.InvalidRequest("raft storage is not in use")
+            routes[path] = vault_http.InvalidRequest("raft storage is not in use")
         health, coverage, _ = _collect(routes)
         assert health["raft"] is None
         assert coverage.complete
@@ -183,12 +182,12 @@ class TestPathsFilters:
         assert coverage.complete
 
     def test_denied_filter_read_makes_the_list_none(self):
-        health, coverage, _ = _collect(self._routes(**{"sys/replication/performance/primary/paths-filter/pr-1": hvac.exceptions.Forbidden()}))
+        health, coverage, _ = _collect(self._routes(**{"sys/replication/performance/primary/paths-filter/pr-1": vault_http.Forbidden()}))
         assert health["replication"]["performance"]["paths_filters"] is None
         assert coverage.denied == ["sys/replication/performance/primary/paths-filter"]
 
     def test_denied_dynamic_filter_is_recorded_once(self):
-        health, coverage, _ = _collect(self._routes(**{"sys/replication/performance/primary/dynamic-filter/pr-1": hvac.exceptions.Forbidden()}))
+        health, coverage, _ = _collect(self._routes(**{"sys/replication/performance/primary/dynamic-filter/pr-1": vault_http.Forbidden()}))
         assert health["replication"]["performance"]["paths_filters"][0]["dynamic_filtered_mounts"] is None
         assert coverage.denied == ["sys/replication/performance/primary/dynamic-filter"]
 
@@ -209,7 +208,7 @@ class TestLicenseFailures:
         from src.common.exceptions import VaultAPIError
 
         error = VaultAPIError("Invalid path")
-        error.__cause__ = hvac.exceptions.InvalidPath()
+        error.__cause__ = vault_http.InvalidPath()
         result = fetch_license_status(self._raising(error), None)
         assert (result.unavailable_reason, result.is_enterprise) == (None, False)
 
@@ -217,7 +216,7 @@ class TestLicenseFailures:
         from src.common.exceptions import VaultAPIError
 
         error = VaultAPIError("Invalid path")
-        error.__cause__ = hvac.exceptions.InvalidPath()
+        error.__cause__ = vault_http.InvalidPath()
         result = fetch_license_status(self._raising(error), True)
         assert result.unavailable_reason.startswith("error: ")
 

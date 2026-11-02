@@ -4,11 +4,12 @@ import os
 from contextlib import contextmanager
 from typing import NamedTuple
 
-import hvac
 import requests
 import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from . import vault_http
 
 # Re-export all exceptions from the shared module so existing callers that do
 #   from src.common.vault_client import VaultAPIError, ...
@@ -20,7 +21,7 @@ from .exceptions import (  # noqa: F401
     VaultDataError,
     VaultPermissionError,
 )
-from .vault_http import _summarise_error_body
+from .vault_http import HEALTH_PARAMS, NamespacedClient, _summarise_error_body
 
 
 class ConnectionInfo(NamedTuple):
@@ -39,7 +40,7 @@ class VaultClient:
         vault_token: str = None,
         vault_skip_verify: bool = False,
         vault_cacert: str | None = None,
-        hvac_timeout: int = 30,
+        request_timeout: int = 30,
         pool_connections: int = 10,
         pool_maxsize: int = 20,
     ):
@@ -51,7 +52,7 @@ class VaultClient:
         # verifies against that CA bundle, True uses the system store. Skip wins
         # over a CA bundle, as it does in the vault CLI.
         self.verify: bool | str = False if vault_skip_verify else (self.vault_cacert or True)
-        self.hvac_timeout = hvac_timeout
+        self.request_timeout = request_timeout
         self.logger = logging.getLogger(__name__)
 
         if not self.vault_addr or not self.vault_token:
@@ -62,23 +63,21 @@ class VaultClient:
 
         # Initialize connection pooling session
         self.session = requests.Session()
-        # Set on the session as well as passed to hvac: hvac replaces its own
-        # `verify` argument with a supplied session's whenever that is truthy,
-        # and a new Session's is True, so VAULT_SKIP_VERIFY and a CA bundle were
-        # both silently ignored when only hvac.Client(verify=...) carried them.
+        # TLS verification lives on the session, which every request goes
+        # through: NamespacedClient never passes its own `verify`.
         self.session.verify = self.verify
         # raise_on_status=False is what makes the status codes below surface
         # correctly (V2). With the default, an exhausted retry raises
         # urllib3's MaxRetryError — surfacing as requests.exceptions.RetryError,
         # which falls through to the generic "Unexpected error" handler and
         # loses the status code entirely. Returning the response instead lets
-        # the explicit status_code checks in get()/post() build a precise
+        # the explicit status_code checks in get() build a precise
         # VaultAPIError naming the code and Vault's own error strings.
         retry_strategy = Retry(
             total=3,
             backoff_factor=1,
             status_forcelist=[408, 429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
+            allowed_methods=["HEAD", "GET", "OPTIONS"],
             raise_on_status=False,
         )
         adapter = HTTPAdapter(
@@ -98,41 +97,41 @@ class VaultClient:
         Args:
             namespace_path: Vault namespace for this client.
             timeout: Per-request timeout override in seconds. Falls back to the
-                client-wide ``hvac_timeout`` when omitted, so a single heavy
+                client-wide ``request_timeout`` when omitted, so a single heavy
                 call (a large activity export, say) can be given more headroom
                 without raising the timeout for every other request.
         """
-        client = hvac.Client(
-            url=self.vault_addr,
-            token=self.vault_token,
+        yield NamespacedClient(
+            self.session,
+            self.vault_addr,
+            self.vault_token,
             namespace=namespace_path,
-            verify=self.verify,
-            timeout=self.hvac_timeout if timeout is None else timeout,
-            session=self.session,  # Use pooled session
+            timeout=self.request_timeout if timeout is None else timeout,
         )
-        yield client
 
     def validate_connection(self) -> ConnectionInfo:
-        """Validate Vault connection and return connection information."""
+        """Validate Vault connection and return connection information.
+
+        One sys/health read (answering 200 for every node state) settles
+        sealed and initialised; auth/token/lookup-self settles authentication,
+        a 403 meaning the token is not valid.
+        """
         try:
             with self.get_client() as client:
-                health_status = client.sys.read_health_status(
-                    method="GET",
-                    sealed_code=200,
-                    performance_standby_code=200,
-                    uninit_code=200,
-                )
+                health_status = client.read("sys/health", params=HEALTH_PARAMS)
 
-                if not isinstance(health_status, dict):
+                if not health_status:
                     raise VaultConnectionError(f"Invalid health status response: {health_status}")
 
-                if client.sys.is_sealed():
+                if health_status.get("sealed") is True:
                     raise VaultConnectionError("Vault cluster is sealed. Please unseal the cluster using 'vault operator unseal' or ensure auto-unseal is properly configured.")
 
-                if not client.is_authenticated():
-                    raise VaultConnectionError("Vault client is not authenticated. Please check your VAULT_TOKEN environment variable and ensure the token has not expired or been revoked.")
+                try:
+                    client.read("auth/token/lookup-self")
+                except vault_http.Forbidden:
+                    raise VaultConnectionError("Vault client is not authenticated. Please check your VAULT_TOKEN environment variable and ensure the token has not expired or been revoked.") from None
 
-                if not client.sys.is_initialized():
+                if health_status.get("initialized") is False:
                     raise VaultConnectionError("Vault cluster is not initialized. Please initialize the cluster using 'vault operator init'.")
 
                 cluster_name = health_status.get("cluster_name", "unknown")
@@ -142,7 +141,9 @@ class VaultClient:
                 self.logger.info(f"Connected to Vault cluster: {cluster_name}")
                 return ConnectionInfo(cluster_name, vault_version, is_enterprise, cluster_id)
 
-        except hvac.exceptions.VaultError as e:
+        except VaultConnectionError:
+            raise
+        except vault_http.VaultError as e:
             error_msg = f"Vault API error: {e}. Please check your VAULT_ADDR ({self.vault_addr}) and network connectivity."
             raise VaultConnectionError(error_msg) from e
         except Exception as e:
@@ -157,7 +158,7 @@ class VaultClient:
             params: Optional query parameters.
             namespace: Optional namespace path.
             timeout: Per-request timeout override in seconds; defaults to the
-                client-wide ``hvac_timeout``.
+                client-wide ``request_timeout``.
 
         Returns:
             dict | list: The decoded response body — a dict for regular JSON
@@ -166,19 +167,10 @@ class VaultClient:
         """
         try:
             with self.get_client(namespace, timeout=timeout) as client:
-                # Remove leading slash and v1 prefix if present. removeprefix,
-                # not replace: replace strips "v1/" from anywhere in the path,
-                # mangling any mount or namespace that happens to contain it.
-                clean_path = path.lstrip("/").removeprefix("v1/")
+                # A leading slash and v1/ prefix are stripped by the client.
+                response = client.request("GET", path, params=params)
 
-                response = client.adapter.request("GET", f"v1/{clean_path}", params=params) if params else client.adapter.request("GET", f"v1/{clean_path}")
-
-                # If hvac already parsed the response into a dict, return it directly
-                if isinstance(response, dict):
-                    result = response
-                elif not isinstance(response, requests.Response):
-                    raise VaultDataError(f"Expected requests.Response object or dict, but got {type(response)} for GET {path}. Raw response: {response}")
-                elif response.status_code == 204:
+                if response.status_code == 204:
                     # 204 No Content is Vault's success response for a query that
                     # matched nothing — most visibly the activity/entity export
                     # endpoints over a window with no client records. Treating it
@@ -203,11 +195,11 @@ class VaultClient:
 
                 return result
 
-        except hvac.exceptions.Forbidden as e:
+        except vault_http.Forbidden as e:
             raise VaultPermissionError(f"Access denied to {path}. Check token permissions for this path.") from e
-        except hvac.exceptions.InvalidPath as e:
+        except vault_http.InvalidPath as e:
             raise VaultAPIError(f"Invalid path {path}: {e}. Verify the path exists and is accessible.") from e
-        except hvac.exceptions.VaultError as e:
+        except vault_http.VaultError as e:
             raise VaultAPIError(f"Vault API error on GET {path}: {e}") from e
         except requests.exceptions.RetryError as e:
             # Adapter-level retries exhausted (V2). Classified as a connection
@@ -219,48 +211,3 @@ class VaultClient:
             raise VaultConnectionError(f"Request timeout for GET {path}. Consider increasing timeout or check Vault responsiveness.") from e
         except Exception as e:
             raise VaultAPIError(f"Unexpected error on GET {path}: {e}") from e
-
-    def post(self, path: str, data: dict = None, namespace: str = "", timeout: int | None = None) -> dict:
-        """Make POST request to Vault API.
-
-        Args:
-            path: API endpoint path.
-            data: Optional request body.
-            namespace: Optional namespace path.
-            timeout: Per-request timeout override in seconds; defaults to the
-                client-wide ``hvac_timeout``.
-        """
-        try:
-            with self.get_client(namespace, timeout=timeout) as client:
-                # See the note in get(): removeprefix, not replace.
-                clean_path = path.lstrip("/").removeprefix("v1/")
-
-                response = client.adapter.request("POST", f"{client.url}/v1/{clean_path}", json=data)
-
-                if response.status_code not in [200, 204]:
-                    raise VaultAPIError(f"POST {path} failed with status {response.status_code}: {_summarise_error_body(response)}")
-
-                if response.content:
-                    try:
-                        return response.json()
-                    except json.JSONDecodeError as e:
-                        raise VaultDataError(f"Failed to parse JSON response from POST {path}: {e}") from e
-                else:
-                    return {}
-
-        except hvac.exceptions.Forbidden as e:
-            raise VaultPermissionError(f"Access denied to {path}. Check token permissions for this path.") from e
-        except hvac.exceptions.InvalidPath as e:
-            raise VaultAPIError(f"Invalid path {path}: {e}. Verify the path exists and is accessible.") from e
-        except hvac.exceptions.VaultError as e:
-            raise VaultAPIError(f"Vault API error on POST {path}: {e}") from e
-        except requests.exceptions.RetryError as e:
-            # Adapter-level retries exhausted (V2). Classified as a connection
-            # problem so callers' existing VaultConnectionError handling applies.
-            raise VaultConnectionError(f"Retries exhausted for POST {path} after repeated retryable responses (see status_forcelist). Check Vault health and load.") from e
-        except requests.exceptions.ConnectionError as e:
-            raise VaultConnectionError(f"Connection failed for POST {path}. Check network connectivity and Vault address.") from e
-        except requests.exceptions.Timeout as e:
-            raise VaultConnectionError(f"Request timeout for POST {path}. Consider increasing timeout or check Vault responsiveness.") from e
-        except Exception as e:
-            raise VaultAPIError(f"Unexpected error on POST {path}: {e}") from e

@@ -25,6 +25,18 @@ import requests
 # raw body must never be interpolated verbatim.
 _MAX_ERROR_BODY_LENGTH = 500
 
+# sys/health query that answers 200 with a body for every node state, so a
+# sealed, standby or DR-secondary node still describes itself.
+HEALTH_PARAMS = {
+    "standbyok": "true",
+    "perfstandbyok": "true",
+    "sealedcode": "200",
+    "uninitcode": "200",
+    "drsecondarycode": "200",
+    "performancestandbycode": "200",
+    "standbycode": "200",
+}
+
 # The only methods request() accepts. Not configurable: adding one is a change
 # to the tool's read-only guarantee.
 _ALLOWED_METHODS = frozenset({"GET"})
@@ -72,7 +84,7 @@ class VaultError(Exception):
 
     def __init__(
         self,
-        message: str,
+        message: str = "",
         *,
         status: int | None = None,
         errors: list[str] | None = None,

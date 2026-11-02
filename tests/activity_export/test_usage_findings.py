@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import hvac
 import jsonschema
 import pytest
 
@@ -17,6 +16,7 @@ from src.activity_export.findings import (
     usage_findings,
 )
 from src.activity_export.main import _covers_current_month, assess_activity
+from src.common import vault_http
 from src.common.exceptions import VaultAPIError, VaultPermissionError
 
 SCHEMA = json.loads((Path(__file__).parents[2] / "schemas" / "findings.schema.json").read_text())
@@ -142,7 +142,7 @@ class TestAssess:
 
     def test_missing_monthly_endpoint_is_not_an_error(self):
         error = VaultAPIError("Invalid path")
-        error.__cause__ = hvac.exceptions.InvalidPath()
+        error.__cause__ = vault_http.InvalidPath()
         client = self._client({"sys/internal/counters/activity/monthly": error})
         document, *_ = self._assess(client)
         assert document["coverage"]["complete"] is True
