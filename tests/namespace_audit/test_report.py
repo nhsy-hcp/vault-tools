@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime
 
+import pytest
+
 from src.namespace_audit.main import AuditData, AuditStats
 from src.namespace_audit.report import (
     LONG_MAX_LEASE_TTL_SECONDS,
@@ -962,6 +964,22 @@ class TestLicenseFinding:
         assert "termination on 2031-05-17" in findings[0].detail
         assert "remaining" not in findings[0].detail
         assert "-" + "10" not in findings[0].detail
+
+    @pytest.mark.parametrize(
+        ("expiry", "wording", "severity"),
+        [
+            ("2026-10-08T11:00:00Z", "(1 hour ago)", "High"),
+            ("2026-10-08T11:40:00Z", "(less than an hour ago)", "High"),
+            ("2026-10-07T13:00:00Z", "(23 hours ago)", "High"),
+            ("2026-10-07T11:00:00Z", "(1 day ago)", "High"),
+            ("2026-10-08T13:00:00Z", "(0 days remaining)", "Medium"),
+        ],
+    )
+    def test_wording_around_the_expiry(self, expiry, wording, severity):
+        """timedelta.days floors: an hour past expiry used to read "1 day ago"."""
+        [f] = _license_findings(self._data(expiry))
+        assert wording in f.detail
+        assert f.severity == severity
 
     def test_expired_license_without_termination(self):
         findings = _license_findings(self._data("2026-09-28T12:00:00Z", termination_time=""))
