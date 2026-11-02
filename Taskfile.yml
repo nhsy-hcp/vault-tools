@@ -202,6 +202,14 @@ tasks:
     cmds:
       - echo "Running pre-commit hooks..."
       - uv run pre-commit run --all-files
+      # --all-files covers tracked files only, so a new file nobody has staged
+      # yet would pass here and fail at commit. Lint untracked, non-ignored
+      # files as well.
+      - |
+        if [ -n "$(git ls-files --others --exclude-standard)" ]; then
+          echo "Running pre-commit hooks on untracked files..."
+          git ls-files -z --others --exclude-standard | xargs -0 uv run pre-commit run --files
+        fi
       - echo "✅ All linting checks passed"
 
   fmt:policy:
