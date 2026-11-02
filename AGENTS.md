@@ -768,9 +768,13 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
   `--lease-count-warning` and `--snapshot-grace`. It is parsed once in
   `main.py::_thresholds` and passed as one `thresholds=` argument
   (`run_cluster_audit*`, `run_full_audit`, `NamespaceAuditor` →
-  `AuditData.thresholds` → `collect_findings`), never as loose ints. Its
+  `AuditData.thresholds` → `collect_findings`), never as loose ints. The
+  reports take it too (`render_cluster_health(..., thresholds=)`, via
+  `build_cluster_report`, `AuditData` and `FullAuditContext`), so a metric
+  note such as "VT-HLTH-006 above N" matches the finding. Its
   defaults are the module constants, so a default run uses the
-  skill's values. `grace_seconds` is added to VT-SNAP-002 evidence only when tuned,
+  skill's values. The flag parsers (`duration_seconds`, `positive_int`) live
+  in `common/utils.py`, shared with `scripts/threshold-margins.py`. `grace_seconds` is added to VT-SNAP-002 evidence only when tuned,
   so a default run diffs clean against an older one. The rest stay constants
   until there is data.
 - **VT-SNAP-002 keeps `max(interval, grace)`.** The interval can't be read
@@ -802,7 +806,11 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
   different node per run), several times and at busy periods, then
   `uv run scripts/threshold-margins.py <dir>/*-cluster-health-*.json`. It
   prints, per file, the node role, the sample time and each judged value
-  against its threshold, with the margin and whether it fires. It imports the
+  against its threshold, with the margin and whether it fires. Pass the same
+  `--lease-count-warning`/`--snapshot-grace` as the audit to check a tuned
+  value. It judges exactly what `health_findings` judges (no never-connected
+  peers, lag on connected peers only, no time-based rows without a usable
+  `server_time_utc`), and a test pins each case. It imports the
   thresholds rather than copying them, so it must run in the project
   environment, not as a PEP 723 script. It reads files only. Change a constant
   only with the measurement behind it, recorded in its comment.
