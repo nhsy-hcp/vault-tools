@@ -188,3 +188,12 @@ class TestSnapshots:
 def test_cluster_lease_finding():
     assert _ids(cluster_lease_findings(2000 * 3600)) == ["VT-LEASE-001"]
     assert cluster_lease_findings(None) == [] and cluster_lease_findings(0) == []
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "1793620800", None])
+def test_unusable_server_time_falls_back_to_our_clock(value):
+    """bool is an int: True must not become 1970-01-01T00:00:01."""
+    from src.cluster_audit.findings import reference_time, server_time
+
+    assert server_time({"server_time_utc": value}) is None
+    assert reference_time({"server_time_utc": value}).year >= 2026

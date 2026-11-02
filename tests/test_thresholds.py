@@ -12,8 +12,8 @@ from unittest.mock import patch
 import pytest
 
 import main
-from main import _duration_seconds, _positive_int
 from main import build_parser as _build_parser
+from src.cluster_audit.collector import ClusterCoverage
 from src.cluster_audit.findings import (
     DEFAULT_THRESHOLDS,
     LEASE_COUNT_WARNING,
@@ -22,9 +22,11 @@ from src.cluster_audit.findings import (
     metric_findings,
     snapshot_findings,
 )
-from src.cluster_audit.report import collect_cluster_findings
-from src.namespace_audit.main import AuditData, NamespaceAuditor
-from src.namespace_audit.report import collect_findings
+from src.cluster_audit.report import build_cluster_report, collect_cluster_findings, render_cluster_health
+from src.common.utils import duration_seconds, positive_int
+from src.full_audit.report import build_full_report
+from src.namespace_audit.main import AuditData, AuditStats, NamespaceAuditor
+from src.namespace_audit.report import build_markdown_report, collect_findings
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
 HEALTH_COMMANDS = ["cluster-audit", "namespace-audit", "full-audit"]
@@ -37,19 +39,19 @@ HEALTH_COMMANDS = ["cluster-audit", "namespace-audit", "full-audit"]
 
 @pytest.mark.parametrize(("text", "seconds"), [("90", 90), ("45s", 45), ("90m", 5400), ("2h", 7200), ("1d", 86400), (" 3H ", 10800)])
 def test_duration_seconds(text, seconds):
-    assert _duration_seconds(text) == seconds
+    assert duration_seconds(text) == seconds
 
 
 @pytest.mark.parametrize("text", ["0", "0h", "-1h", "2w", "h", "1.5h", ""])
 def test_duration_seconds_rejects(text):
     with pytest.raises(argparse.ArgumentTypeError):
-        _duration_seconds(text)
+        duration_seconds(text)
 
 
 @pytest.mark.parametrize("text", ["0", "-5", "ten", "1e5"])
 def test_positive_int_rejects(text):
     with pytest.raises(argparse.ArgumentTypeError):
-        _positive_int(text)
+        positive_int(text)
 
 
 # ---------------------------------------------------------------------------
@@ -181,3 +183,38 @@ def test_default_run_evidence_has_no_grace_key():
     """A default run's evidence is unchanged, so a diff against main stays clean."""
     [f] = snapshot_findings(_snapshot(timedelta(hours=1)), NOW + timedelta(hours=30))
     assert "grace_seconds" not in f.evidence
+
+
+# ---------------------------------------------------------------------------
+# Every report labels the metric with the run's threshold
+# ---------------------------------------------------------------------------
+
+TUNED_LEASES = Thresholds(lease_count_warning=50_000)
+
+
+def test_cluster_health_metric_note_follows_the_threshold():
+    health = {**HEALTH, "metrics": {"leases": 60_000}}
+    assert "VT-HLTH-006 above 100,000" in render_cluster_health(health)
+    tuned = render_cluster_health(health, thresholds=TUNED_LEASES)
+    assert "VT-HLTH-006 above 50,000" in tuned
+    assert "100,000" not in tuned
+
+
+def test_cluster_report_metric_note_follows_the_threshold():
+    report = build_cluster_report("c", {**HEALTH, "metrics": {"leases": 1}}, ClusterCoverage(), [], generated_at=NOW, thresholds=TUNED_LEASES)
+    assert "VT-HLTH-006 above 50,000" in report
+
+
+def test_namespace_report_metric_note_follows_the_threshold():
+    data = AuditData(cluster_health={**HEALTH, "metrics": {"leases": 1}}, thresholds=TUNED_LEASES)
+    assert "VT-HLTH-006 above 50,000" in build_markdown_report("c", data, AuditStats(), generated_at=NOW)
+
+
+def test_full_report_context_carries_the_threshold():
+    """full-audit's report renders the health section from FullAuditContext.thresholds."""
+    import dataclasses
+
+    from tests.full_audit.test_report import _ctx
+
+    ctx = dataclasses.replace(_ctx([], health={**HEALTH, "metrics": {"leases": 1}}), thresholds=TUNED_LEASES)
+    assert "VT-HLTH-006 above 50,000" in build_full_report(ctx)

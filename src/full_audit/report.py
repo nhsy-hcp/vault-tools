@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from src.cluster_audit.findings import license_expiry_days, parse_license_time
+from src.cluster_audit.findings import DEFAULT_THRESHOLDS, Thresholds, license_expiry_days, parse_license_time
 from src.cluster_audit.report import render_cluster_health
 from src.common.findings import RULES, SEVERITY_ORDER, Finding, display_namespace, finding_from_dict, format_ttl, get_tool_version
 from src.common.markdown import md_escape, md_table
@@ -57,6 +57,7 @@ class FullAuditContext:
     license_status: dict[str, Any] | None = None
     license_reason: str | None = None
     lease_ttls: tuple[int, int] | None = None
+    thresholds: Thresholds = DEFAULT_THRESHOLDS
     # namespace-audit's AuditData / AuditStats; None when the step did not run.
     audit_data: Any = None
     audit_stats: Any = None
@@ -522,7 +523,7 @@ def build_full_report(ctx: FullAuditContext) -> str:
         summary_metrics(ctx),
     ]
     if ctx.health:
-        health_md = render_cluster_health(ctx.health).replace("## Cluster health", "## Cluster health and licence", 1)
+        health_md = render_cluster_health(ctx.health, thresholds=ctx.thresholds).replace("## Cluster health", "## Cluster health and licence", 1)
         sections.append(health_md)
         if isinstance(ctx.license_status, dict):
             features = ", ".join(sorted(ctx.license_status.get("features") or [])) or "none listed"

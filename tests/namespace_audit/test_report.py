@@ -972,11 +972,14 @@ class TestLicenseFinding:
             ("2026-10-08T11:40:00Z", "(less than an hour ago)", "High"),
             ("2026-10-07T13:00:00Z", "(23 hours ago)", "High"),
             ("2026-10-07T11:00:00Z", "(1 day ago)", "High"),
-            ("2026-10-08T13:00:00Z", "(0 days remaining)", "Medium"),
+            ("2026-10-08T13:00:00Z", "(1 hour remaining)", "Medium"),
+            ("2026-10-08T12:20:00Z", "(less than an hour remaining)", "Medium"),
+            ("2026-10-09T11:00:00Z", "(23 hours remaining)", "Medium"),
+            ("2026-10-09T13:00:00Z", "(1 day remaining)", "Medium"),
         ],
     )
     def test_wording_around_the_expiry(self, expiry, wording, severity):
-        """timedelta.days floors: an hour past expiry used to read "1 day ago"."""
+        """timedelta.days floors: an hour past expiry used to read "1 day ago", an hour before "0 days remaining"."""
         [f] = _license_findings(self._data(expiry))
         assert wording in f.detail
         assert f.severity == severity

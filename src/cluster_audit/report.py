@@ -217,7 +217,8 @@ def _render_snapshots(snapshots: dict[str, Any] | None, enterprise: bool | None,
 
 
 _METRIC_LABELS = {
-    "leases": ("Outstanding leases", "active node only; VT-HLTH-006 above 100,000"),
+    # The VT-HLTH-006 note is filled in from the run's Thresholds by _render_metrics.
+    "leases": ("Outstanding leases", "active node only; VT-HLTH-006 above {lease_count_warning:,}"),
     "irrevocable_leases": ("Irrevocable leases", "active node only; VT-HLTH-005 above 0"),
     "in_flight_requests": ("In-flight requests", ""),
     "raft_fsm_pending": ("Raft FSM pending", ""),
@@ -229,19 +230,23 @@ _METRIC_LABELS = {
 }
 
 
-def _render_metrics(metrics: dict[str, Any] | None) -> str:
+def _render_metrics(metrics: dict[str, Any] | None, thresholds: Thresholds = DEFAULT_THRESHOLDS) -> str:
     if metrics is None:
         return _NOT_READ
     rows = []
     for key, (label, note) in _METRIC_LABELS.items():
         value = metrics.get(key)
+        note = note.format(lease_count_warning=thresholds.lease_count_warning)
         rows.append([label, f"{value:,}" if isinstance(value, int) else ("not reported" if value is None else value), note])
     when = f" at {metrics['timestamp']}" if metrics.get("timestamp") else ""
     return f"Gauges from **the queried node only**{when} — never cluster-wide totals.\n\n" + md_table(["Metric", "Value", "Notes"], rows)
 
 
-def render_cluster_health(health: dict[str, Any] | None, heading_level: int = 2) -> str:
-    """The cluster health section; empty string when nothing was collected."""
+def render_cluster_health(health: dict[str, Any] | None, heading_level: int = 2, thresholds: Thresholds = DEFAULT_THRESHOLDS) -> str:
+    """The cluster health section; empty string when nothing was collected.
+
+    ``thresholds`` must be the run's, so the metric notes match the findings.
+    """
     if not health:
         return ""
     h = "#" * heading_level
@@ -268,7 +273,7 @@ def render_cluster_health(health: dict[str, Any] | None, heading_level: int = 2)
             f"{sub} Automated snapshots",
             _render_snapshots(health.get("snapshots"), health.get("enterprise"), health.get("raft")),
             f"{sub} Node metrics",
-            _render_metrics(health.get("metrics")),
+            _render_metrics(health.get("metrics"), thresholds),
         ]
     return "\n\n".join(parts)
 
@@ -347,6 +352,7 @@ def build_cluster_report(
     license_unavailable_reason: str | None = None,
     system_lease_ttls: tuple[int, int] | None = None,
     output_files: list[str] | None = None,
+    thresholds: Thresholds = DEFAULT_THRESHOLDS,
 ) -> str:
     generated = generated_at or datetime.now(UTC)
     header = [
@@ -362,7 +368,7 @@ def build_cluster_report(
     if system_lease_ttls:
         header.append(["System lease TTL", f"{format_ttl(system_lease_ttls[0])} default / {format_ttl(system_lease_ttls[1])} max"])
 
-    sections = [f"# Vault Cluster Audit — {cluster_name}", "", md_table(["Field", "Value"], header), "", render_cluster_health(health), ""]
+    sections = [f"# Vault Cluster Audit — {cluster_name}", "", md_table(["Field", "Value"], header), "", render_cluster_health(health, thresholds=thresholds), ""]
     if license_content := render_license(license_status, health.get("enterprise"), license_unavailable_reason):
         sections += ["## License", "", license_content, ""]
     sections += [

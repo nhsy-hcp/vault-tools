@@ -262,6 +262,7 @@ def run_full_audit(
         license_status=reads.license.status if reads.license else None,
         license_reason=reads.license.unavailable_reason if reads.license else None,
         lease_ttls=reads.lease_ttls,
+        thresholds=thresholds,
         policy_bodies=dict(context["audit_data"].policy_bodies) if context.get("audit_data") is not None else {},
         previous_diff=previous_diff,
         previous_path=os.path.basename(previous_path) if previous_path else None,
