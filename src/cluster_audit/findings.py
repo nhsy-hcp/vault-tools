@@ -68,6 +68,23 @@ def license_expiry_days(expiration_time: Any, now: datetime | None = None) -> in
     return (expiry - reference).days
 
 
+def _time_since_expiry(expiration_time: Any, now: datetime | None) -> str:
+    """How long ago the license expired, in hours under a day and whole days after.
+
+    timedelta.days floors, so an hour past expiry would otherwise read "1 day ago".
+    """
+    expiry = parse_license_time(expiration_time)
+    reference = now or datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    elapsed = (reference - expiry).total_seconds() if expiry else 0
+    if elapsed < 86400:
+        hours = int(elapsed // 3600)
+        return "less than an hour" if hours < 1 else f"{hours} hour{'s' if hours != 1 else ''}"
+    days = int(elapsed // 86400)
+    return f"{days} day{'s' if days != 1 else ''}"
+
+
 def license_findings(license_status: dict[str, Any] | None, now: datetime | None) -> list[Finding]:
     """VT-LIC-001, counted from ``now`` so it agrees with the report date.
 
@@ -84,8 +101,7 @@ def license_findings(license_status: dict[str, Any] | None, now: datetime | None
         detail = f"License expires on {expiry_str[:10]} ({days} day{'s' if days != 1 else ''} remaining) — renew before the grace period ends."
         return [finding("VT-LIC-001", "", "cluster", None, "license", detail, days_remaining=days, expiration_time=expiry_str)]
 
-    ago = -days
-    detail = f"License expired on {expiry_str[:10]} ({ago} day{'s' if ago != 1 else ''} ago)"
+    detail = f"License expired on {expiry_str[:10]} ({_time_since_expiry(expiry_str, now)} ago)"
     termination_time = license_status.get("termination_time")
     termination = parse_license_time(termination_time)
     if termination is not None:
@@ -311,7 +327,9 @@ def snapshot_findings(snapshots: dict[str, Any] | None, now: datetime) -> list[F
         last_start = parse_time(cfg.get("last_snapshot_start")) if cfg.get("last_snapshot_start") else None
         next_start = parse_time(cfg.get("next_snapshot_start")) if cfg.get("next_snapshot_start") else None
         overdue = 0
-        if last_start and next_start:
+        # A run in progress has started, so it is not overdue however long it
+        # takes; a failing config still fires through consecutive_errors.
+        if last_start and next_start and not cfg.get("in_progress"):
             grace = max((next_start - last_start).total_seconds(), SNAPSHOT_OVERDUE_MIN_GRACE_SECONDS)
             late = (now - next_start).total_seconds()
             overdue = int(late) // 60 * 60 if late > grace else 0

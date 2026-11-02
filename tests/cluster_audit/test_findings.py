@@ -154,6 +154,14 @@ class TestSnapshots:
     def test_late_within_grace_is_fine(self):
         assert snapshot_findings({"configs": [self._cfg()]}, NOW + timedelta(hours=20)) == []
 
+    def test_running_snapshot_is_not_overdue(self):
+        """A long run has started; judging it overdue was a false alarm."""
+        assert snapshot_findings({"configs": [self._cfg(in_progress=True)]}, NOW + timedelta(hours=30)) == []
+
+    def test_failing_snapshot_fires_while_running(self):
+        [f] = snapshot_findings({"configs": [self._cfg(in_progress=True, consecutive_errors=1)]}, NOW + timedelta(hours=30))
+        assert f.rule_id == "VT-SNAP-002" and f.evidence["consecutive_errors"] == 1
+
     def test_local_disk(self):
         assert _ids(snapshot_findings({"configs": [self._cfg(storage_scheme="file")]}, NOW)) == ["VT-SNAP-003"]
 
