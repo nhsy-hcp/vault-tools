@@ -1,5 +1,7 @@
+import argparse
 import calendar
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -104,3 +106,28 @@ def get_last_month() -> datetime:
     # Use UTC so behaviour is consistent regardless of the host timezone (U2).
     # U1 is already correctly implemented via calendar.monthrange above.
     return datetime.now(UTC).replace(day=1) - timedelta(days=1)
+
+
+# argparse types shared by main.py and scripts/threshold-margins.py, so the
+# script accepts exactly the values the CLI flags do.
+_DURATION = re.compile(r"^(\d+)([smhd]?)$")
+_DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def duration_seconds(value: str) -> int:
+    """argparse type: "90m", "2h", "1d" or plain seconds, as a positive number of seconds."""
+    match = _DURATION.match(value.strip().lower())
+    if not match or int(match[1]) == 0:
+        raise argparse.ArgumentTypeError(f"invalid duration {value!r}: use a positive number with an optional s, m, h or d suffix (e.g. 2h)")
+    return int(match[1]) * _DURATION_UNITS[match[2]]
+
+
+def positive_int(value: str) -> int:
+    """argparse type: an integer above zero."""
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"invalid value {value!r}: must be a positive integer")
+    return number

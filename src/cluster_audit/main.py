@@ -137,6 +137,7 @@ def run_cluster_audit_full(vault_client: VaultClient, output_dir: str, console: 
                 license_unavailable_reason=license_reason,
                 system_lease_ttls=lease_ttls,
                 output_files=[os.path.basename(p) for p in written],
+                thresholds=thresholds,
             ),
         )
         written.append(report_path)

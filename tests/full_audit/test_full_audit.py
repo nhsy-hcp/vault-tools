@@ -356,3 +356,12 @@ def test_thresholds_reach_cluster_and_namespace_audit(tmp_path):
     h.run(thresholds=tuned)
     assert h.args["cluster-audit"][3] == tuned
     assert h.auditor_kwargs["thresholds"] == tuned
+
+
+def test_thresholds_reach_the_combined_report(tmp_path):
+    from src.cluster_audit.findings import Thresholds
+
+    h = Harness(tmp_path)
+    h.cluster.health["metrics"] = {"leases": 1}
+    h.run(thresholds=Thresholds(lease_count_warning=50_000))
+    assert "VT-HLTH-006 above 50,000" in h.report

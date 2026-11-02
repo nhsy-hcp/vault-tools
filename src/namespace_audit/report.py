@@ -1045,7 +1045,7 @@ def build_markdown_report(
 
     license_content = render_license(data.license_status, data.is_enterprise, data.license_unavailable_reason)
     cluster_section: list[str] = []
-    if cluster_content := render_cluster_health(data.cluster_health):
+    if cluster_content := render_cluster_health(data.cluster_health, thresholds=data.thresholds):
         cluster_section = [cluster_content, ""]
 
     license_section: list[str] = []

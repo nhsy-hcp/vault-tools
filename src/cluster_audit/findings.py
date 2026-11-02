@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from src.common.findings import Finding, finding, format_ttl, parse_time
@@ -77,31 +77,33 @@ def parse_license_time(value: Any) -> datetime | None:
     return parse_time(value) if isinstance(value, str) else None
 
 
-def license_expiry_days(expiration_time: Any, now: datetime | None = None) -> int | None:
-    """Days until the license soft-expiry, negative once it has passed; None if unparseable."""
+def _time_to_expiry(expiration_time: Any, now: datetime | None) -> timedelta | None:
+    """Time until the license soft-expiry, negative once it has passed; None if unparseable."""
     expiry = parse_license_time(expiration_time)
     if expiry is None:
         return None
     reference = now or datetime.now(UTC)
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=UTC)
-    return (expiry - reference).days
+    return expiry - reference
 
 
-def _time_since_expiry(expiration_time: Any, now: datetime | None) -> str:
-    """How long ago the license expired, in hours under a day and whole days after.
+def license_expiry_days(expiration_time: Any, now: datetime | None = None) -> int | None:
+    """Days until the license soft-expiry, negative once it has passed; None if unparseable."""
+    remaining = _time_to_expiry(expiration_time, now)
+    return None if remaining is None else remaining.days
 
-    timedelta.days floors, so an hour past expiry would otherwise read "1 day ago".
+
+def _duration_words(seconds: float) -> str:
+    """A non-negative span in hours under a day and whole days after.
+
+    Used on both sides of expiry so they read alike: ``timedelta.days`` floors,
+    so a few hours either side would otherwise read "0 days" or "1 day ago".
     """
-    expiry = parse_license_time(expiration_time)
-    reference = now or datetime.now(UTC)
-    if reference.tzinfo is None:
-        reference = reference.replace(tzinfo=UTC)
-    elapsed = (reference - expiry).total_seconds() if expiry else 0
-    if elapsed < 86400:
-        hours = int(elapsed // 3600)
+    if seconds < 86400:
+        hours = int(seconds // 3600)
         return "less than an hour" if hours < 1 else f"{hours} hour{'s' if hours != 1 else ''}"
-    days = int(elapsed // 86400)
+    days = int(seconds // 86400)
     return f"{days} day{'s' if days != 1 else ''}"
 
 
@@ -114,14 +116,15 @@ def license_findings(license_status: dict[str, Any] | None, now: datetime | None
     if not isinstance(license_status, dict):
         return []
     expiry_str = license_status.get("expiration_time", "")
-    days = license_expiry_days(expiry_str, now)
-    if days is None or days > LICENSE_EXPIRY_WARNING_DAYS:
+    remaining = _time_to_expiry(expiry_str, now)
+    if remaining is None or remaining.days > LICENSE_EXPIRY_WARNING_DAYS:
         return []
+    days = remaining.days
     if days >= 0:
-        detail = f"License expires on {expiry_str[:10]} ({days} day{'s' if days != 1 else ''} remaining) — renew before the grace period ends."
+        detail = f"License expires on {expiry_str[:10]} ({_duration_words(remaining.total_seconds())} remaining) — renew before the grace period ends."
         return [finding("VT-LIC-001", "", "cluster", None, "license", detail, days_remaining=days, expiration_time=expiry_str)]
 
-    detail = f"License expired on {expiry_str[:10]} ({_time_since_expiry(expiry_str, now)} ago)"
+    detail = f"License expired on {expiry_str[:10]} ({_duration_words(-remaining.total_seconds())} ago)"
     termination_time = license_status.get("termination_time")
     termination = parse_license_time(termination_time)
     if termination is not None:
@@ -388,11 +391,17 @@ def snapshot_findings(snapshots: dict[str, Any] | None, now: datetime, threshold
     return findings
 
 
+def server_time(health: dict[str, Any]) -> datetime | None:
+    """The node's clock at collection from ``server_time_utc``; None when absent, zero or not an int."""
+    value = health.get("server_time_utc")
+    # bool is an int subclass: True would otherwise read as 1970-01-01T00:00:01.
+    return datetime.fromtimestamp(value, UTC) if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
 def reference_time(health: dict[str, Any]) -> datetime:
     """The node's clock at collection, so neither a long namespace walk nor host
-    clock skew reads as replication lag."""
-    server_time = health.get("server_time_utc")
-    return datetime.fromtimestamp(server_time, UTC) if isinstance(server_time, int) and server_time > 0 else datetime.now(UTC)
+    clock skew reads as replication lag. Falls back to ours."""
+    return server_time(health) or datetime.now(UTC)
 
 
 def health_findings(health: dict[str, Any] | None, now: datetime | None = None, thresholds: Thresholds = DEFAULT_THRESHOLDS) -> list[Finding]:

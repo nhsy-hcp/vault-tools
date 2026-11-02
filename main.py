@@ -14,7 +14,6 @@
 import argparse
 import importlib.metadata
 import os
-import re
 import sys
 import uuid
 from collections.abc import Callable
@@ -34,7 +33,7 @@ from src.common.logging_config import (
     set_correlation_id,
     setup_logging,
 )
-from src.common.utils import validate_date_format
+from src.common.utils import duration_seconds, positive_int, validate_date_format
 from src.common.vault_client import VaultClient
 from src.entity_export.main import run_entity_export
 from src.findings_diff.main import run_diff
@@ -48,7 +47,7 @@ from src.namespace_audit.main import NamespaceAuditor
 # distribution is not installed and importlib.metadata cannot be the only
 # source. The literal is the fallback for that mode and is pinned to
 # pyproject.toml by a test, so the two cannot drift.
-_FALLBACK_VERSION = "3.2.1"
+_FALLBACK_VERSION = "3.2.2"
 
 try:
     __version__ = importlib.metadata.version("vault-tools")
@@ -239,14 +238,14 @@ def build_parser() -> argparse.ArgumentParser:
     threshold_opts = argparse.ArgumentParser(add_help=False)
     threshold_opts.add_argument(
         "--lease-count-warning",
-        type=_positive_int,
+        type=positive_int,
         default=DEFAULT_THRESHOLDS.lease_count_warning,
         metavar="N",
         help=f"VT-HLTH-006 fires above this many outstanding leases on the active node. Default: {DEFAULT_THRESHOLDS.lease_count_warning:,}.",
     )
     threshold_opts.add_argument(
         "--snapshot-grace",
-        type=_duration_seconds,
+        type=duration_seconds,
         default=DEFAULT_THRESHOLDS.snapshot_grace_seconds,
         metavar="DURATION",
         help=(
@@ -337,29 +336,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser_diff.add_argument("new", nargs="?", default=None, help="Later *-findings-*.json")
 
     return parser
-
-
-_DURATION = re.compile(r"^(\d+)([smhd]?)$")
-_DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
-
-
-def _duration_seconds(value: str) -> int:
-    """argparse type: "90m", "2h", "1d" or plain seconds, as a positive number of seconds."""
-    match = _DURATION.match(value.strip().lower())
-    if not match or int(match[1]) == 0:
-        raise argparse.ArgumentTypeError(f"invalid duration {value!r}: use a positive number with an optional s, m, h or d suffix (e.g. 2h)")
-    return int(match[1]) * _DURATION_UNITS[match[2]]
-
-
-def _positive_int(value: str) -> int:
-    """argparse type: an integer above zero."""
-    try:
-        number = int(value)
-    except ValueError:
-        number = 0
-    if number <= 0:
-        raise argparse.ArgumentTypeError(f"invalid value {value!r}: must be a positive integer")
-    return number
 
 
 def _thresholds(args: argparse.Namespace) -> Thresholds:
