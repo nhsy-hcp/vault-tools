@@ -42,36 +42,35 @@ HEALTH_PARAMS = {
 _ALLOWED_METHODS = frozenset({"GET"})
 
 
-def _summarise_error_body(response: requests.Response) -> str:
-    """Render a Vault error response for an exception message, safely.
+def _parse_error_body(response: requests.Response) -> tuple[str, list[str]]:
+    """Vault's ``errors`` strings and a safe summary of them, from one JSON parse.
 
     Vault reports failures as ``{"errors": [...]}``. Those strings are the
-    useful diagnostic, so they are kept (bounded in length). Anything that is
-    not a recognisable Vault error document is described rather than quoted,
-    because an arbitrary body may carry token material or wrapped secrets.
+    useful diagnostic, so they are kept (the summary bounded in length).
+    Anything that is not a recognisable Vault error document is described
+    rather than quoted, because an arbitrary body may carry token material or
+    wrapped secrets.
     """
+    size = len(response.content or b"")
     try:
         payload = response.json()
     except (ValueError, json.JSONDecodeError):
-        return f"<non-JSON body, {len(response.content or b'')} bytes>"
+        return f"<non-JSON body, {size} bytes>", []
 
     if isinstance(payload, dict) and "errors" in payload:
-        errors = "; ".join(str(item) for item in payload["errors"]) or "<none>"
-        if len(errors) > _MAX_ERROR_BODY_LENGTH:
-            errors = errors[:_MAX_ERROR_BODY_LENGTH] + "...[truncated]"
-        return errors
+        raw = payload["errors"]
+        errors = [str(item) for item in raw] if isinstance(raw, list) else [str(raw)]
+        summary = "; ".join(errors) or "<none>"
+        if len(summary) > _MAX_ERROR_BODY_LENGTH:
+            summary = summary[:_MAX_ERROR_BODY_LENGTH] + "...[truncated]"
+        return summary, errors
 
-    return f"<unrecognised JSON body, {len(response.content or b'')} bytes>"
+    return f"<unrecognised JSON body, {size} bytes>", []
 
 
-def _error_strings(response: requests.Response) -> list[str]:
-    try:
-        payload = response.json()
-    except (ValueError, json.JSONDecodeError):
-        return []
-    if isinstance(payload, dict) and isinstance(payload.get("errors"), list):
-        return [str(item) for item in payload["errors"]]
-    return []
+def _summarise_error_body(response: requests.Response) -> str:
+    """The bounded summary half of _parse_error_body."""
+    return _parse_error_body(response)[0]
 
 
 class VaultError(Exception):
@@ -165,10 +164,11 @@ def raise_for_vault_status(response: requests.Response, method: str = "GET", pat
     if status < 400:
         return
     cls = _STATUS_EXCEPTIONS.get(status, UnexpectedError)
+    summary, errors = _parse_error_body(response)
     raise cls(
-        _summarise_error_body(response),
+        summary,
         status=status,
-        errors=_error_strings(response),
+        errors=errors,
         method=method,
         path=path,
         response=response,

@@ -1,7 +1,7 @@
 """Tests for src/common/vault_http.py: status mapping, headers, TLS and timeouts."""
 
 import json
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import requests
@@ -95,6 +95,21 @@ def test_long_errors_are_truncated():
         raise_for_vault_status(response)
     assert "[truncated]" in str(excinfo.value)
     assert len(str(excinfo.value)) < 600
+
+
+def test_errors_that_are_not_a_list_are_kept_as_one_string():
+    response = make_response(400, {"errors": "single message"})
+    with pytest.raises(vault_http.InvalidRequest) as excinfo:
+        raise_for_vault_status(response)
+    assert excinfo.value.errors == ["single message"]
+    assert "single message" in str(excinfo.value)
+
+
+def test_error_body_is_parsed_once():
+    response = make_response(404, {"errors": ["x"]})
+    with patch.object(requests.Response, "json", autospec=True, side_effect=lambda self: {"errors": ["x"]}) as parsed, pytest.raises(vault_http.InvalidPath):
+        raise_for_vault_status(response)
+    assert parsed.call_count == 1
 
 
 def test_unrecognised_json_error_body_is_described():
