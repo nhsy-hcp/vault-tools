@@ -20,6 +20,7 @@ from .exceptions import (  # noqa: F401
     VaultDataError,
     VaultPermissionError,
 )
+from .vault_http import _summarise_error_body
 
 
 class ConnectionInfo(NamedTuple):
@@ -29,34 +30,6 @@ class ConnectionInfo(NamedTuple):
     # than assumed to be Community.
     is_enterprise: bool | None
     cluster_id: str | None
-
-
-# Upper bound on how much of a Vault error body is carried in an exception
-# message. Exception text reaches the audit log via `error=str(e)`, so the whole
-# raw body must never be interpolated verbatim.
-_MAX_ERROR_BODY_LENGTH = 500
-
-
-def _summarise_error_body(response: requests.Response) -> str:
-    """Render a Vault error response for an exception message, safely.
-
-    Vault reports failures as ``{"errors": [...]}``. Those strings are the
-    useful diagnostic, so they are kept (bounded in length). Anything that is
-    not a recognisable Vault error document is described rather than quoted,
-    because an arbitrary body may carry token material or wrapped secrets.
-    """
-    try:
-        payload = response.json()
-    except (ValueError, json.JSONDecodeError):
-        return f"<non-JSON body, {len(response.content or b'')} bytes>"
-
-    if isinstance(payload, dict) and "errors" in payload:
-        errors = "; ".join(str(item) for item in payload["errors"]) or "<none>"
-        if len(errors) > _MAX_ERROR_BODY_LENGTH:
-            errors = errors[:_MAX_ERROR_BODY_LENGTH] + "...[truncated]"
-        return errors
-
-    return f"<unrecognised JSON body, {len(response.content or b'')} bytes>"
 
 
 class VaultClient:
