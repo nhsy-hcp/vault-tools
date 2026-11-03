@@ -15,8 +15,8 @@ subcommands:
 
 Every audit writes a `findings.json` in the vault-ops Claude skill's schema
 (`schemas/findings.schema.json`), and its rule IDs (`VT-MOUNT-001`, …) come
-from the skill's catalogue. The skill lives at `~/Projects/ai/vault-ops-skill`
-and is where most of these checks were first written.
+from the skill's catalogue. The skill lives at
+<https://github.com/nhsy-hcp/vault-ops-skill> and is where most of these checks were first written.
 
 ## Project Structure
 
@@ -143,6 +143,7 @@ and is where most of these checks were first written.
 │   ├── test_seed_vault.py    # The seeder's VaultAPI and skip checks (loaded by path)
 │   ├── test_thresholds.py    # --lease-count-warning / --snapshot-grace and the Thresholds object
 │   ├── test_threshold_margins.py # scripts/threshold-margins.py (loaded by path)
+│   ├── test_rules_parity.py  # RULES vs the skill's rules.json (GitHub main; skips offline)
 │   └── test_ce.py            # CE smoke tests (marker `ce`), run only by task test:ce
 ├── inputs/                   # Input files for scripts
 └── outputs/                  # Generated reports (configurable)
@@ -714,6 +715,15 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
   `sha256(rule|namespace|kind|path)[:16]`, identical to the skill's (a test pins
   two values), so a rename reads as "resolved" plus "new" in every diff. Add a
   rule to `RULES` before emitting it; `finding()` raises `KeyError` otherwise.
+- **`RULES` is checked against the skill's catalogue.**
+  `tests/test_rules_parity.py` compares each rule's ID, severity (ignoring
+  case), category and title with `skills/vault-ops/references/rules.json` on
+  the skill's `main` branch, so a rule added or changed there and not yet
+  copied into `RULES` fails CI here. A rule the skill has and vault-tools does
+  not define is allowed. `VAULT_OPS_RULES_JSON` (a URL or a file path) points it
+  at another copy. It skips when the source is unreachable, missing or answers
+  HTTP 429/5xx, and fails on any other HTTP error (a 404 means the catalogue
+  moved) or a response that is not rules.json.
 - **Severity may escalate per finding** (`finding(..., severity="High")`), as
   VT-LIC-001 does once a license has expired. Title case in markdown, lower case
   in JSON.

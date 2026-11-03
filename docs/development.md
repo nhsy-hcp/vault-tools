@@ -27,6 +27,11 @@ uv run pytest tests/namespace_audit/ -v
 
 # CE smoke tests against a throwaway Community server (needs Docker)
 task test:ce
+
+# Rule catalogue parity with vault-ops-skill (fetches rules.json from GitHub; skips offline)
+uv run pytest tests/test_rules_parity.py
+# ...or against another copy (URL or file path)
+VAULT_OPS_RULES_JSON=path/to/rules.json uv run pytest tests/test_rules_parity.py
 ```
 
 For live testing against Vault Enterprise, with optional DR and performance
