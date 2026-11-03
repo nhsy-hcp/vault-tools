@@ -144,6 +144,8 @@ from the skill's catalogue. The skill lives at
 │   ├── test_thresholds.py    # --lease-count-warning / --snapshot-grace and the Thresholds object
 │   ├── test_threshold_margins.py # scripts/threshold-margins.py (loaded by path)
 │   ├── test_rules_parity.py  # RULES vs the skill's rules.json (GitHub main; skips offline)
+│   ├── test_schema_parity.py # Vendored schema + FINDINGS_SCHEMA_VERSION vs the skill's (GitHub main; skips offline)
+│   ├── vault_ops_catalogue.py # Shared loader for the parity tests (URL/path, skip vs fail)
 │   └── test_ce.py            # CE smoke tests (marker `ce`), run only by task test:ce
 ├── inputs/                   # Input files for scripts
 └── outputs/                  # Generated reports (configurable)
@@ -723,7 +725,8 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
   not define is allowed. `VAULT_OPS_RULES_JSON` (a URL or a file path) points it
   at another copy. It skips when the source is unreachable, missing or answers
   HTTP 429/5xx, and fails on any other HTTP error (a 404 means the catalogue
-  moved) or a response that is not rules.json.
+  moved) or a response that is not rules.json. That loading and skip/fail logic
+  lives in `tests/vault_ops_catalogue.py`, shared with the schema test.
 - **Severity may escalate per finding** (`finding(..., severity="High")`), as
   VT-LIC-001 does once a license has expired. Title case in markdown, lower case
   in JSON.
@@ -731,6 +734,10 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
   `schemas/findings.schema.json` from the skill and bump
   `FINDINGS_SCHEMA_VERSION` together. Tests validate every producer's output
   against it (`jsonschema` is a dev dependency only).
+  `tests/test_schema_parity.py` fails when the vendored file or
+  `FINDINGS_SCHEMA_VERSION` falls behind the skill's `main`: the file is
+  compared as parsed JSON, the version with `rules.json`'s `schema_version`.
+  `VAULT_OPS_SCHEMA_JSON` (a URL or a file path) checks against another copy.
 - **Coverage in findings.json is stricter than "Access gaps" in markdown.**
   Cluster-level denials (`sys/audit`, `sys/license/status`, …) are not listed as
   namespace gaps in the report, but they do make `coverage.complete` false. A
