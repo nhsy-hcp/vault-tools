@@ -5,6 +5,10 @@ from the skill's main branch on GitHub. A source that cannot be reached, is
 missing, or answers HTTP 429/5xx skips the calling test, so an offline run
 stays green. Any other HTTP error (a 404 means the file moved) or a response
 that is not a JSON object fails it.
+
+VAULT_OPS_PARITY_REQUIRED=1 turns every skip into a failure. CI sets it, so a
+run that could not check parity is red rather than green with the check
+silently skipped.
 """
 
 import http.client
@@ -13,12 +17,20 @@ import os
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
 BASE_URL = "https://raw.githubusercontent.com/nhsy-hcp/vault-ops-skill/main/skills/vault-ops/"
 RULES_URL = BASE_URL + "references/rules.json"
 SCHEMA_URL = BASE_URL + "schemas/findings.schema.json"
+
+
+def _unavailable(reason: str) -> NoReturn:
+    """Skip, or fail when VAULT_OPS_PARITY_REQUIRED=1 (read per call, so a test can set it)."""
+    if os.environ.get("VAULT_OPS_PARITY_REQUIRED") == "1":
+        pytest.fail(f"{reason} (VAULT_OPS_PARITY_REQUIRED=1: parity must be checked)")
+    pytest.skip(reason)
 
 
 def source(env_var: str, default_url: str) -> str:
@@ -32,10 +44,10 @@ def _fetch(url: str) -> bytes:
             return resp.read()
     except urllib.error.HTTPError as e:  # before URLError, its base class
         if e.code == 429 or e.code >= 500:
-            pytest.skip(f"{url} returned HTTP {e.code}, likely transient; point the env var at a local copy")
+            _unavailable(f"{url} returned HTTP {e.code}, likely transient; point the env var at a local copy")
         raise
     except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as e:
-        pytest.skip(f"{url} unreachable ({e!r}); point the env var at a local copy")
+        _unavailable(f"{url} unreachable ({e!r}); point the env var at a local copy")
 
 
 def load_json(src: str) -> dict:
@@ -45,7 +57,7 @@ def load_json(src: str) -> dict:
     else:
         path = Path(src)
         if not path.is_file():
-            pytest.skip(f"{path} not found")
+            _unavailable(f"{path} not found")
         raw = path.read_bytes()
     try:
         doc = json.loads(raw)

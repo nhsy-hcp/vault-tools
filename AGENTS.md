@@ -726,7 +726,10 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
   at another copy. It skips when the source is unreachable, missing or answers
   HTTP 429/5xx, and fails on any other HTTP error (a 404 means the catalogue
   moved) or a response that is not rules.json. That loading and skip/fail logic
-  lives in `tests/vault_ops_catalogue.py`, shared with the schema test.
+  lives in `tests/vault_ops_catalogue.py`, shared with the schema test. CI sets
+  `VAULT_OPS_PARITY_REQUIRED=1` (`.github/workflows/test.yml`), which turns
+  every skip into a failure, so a green run always means parity was checked. A
+  GitHub outage therefore fails CI until the job is re-run.
 - **Severity may escalate per finding** (`finding(..., severity="High")`), as
   VT-LIC-001 does once a license has expired. Title case in markdown, lower case
   in JSON.
