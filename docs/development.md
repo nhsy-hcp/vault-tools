@@ -33,6 +33,8 @@ uv run pytest tests/test_rules_parity.py tests/test_schema_parity.py
 # ...or against other copies (URL or file path)
 VAULT_OPS_RULES_JSON=path/to/rules.json VAULT_OPS_SCHEMA_JSON=path/to/findings.schema.json \
   uv run pytest tests/test_rules_parity.py tests/test_schema_parity.py
+# As CI runs them: fail instead of skip when a source can't be fetched
+VAULT_OPS_PARITY_REQUIRED=1 uv run pytest tests/test_rules_parity.py tests/test_schema_parity.py
 ```
 
 For live testing against Vault Enterprise, with optional DR and performance

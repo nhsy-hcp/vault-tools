@@ -46,4 +46,10 @@ jobs:
       # --cov-fail-under matches `task test:coverage` so the gate that guards
       # local runs also guards the remote pipeline; without it coverage could
       # regress on a merge without failing anything.
+      #
+      # VAULT_OPS_PARITY_REQUIRED makes the vault-ops parity tests fail rather
+      # than skip when they cannot fetch the skill's catalogue from GitHub, so a
+      # green run always means parity was checked (tests/vault_ops_catalogue.py).
+      env:
+        VAULT_OPS_PARITY_REQUIRED: "1"
       run: uv run pytest tests/ -v --cov=src --cov-report=term-missing --cov-report=xml --cov-fail-under=80
