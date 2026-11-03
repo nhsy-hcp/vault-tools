@@ -22,7 +22,9 @@
         "started_at": {"type": "string", "format": "date-time"},
         "finished_at": {"type": "string", "format": "date-time"},
         "duration_seconds": {"type": "number", "minimum": 0},
-        "worker_threads": {"type": "integer", "minimum": 1}
+        "worker_threads": {"type": "integer", "minimum": 1},
+        "token_namespace": {"type": ["string", "null"], "description": "Namespace the token lives in (\"/\" = root), from lookup-self; null when the token was not validated (DR secondary, sealed node). Not \"/\" means a child-namespace token: root-only cluster blocks are skipped."},
+        "platform": {"type": ["string", "null"], "enum": ["enterprise", "community", "hcp", null], "description": "Informational: \"hcp\" when the VAULT_ADDR host ends in .hashicorp.cloud (HCP Vault Dedicated), else the edition from the sys/health version (\"+ent\" = enterprise). null when the version is unknown. HCP behind custom DNS or a proxy reports as enterprise. Selects only the HCP read profile in health (seal-status read, metrics skipped); rules and scoping never depend on it."}
       }
     },
     "cluster_context": {

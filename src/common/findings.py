@@ -23,7 +23,7 @@ from types import MappingProxyType
 from typing import Any
 
 # Version of the vendored schema. Bump together with schemas/findings.schema.json.
-FINDINGS_SCHEMA_VERSION = "1.10.0"
+FINDINGS_SCHEMA_VERSION = "1.13.0"
 TOOL_NAME = "vault-tools"
 
 # Title case is what the markdown renders; the JSON uses the lower-case form.
