@@ -3,6 +3,7 @@ import logging
 import os
 from contextlib import contextmanager
 from typing import NamedTuple
+from urllib.parse import urlsplit
 
 import requests
 import urllib3
@@ -21,7 +22,39 @@ from .exceptions import (  # noqa: F401
     VaultDataError,
     VaultPermissionError,
 )
+from .utils import normalise_namespace_path
 from .vault_http import HEALTH_PARAMS, NamespacedClient
+
+# HCP Vault Dedicated endpoints (public and private) are served under this
+# domain. Vault exposes no API signal for HCP, so the host is the only one: HCP
+# behind custom DNS or a proxy reports as "enterprise". From the vault-ops skill.
+HCP_HOST_SUFFIX = ".hashicorp.cloud"
+
+
+def detect_platform(addr: str | None, version: str | None) -> str | None:
+    """run.platform: "hcp", "enterprise", "community", or None when the version is unknown.
+
+    The host decides first, because HCP Vault Dedicated also reports a +ent
+    version. Only the HCP read profile in cluster health keys on it; rules and
+    scoping never do.
+    """
+    try:
+        host = (urlsplit(addr or "").hostname or "").lower()
+    except ValueError:
+        host = ""
+    if host.endswith(HCP_HOST_SUFFIX):
+        return "hcp"
+    if not isinstance(version, str) or not version:
+        return None
+    return "enterprise" if "+ent" in version else "community"
+
+
+class RunScope(NamedTuple):
+    """Where the token lives and what it runs against, for findings.json's run block."""
+
+    # "" = root; None = the token was not validated (DR secondary, sealed node).
+    token_namespace: str | None = None
+    platform: str | None = None
 
 
 class ConnectionInfo(NamedTuple):
@@ -31,9 +64,19 @@ class ConnectionInfo(NamedTuple):
     # than assumed to be Community.
     is_enterprise: bool | None
     cluster_id: str | None
+    # Where the token lives, from lookup-self: "" for root, "admin/" for a token
+    # created in a child namespace (the only kind HCP Vault Dedicated issues).
+    token_namespace: str = ""
+    platform: str | None = None
 
 
 class VaultClient:
+    # Class-level defaults as well as instance values, so Mock(spec=VaultClient)
+    # in tests knows the attributes exist.
+    namespace: str = ""
+    token_namespace: str | None = None
+    platform: str | None = None
+
     def __init__(
         self,
         vault_addr: str = None,
@@ -43,8 +86,16 @@ class VaultClient:
         request_timeout: int = 30,
         pool_connections: int = 10,
         pool_maxsize: int = 20,
+        namespace: str | None = None,
     ):
         self.vault_addr = vault_addr or os.environ.get("VAULT_ADDR")
+        # Where the run starts (VAULT_NAMESPACE or --namespace; "" = root). A token
+        # created in a child namespace must start there or below.
+        self.namespace = normalise_namespace_path(namespace)
+        # Set by validate_connection(). None until then: a DR secondary or a sealed
+        # node is never validated, so where the token lives is unknown there.
+        self.token_namespace: str | None = None
+        self.platform: str | None = None
         self.vault_token = vault_token or os.environ.get("VAULT_TOKEN")
         self.vault_skip_verify = vault_skip_verify
         self.vault_cacert = vault_cacert or None
@@ -89,6 +140,14 @@ class VaultClient:
         self.session.mount("http://", adapter)
 
         self.logger.debug(f"VaultClient initialized with connection pool (connections={pool_connections}, maxsize={pool_maxsize})")
+
+    @property
+    def scoped(self) -> bool:
+        """The token lives in a child namespace: root-only cluster data is not this token's to read."""
+        return bool(self.token_namespace)
+
+    def run_scope(self) -> RunScope:
+        return RunScope(self.token_namespace, self.platform)
 
     @contextmanager
     def get_client(self, namespace_path: str = "", timeout: int | None = None):
@@ -135,19 +194,31 @@ class VaultClient:
                 if health_status.get("replication_dr_mode") == "secondary":
                     raise VaultConnectionError("This node is a DR secondary, which answers only unauthenticated endpoints. Run cluster-audit against it, or point VAULT_ADDR at the primary.")
 
+            # In the start namespace, so a token created in a child namespace
+            # validates; a root-namespace token may look itself up from anywhere.
+            with self.get_client(self.namespace) as ns_client:
                 try:
-                    client.read("auth/token/lookup-self")
+                    lookup = ns_client.read("auth/token/lookup-self")
                 except (vault_http.InvalidRequest, vault_http.Unauthorized, vault_http.Forbidden):
-                    raise VaultConnectionError("Vault client is not authenticated. Please check your VAULT_TOKEN environment variable and ensure the token has not expired or been revoked.") from None
+                    where = self.namespace.rstrip("/") or "/"
+                    raise VaultConnectionError(
+                        f"Vault client is not authenticated in namespace {where}. Check VAULT_TOKEN has not expired or been revoked. "
+                        "A token created in a child namespace needs VAULT_NAMESPACE (or --namespace) set to that namespace or one below it "
+                        "(e.g. VAULT_NAMESPACE=admin on HCP Vault Dedicated)."
+                    ) from None
                 except vault_http.VaultError as e:
                     raise VaultConnectionError(f"Could not verify the token: auth/token/lookup-self returned HTTP {e.status} ({e}).") from e
 
-                cluster_name = health_status.get("cluster_name", "unknown")
-                vault_version = health_status.get("version")
-                is_enterprise = "+ent" in vault_version if vault_version else None
-                cluster_id = health_status.get("cluster_id")
-                self.logger.info(f"Connected to Vault cluster: {cluster_name}")
-                return ConnectionInfo(cluster_name, vault_version, is_enterprise, cluster_id)
+            data = lookup.get("data") if isinstance(lookup, dict) and isinstance(lookup.get("data"), dict) else {}
+            namespace_path = data.get("namespace_path")
+            self.token_namespace = normalise_namespace_path(namespace_path if isinstance(namespace_path, str) else "")
+            cluster_name = health_status.get("cluster_name", "unknown")
+            vault_version = health_status.get("version")
+            is_enterprise = "+ent" in vault_version if vault_version else None
+            cluster_id = health_status.get("cluster_id")
+            self.platform = detect_platform(self.vault_addr, vault_version)
+            self.logger.info(f"Connected to Vault cluster: {cluster_name}")
+            return ConnectionInfo(cluster_name, vault_version, is_enterprise, cluster_id, self.token_namespace, self.platform)
 
         except VaultConnectionError:
             raise

@@ -49,6 +49,10 @@ def fake_vault_client(routes: dict[str, Any], vault_addr: str = "https://vault.e
 
     client = Mock()
     client.vault_addr = vault_addr
+    client.namespace = ""
+    client.token_namespace = ""
+    client.platform = None
+    client.scoped = False
     client.get_client.side_effect = get_client
     client.fake = fake
     return client

@@ -62,6 +62,10 @@ def fake_identity_client(tree: dict[str, list[str]], entities: dict[str, list[di
 
     vault = Mock()
     vault.vault_addr = "https://vault.example.com:8200"
+    vault.namespace = ""
+    vault.token_namespace = ""
+    vault.platform = None
+    vault.scoped = False
     vault.get_client.side_effect = get_client
     vault.validate_connection.return_value = ConnectionInfo("idc", "1.20.1+ent", True, "id")
     vault.calls = calls

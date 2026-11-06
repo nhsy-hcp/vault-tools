@@ -116,6 +116,8 @@ def run_cluster_audit_full(vault_client: VaultClient, output_dir: str, console: 
         finished_at=generated,
         system_lease_ttls=lease_ttls,
         license_unavailable_reason=license_reason,
+        token_namespace=vault_client.token_namespace,
+        platform=vault_client.platform,
     )
     written: list[str] = []
     write_json(path_for("cluster-health", "json"), health)

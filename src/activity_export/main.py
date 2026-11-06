@@ -9,7 +9,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
-from src.activity_export.findings import client_count, parse_activity_config, usage_findings
+from src.activity_export.findings import client_count, parse_activity_config, scope_activity, usage_findings
 from src.common import vault_http
 from src.common.audit_logger import get_audit_logger
 from src.common.exceptions import VaultPermissionError
@@ -39,9 +39,11 @@ def get_activity_data(client: VaultClient, start_date: str, end_date: str) -> di
     }
 
     logger.info(f"Fetching activity data from {start_date} to {end_date}")
+    # In the token's namespace (root: every namespace), with row paths made full.
+    token_ns = client.token_namespace or ""
     try:
-        response = client.get(path, params=params)
-        return response.get("data", {})
+        response = client.get(path, params=params, namespace=token_ns)
+        return scope_activity(response.get("data", {}), token_ns) or {}
     except VaultAPIError as e:
         logger.error(f"Vault API request failed: {e}")
         raise
@@ -70,16 +72,25 @@ FINDINGS_CSV_HEADERS = ["rule_id", "severity", "namespace", "object", "detail"]
 
 
 def _read_optional(client: VaultClient, path: str, denied: list[tuple[str, str]], errors: list[tuple[str, str]]) -> dict[str, Any] | None:
-    """A root-level read that only enriches the checks. {} on 404, None when denied or failed."""
+    """A read in the token's namespace that only enriches the checks. {} on 404, None when denied or failed.
+
+    With a child-namespace token a 403 on counters/config is not a gap (the
+    setting may be readable from the root namespace only), and a 404 there
+    means nothing to judge rather than an empty config.
+    """
+    token_ns = client.token_namespace or ""
+    config = path == "sys/internal/counters/config"
     try:
-        response = client.get(path)
-        return response.get("data", response) if isinstance(response, dict) else {}
+        response = client.get(path, namespace=token_ns)
+        payload = response.get("data", response) if isinstance(response, dict) else {}
+        return payload if config else scope_activity(payload, token_ns)
     except VaultPermissionError:
-        denied.append(("", path))
+        if not (config and token_ns):
+            denied.append((token_ns, path))
     except Exception as e:
         if isinstance(e.__cause__, vault_http.InvalidPath):
-            return {}
-        errors.append(("", f"{path}: {type(e).__name__}"))
+            return None if config and token_ns else {}
+        errors.append((token_ns, f"{path}: {type(e).__name__}"))
     return None
 
 
@@ -174,12 +185,12 @@ def assess_activity(
         current = current_month
     else:
         current = _read_optional(client, "sys/internal/counters/activity/monthly", denied, errors)
-    findings = sort_findings(usage_findings(data, current, is_enterprise, activity_log))
+    findings = sort_findings(usage_findings(data, current, is_enterprise, activity_log, client.token_namespace or ""))
     generated = datetime.now(UTC)
 
     document = build_findings_document(
         findings,
-        run=run_block(cluster_name, client.vault_addr or "", "", started, generated),
+        run=run_block(cluster_name, client.vault_addr or "", client.token_namespace or "", started, generated, token_namespace=client.token_namespace, platform=client.platform),
         cluster_context={
             "vault_version": None,
             "enterprise": is_enterprise,

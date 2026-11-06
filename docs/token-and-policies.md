@@ -72,7 +72,14 @@ only the endpoints the tool actually calls; the steps are under
 
 Things to know about the policy:
 
-- **It must live in the root namespace.** Vault ACL policies are namespace-local,
+- **Root namespace for a full review; a child namespace when that is all you can
+  reach.** On HCP Vault Dedicated, every customer token lives in `admin/`. Write
+  the same policies and mint the token with `-namespace=admin`, then set
+  `VAULT_NAMESPACE=admin`. Paths are relative to the namespace a policy is
+  written in, so no rule changes. The cluster-level checks are then skipped, by
+  design: they are for the root-namespace administrators (on HCP, HashiCorp) to
+  review, and the reports say so.
+- **Child namespaces are reached by prefix.** Vault ACL policies are namespace-local,
   and a token does *not* inherit a same-named policy defined in a child
   namespace. Child namespaces are therefore reached through namespace-prefixed
   paths (`+/sys/mounts`, `+/+/sys/mounts`, ...), where `+` matches one namespace

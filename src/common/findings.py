@@ -276,11 +276,19 @@ def run_block(
     started_at: datetime,
     finished_at: datetime,
     worker_threads: int | None = None,
+    *,
+    token_namespace: str | None = None,
+    platform: str | None = None,
 ) -> dict[str, Any]:
+    """The schema's run block. ``token_namespace`` is where the token lives ("" root,
+    None when the token was not validated); not "/" means root-only cluster data was
+    not read. ``platform`` is informational (``detect_platform``)."""
     block: dict[str, Any] = {
         "cluster_name": cluster_name,
         "vault_addr": vault_addr,
         "start_namespace": display_namespace(start_namespace),
+        "token_namespace": display_namespace(token_namespace) if token_namespace is not None else None,
+        "platform": platform,
         "started_at": iso_utc(started_at),
         "finished_at": iso_utc(finished_at),
         "duration_seconds": max(round((finished_at - started_at).total_seconds(), 1), 0.0),

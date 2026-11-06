@@ -139,10 +139,13 @@ def build_identity_findings_json(
     worker_threads: int | None = None,
     vault_version: str | None = None,
     is_enterprise: bool | None = None,
+    start_namespace: str = "",
+    token_namespace: str | None = None,
+    platform: str | None = None,
 ) -> dict[str, Any]:
     return build_findings_document(
         findings,
-        run=run_block(cluster_name, vault_addr, "", started_at, finished_at, worker_threads),
+        run=run_block(cluster_name, vault_addr, start_namespace, started_at, finished_at, worker_threads, token_namespace=token_namespace, platform=platform),
         cluster_context={
             "vault_version": vault_version,
             "enterprise": is_enterprise,

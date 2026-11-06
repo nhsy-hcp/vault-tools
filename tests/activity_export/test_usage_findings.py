@@ -108,9 +108,11 @@ class TestChurn:
 class TestAssess:
     NOW = datetime(2026, 10, 8, tzinfo=UTC)
 
-    def _client(self, responses):
+    def _client(self, responses, token_ns=""):
         client = Mock()
         client.vault_addr = "https://vault.example.com:8200"
+        client.token_namespace = token_ns
+        client.platform = None
 
         def get(path, **_kwargs):
             value = responses.get(path)

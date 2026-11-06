@@ -23,8 +23,11 @@ import requests
 from src.common import vault_http
 from src.common.exceptions import VaultPermissionError
 from src.common.findings import iso_utc, parse_time
-from src.common.vault_client import VaultClient
+from src.common.vault_client import VaultClient, detect_platform
 from src.common.vault_http import HEALTH_PARAMS, NamespacedClient, data_of, keys_of
+
+# Allowlisted sys/seal-status fields: type, unseal threshold and shares, progress, migration.
+SEAL_KEYS = ("type", "t", "n", "progress", "migration", "recovery_seal")
 
 logger = logging.getLogger(__name__)
 
@@ -116,10 +119,16 @@ def unauthenticated_only(health: dict[str, Any]) -> str | None:
 
 
 def read_health(vault_client: VaultClient) -> dict[str, Any] | None:
-    """Unauthenticated sys/health, answering for every node state. None if unreachable."""
+    """Unauthenticated sys/health, answering for every node state. None if unreachable.
+
+    Also sets the client's platform, so a sealed or DR node (never validated) still reports it.
+    """
     try:
         with vault_client.get_client() as client:
-            return client.read("sys/health", params=HEALTH_PARAMS)
+            health = client.read("sys/health", params=HEALTH_PARAMS)
+        if isinstance(health, dict) and vault_client.platform is None:
+            vault_client.platform = detect_platform(vault_client.vault_addr, health.get("version"))
+        return health
     except Exception as e:
         logger.debug(f"Could not read sys/health: {e}")
         return None
@@ -138,11 +147,23 @@ def collect_cluster_health(
     A sealed or uninitialised node answers only sys/health and sys/seal-status;
     a DR secondary answers only the unauthenticated endpoints. Both are
     reported by design, not as denials.
+
+    A token created in a child namespace (``vault_client.scoped``) cannot read
+    root-only cluster data: those blocks stay None and are neither denials nor
+    findings, and a 403 on leader or replication status is not a gap either.
+    On HCP Vault Dedicated such a token also reads sys/seal-status in its own
+    namespace (HashiCorp's managed auto-unseal); sys/metrics stays unread.
     """
     coverage = coverage or ClusterCoverage()
+    scoped = vault_client.scoped is True
     try:
         with vault_client.get_client() as client:
-            return _collect(client, health_status, coverage), coverage
+            result = _collect(client, health_status, coverage, scoped=scoped)
+        result["token_namespace"] = vault_client.token_namespace if isinstance(vault_client.token_namespace, str) else None
+        result["platform"] = vault_client.platform if isinstance(vault_client.platform, str) else None
+        if scoped and vault_client.platform == "hcp" and not result["dr_secondary"] and result["seal"] is None:
+            result["seal"] = _hcp_seal_status(vault_client, coverage)
+        return result, coverage
     except Exception as e:  # pragma: no cover - defensive: never sink the caller's run
         logger.debug(f"Cluster health collection failed: {e}")
         coverage.error("cluster health", e)
@@ -176,14 +197,33 @@ def empty_health(health: dict[str, Any]) -> dict[str, Any]:
         "audit_devices": None,
         "snapshots": None,
         "metrics": None,
+        # Where the token lives ("" root, None if not validated) and run.platform, so
+        # the reports can say why the root-only blocks are empty.
+        "token_namespace": None,
+        "platform": None,
     }
 
 
-def _optional(client: NamespacedClient, coverage: ClusterCoverage, path: str) -> dict[str, Any] | None:
+def _hcp_seal_status(vault_client: VaultClient, coverage: ClusterCoverage) -> dict[str, Any] | None:
+    """sys/seal-status read in the token's namespace, as HCP Vault Dedicated requires. A 403 or 404 is not a gap."""
+    try:
+        with vault_client.get_client(vault_client.token_namespace or "") as client:
+            seal = data_of(client.read("sys/seal-status"))
+    except (vault_http.Forbidden, vault_http.InvalidPath):
+        return None
+    except (vault_http.VaultError, requests.exceptions.RequestException) as e:
+        coverage.error("sys/seal-status", e)
+        return None
+    return {k: seal.get(k) for k in SEAL_KEYS} if isinstance(seal, dict) else None
+
+
+def _optional(client: NamespacedClient, coverage: ClusterCoverage, path: str, scoped: bool = False) -> dict[str, Any] | None:
     try:
         return data_of(client.read(path))
     except vault_http.Forbidden:
-        coverage.deny(path)
+        # A child-namespace token may be refused cluster status by design.
+        if not scoped:
+            coverage.deny(path)
     except vault_http.InvalidPath:
         pass
     except (vault_http.VaultError, requests.exceptions.RequestException) as e:
@@ -191,7 +231,7 @@ def _optional(client: NamespacedClient, coverage: ClusterCoverage, path: str) ->
     return None
 
 
-def _collect(client: NamespacedClient, health_status: dict[str, Any] | None, coverage: ClusterCoverage) -> dict[str, Any]:
+def _collect(client: NamespacedClient, health_status: dict[str, Any] | None, coverage: ClusterCoverage, scoped: bool = False) -> dict[str, Any]:
     health = health_status
     if health is None:
         try:
@@ -207,10 +247,10 @@ def _collect(client: NamespacedClient, health_status: dict[str, Any] | None, cov
     if health.get("sealed") is True or health.get("initialized") is False:
         # Every other endpoint answers 503 "Vault is sealed"; seal-status is unauthenticated.
         if (seal := _optional(client, coverage, "sys/seal-status")) is not None:
-            result["seal"] = {k: seal.get(k) for k in ("type", "t", "n", "progress", "migration", "recovery_seal")}
+            result["seal"] = {k: seal.get(k) for k in SEAL_KEYS}
         return result
 
-    if (leader := _optional(client, coverage, "sys/leader")) is not None:
+    if (leader := _optional(client, coverage, "sys/leader", scoped)) is not None:
         result["leader"] = {
             "ha_enabled": leader.get("ha_enabled"),
             "is_self": leader.get("is_self"),
@@ -218,16 +258,18 @@ def _collect(client: NamespacedClient, health_status: dict[str, Any] | None, cov
             "leader_address_present": bool(leader.get("leader_address")),
             "raft_committed_index": leader.get("raft_committed_index"),
         }
-    if (repl := _optional(client, coverage, "sys/replication/status")) is not None:
+    if (repl := _optional(client, coverage, "sys/replication/status", scoped)) is not None:
         if isinstance(repl.get("mode"), str):
             # e.g. {"mode": "unsupported"} on storage that cannot replicate (dev/inmem).
             result["replication"] = {"mode": repl["mode"]}
         else:
             result["replication"] = {kind: replication_summary(repl.get(kind) or {}) for kind in ("dr", "performance")}
             perf = result["replication"]["performance"]
-            if perf.get("mode") == "primary" and not dr_secondary:
+            if perf.get("mode") == "primary" and not dr_secondary and not scoped:
                 perf["paths_filters"] = collect_paths_filters(client, coverage, perf.get("known_secondaries") or [])
-    if dr_secondary:
+    # Root-only cluster reads: a DR secondary rejects authenticated reads, and a
+    # child-namespace token is not the root-namespace administrators' token.
+    if dr_secondary or scoped:
         return result
     result["raft"] = collect_raft(client, coverage)
     result["audit_devices"] = collect_audit_devices(client, coverage)
@@ -463,6 +505,9 @@ def fetch_system_lease_ttls(vault_client: VaultClient) -> tuple[int, int] | None
     None also when max is 0: that means "unset", and treating it as a baseline
     would make every mount an override.
     """
+    if vault_client.scoped is True:
+        # Root-only: a child-namespace token falls back to the 768h baseline by design.
+        return None
     try:
         response = vault_client.get("sys/config/state/sanitized")
         payload = response.get("data", response) if isinstance(response, dict) else {}
@@ -488,6 +533,10 @@ class ClusterReads:
     lease_ttls: tuple[int, int] | None
 
 
+# LicenseResult.unavailable_reason when the token lives in a child namespace.
+CHILD_NAMESPACE_REASON = "child namespace"
+
+
 @dataclass
 class LicenseResult:
     status: dict[str, Any] | None
@@ -508,6 +557,9 @@ def fetch_license_status(vault_client: VaultClient, is_enterprise: bool | None) 
     """
     if is_enterprise is False:
         return LicenseResult(None, None, False)
+    if vault_client.scoped is True:
+        # Root-only: not this token's to read. Not "denied", so not an access gap.
+        return LicenseResult(None, CHILD_NAMESPACE_REASON, is_enterprise)
     try:
         response = vault_client.get("sys/license/status")
     except VaultPermissionError as e:

@@ -47,7 +47,7 @@ from src.namespace_audit.main import NamespaceAuditor
 # distribution is not installed and importlib.metadata cannot be the only
 # source. The literal is the fallback for that mode and is pinned to
 # pyproject.toml by a test, so the two cannot drift.
-_FALLBACK_VERSION = "3.2.5"
+_FALLBACK_VERSION = "3.3.0"
 
 try:
     __version__ = importlib.metadata.version("vault-tools")
@@ -58,7 +58,7 @@ except importlib.metadata.PackageNotFoundError:
 EXIT_FATAL = 1
 
 
-def create_vault_client(logger) -> VaultClient:
+def create_vault_client(logger, namespace: str | None = None) -> VaultClient:
     """Create and validate Vault client from environment variables.
 
     Args:
@@ -100,7 +100,9 @@ def create_vault_client(logger) -> VaultClient:
         )
         sys.exit(1)
 
-    return VaultClient(vault_addr, vault_token, vault_skip_verify=vault_skip_verify, vault_cacert=vault_cacert)
+    # The flag wins over VAULT_NAMESPACE, as in the vault CLI. "" or "/" is root.
+    start_namespace = namespace if namespace is not None else os.environ.get("VAULT_NAMESPACE", "")
+    return VaultClient(vault_addr, vault_token, vault_skip_verify=vault_skip_verify, vault_cacert=vault_cacert, namespace=start_namespace)
 
 
 def validate_dates(start_date: str, end_date: str, logger) -> None:
@@ -190,6 +192,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=argparse.SUPPRESS,
         help="Output directory for reports (overrides VAULT_TOOLS_OUTPUT_DIR env var). Accepted before or after the subcommand.",
+    )
+
+    # Every Vault-backed subcommand: where the run starts.
+    namespace_opts = argparse.ArgumentParser(add_help=False)
+    namespace_opts.add_argument(
+        "--namespace",
+        type=str,
+        default=None,
+        help="Namespace to start in (overrides VAULT_NAMESPACE; default root). Needed for a token created in a child namespace, e.g. admin on HCP Vault Dedicated.",
     )
 
     parser = argparse.ArgumentParser(
@@ -282,7 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser_full = subparsers.add_parser(
         "full-audit",
         description="Run every audit and export (cluster, namespace, identity, activity, entity) and write a combined report.",
-        parents=[common, gating, threshold_opts, walk_opts, policy_opts, window_opts],
+        parents=[common, namespace_opts, gating, threshold_opts, walk_opts, policy_opts, window_opts],
     )
     parser_full.add_argument("--list-entities", action="store_true", help="Also write identity entity names, metadata and aliases (confidential).")
     # cluster-audit always runs: it supplies the cluster name and node state.
@@ -293,20 +304,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Namespace Audit command
-    subparsers.add_parser("namespace-audit", description="Audit Vault namespaces.", parents=[common, gating, threshold_opts, walk_opts, policy_opts])
+    subparsers.add_parser("namespace-audit", description="Audit Vault namespaces.", parents=[common, namespace_opts, gating, threshold_opts, walk_opts, policy_opts])
 
     # Cluster Audit command
     subparsers.add_parser(
         "cluster-audit",
         description="Audit cluster health: seal, HA, replication, raft, audit devices, snapshots, metrics.",
-        parents=[common, gating, threshold_opts],
+        parents=[common, namespace_opts, gating, threshold_opts],
     )
 
     # Identity Audit command
     parser_identity = subparsers.add_parser(
         "identity-audit",
         description="Audit identity entities: orphans, direct policies, disabled entities, duplicate aliases.",
-        parents=[common, gating, walk_opts],
+        parents=[common, namespace_opts, gating, walk_opts],
     )
     parser_identity.add_argument(
         "--list",
@@ -320,11 +331,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "activity-export",
         description="Export activity data and check client usage patterns (VT-CLI-*).",
-        parents=[common, gating, window_opts],
+        parents=[common, namespace_opts, gating, window_opts],
     )
 
     # Entity Export command
-    subparsers.add_parser("entity-export", description="Export entity data.", parents=[common, window_opts])
+    subparsers.add_parser("entity-export", description="Export entity data.", parents=[common, namespace_opts, window_opts])
 
     # Diff command: compares two findings.json files, no Vault connection.
     parser_diff = subparsers.add_parser(
@@ -362,7 +373,7 @@ def _cmd_namespace_audit(args: argparse.Namespace, vault_client: VaultClient, gl
         names_only=args.names_only,
         thresholds=_thresholds(args),
     )
-    return _gate(auditor.audit_cluster(), args)
+    return _gate(auditor.audit_cluster(vault_client.namespace), args)
 
 
 def _cmd_cluster_audit(args: argparse.Namespace, vault_client: VaultClient, global_config: GlobalConfig, logger) -> int:
@@ -518,7 +529,7 @@ def main() -> None:
         _run_diff_command(args, global_config, logger)
         return
 
-    vault_client = create_vault_client(logger)
+    vault_client = create_vault_client(logger, getattr(args, "namespace", None))
 
     try:
         exit_code = COMMANDS[args.command](args, vault_client, global_config, logger)

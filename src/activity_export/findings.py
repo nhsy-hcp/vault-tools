@@ -38,6 +38,61 @@ def _namespace(path: Any) -> str:
     return (path or "").strip().strip("/")
 
 
+def _activity_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every namespace row of an activity response: by_namespace, months[].namespaces, months[].new_clients.namespaces."""
+    rows = [r for r in payload.get("by_namespace") or [] if isinstance(r, dict)]
+    for m in payload.get("months") or []:
+        if isinstance(m, dict):
+            rows += [r for r in m.get("namespaces") or [] if isinstance(r, dict)]
+            if isinstance(m.get("new_clients"), dict):
+                rows += [r for r in m["new_clients"].get("namespaces") or [] if isinstance(r, dict)]
+    return rows
+
+
+def activity_paths_are_full(payload: dict[str, Any] | None, token_ns: str) -> bool:
+    """True when every row already holds a full path inside ``token_ns`` (what Vault returns).
+
+    A root row or one outside the subtree means the rows are relative. Decided once
+    per response, so a descendant named like the token namespace (``admin/admin/``)
+    is never merged into ``admin/``. From the vault-ops skill.
+    """
+    token = _namespace(token_ns)
+    if not payload or not token:
+        return False
+    paths = [_namespace(r.get("namespace_path") if isinstance(r.get("namespace_path"), str) else "") for r in _activity_rows(payload)]
+    return bool(paths) and all(p == token or p.startswith(f"{token}/") for p in paths)
+
+
+def scope_activity(payload: dict[str, Any] | None, token_ns: str) -> dict[str, Any] | None:
+    """Copy of an activity response read in ``token_ns`` with every ``namespace_path`` full (no-op at root)."""
+    token = _namespace(token_ns)
+    if not payload or not token:
+        return payload
+    relative = not activity_paths_are_full(payload, token)
+
+    def full(path: Any) -> str:
+        p = _namespace(path if isinstance(path, str) else "")
+        if relative:
+            p = f"{token}/{p}" if p else token
+        return f"{p}/" if p else ""
+
+    def rows(items: Any) -> list[Any]:
+        return [{**r, "namespace_path": full(r.get("namespace_path"))} if isinstance(r, dict) else r for r in items or []]
+
+    def month(m: Any) -> Any:
+        if not isinstance(m, dict):
+            return m
+        out = {**m, "namespaces": rows(m.get("namespaces"))}
+        if isinstance(m.get("new_clients"), dict):
+            out["new_clients"] = {**m["new_clients"], "namespaces": rows(m["new_clients"].get("namespaces"))}
+        return out
+
+    scoped = {**payload, "by_namespace": rows(payload.get("by_namespace"))}
+    if "months" in payload:
+        scoped["months"] = [month(m) for m in payload.get("months") or []]
+    return scoped
+
+
 def parse_activity_config(data: dict[str, Any] | None) -> dict[str, Any] | None:
     """Allowlisted counters/config fields. ``recording`` is None for an unknown value."""
     if data is None:
@@ -61,8 +116,14 @@ def usage_findings(
     current: dict[str, Any] | None = None,
     enterprise: bool | None = False,
     activity_log: dict[str, Any] | None = None,
+    token_ns: str = "",
 ) -> list[Finding]:
-    """Client-count anti-patterns for the requested window, falling back to the month in progress."""
+    """Client-count anti-patterns for the requested window, falling back to the month in progress.
+
+    ``token_ns`` is where the token lives. With a child-namespace token it is the
+    top of what the activity log reports, so VT-CLI-004 judges it as the root.
+    Row paths must already be full (``scope_activity``).
+    """
     findings: list[Finding] = []
     if activity_log and activity_log.get("recording") is False:
         findings.append(
@@ -101,16 +162,18 @@ def usage_findings(
                     source=source,
                 )
             )
-    root = sum(client_count(row.get("counts")) for row in rows if not _namespace(row.get("namespace_path")))
+    top = _namespace(token_ns)
+    root = sum(client_count(row.get("counts")) for row in rows if _namespace(row.get("namespace_path")) == top)
     if enterprise and total >= CLIENT_RULE_MIN_CLIENTS and root / total > ROOT_NAMESPACE_SHARE_WARNING:
+        where = f"the `{top}/` namespace (the top namespace this token sees)" if top else "the root namespace"
         findings.append(
             finding(
                 "VT-CLI-004",
-                "",
+                f"{top}/" if top else "",
                 "namespace",
                 None,
                 None,
-                f"{root} of {total} clients ({_share(root, total)}) are in the root namespace — tenants share one policy and identity space.",
+                f"{root} of {total} clients ({_share(root, total)}) are in {where} — tenants share one policy and identity space.",
                 root_clients=root,
                 clients=total,
                 namespaces_reported=len(rows),
