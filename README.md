@@ -32,6 +32,12 @@ uv run vault-tools full-audit
 # → outputs/{cluster-name}-{cluster-id-8}-full-audit-{YYYYMMDD}.md
 ```
 
+For a token created in a child namespace (on HCP Vault Dedicated, every
+customer token lives in `admin/`), write the policies and mint the token there
+with `-namespace=admin`, and set `VAULT_NAMESPACE=admin` (or pass `--namespace
+admin`). The audit then covers that subtree, and the cluster-level checks only a
+root-namespace token can read are skipped: they are not reported as gaps.
+
 Or keep the address and token in `.env` (copy [`.env.example`](.env.example))
 and run `source .env` first. To also assess what each ACL and Sentinel policy
 grants, attach the optional add-on policies: see

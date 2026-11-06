@@ -50,7 +50,7 @@ class Harness:
         auditor = MagicMock()
         auditor.data.auth_methods = {"": {}, "team-a": {}}
 
-        def namespace_audit():
+        def namespace_audit(start_namespace=""):
             self.calls.append("namespace-audit")
             if "namespace" in self.failures:
                 raise self.failures["namespace"]
@@ -75,6 +75,10 @@ class Harness:
         self.args: dict[str, tuple] = {}
         vault = Mock()
         vault.vault_addr = "https://vault.example.com:8200"
+        vault.namespace = ""
+        vault.token_namespace = ""
+        vault.platform = None
+        vault.scoped = False
         with (
             patch("src.full_audit.main.run_cluster_audit_full", side_effect=step("cluster-audit", self.cluster)),
             patch("src.full_audit.main.NamespaceAuditor", return_value=auditor) as auditor_cls,

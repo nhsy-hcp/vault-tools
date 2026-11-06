@@ -85,6 +85,9 @@ def run_identity_audit_full(
         worker_threads=workers,
         vault_version=info.vault_version,
         is_enterprise=info.is_enterprise,
+        start_namespace=vault_client.namespace,
+        token_namespace=info.token_namespace,
+        platform=info.platform,
     )
 
     os.makedirs(output_dir, exist_ok=True)

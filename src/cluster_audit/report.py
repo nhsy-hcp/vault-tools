@@ -27,6 +27,7 @@ _NOT_READ = "_Not read — see **Cluster-level reads** under the access gaps._"
 _LICENSE_UNAVAILABLE_NOTES = {
     "denied": "_License data unavailable — the token was denied read on `sys/license/status`._",
     "unexpected response": "_License data unavailable — `sys/license/status` returned a response with no `autoloaded` license._",
+    "child namespace": "_Not reviewed — the token lives in a child namespace, so the licence is for the root-namespace administrators to review (on HCP Vault Dedicated, HashiCorp manages it)._",
 }
 
 
@@ -242,6 +243,29 @@ def _render_metrics(metrics: dict[str, Any] | None, thresholds: Thresholds = DEF
     return f"Gauges from **the queried node only**{when} — never cluster-wide totals.\n\n" + md_table(["Metric", "Value", "Notes"], rows)
 
 
+def scoped_note(health: dict[str, Any] | None) -> str:
+    """Why the root-only blocks are empty for a child-namespace token; "" for a root token.
+
+    Never worded as missing permissions: the token is not the root-namespace
+    administrators' token, and on HCP Vault Dedicated no customer token is.
+    """
+    token_ns = (health or {}).get("token_namespace")
+    if not token_ns:
+        return ""
+    where = f"`{token_ns.rstrip('/')}/`"
+    if (health or {}).get("platform") == "hcp":
+        return (
+            f"_Not reviewed: the token lives in the child namespace {where}, and HCP Vault Dedicated exposes the licence, raft, "
+            "lease TTLs, audit devices, snapshots and node metrics to no customer token. HashiCorp manages them; audit log "
+            "streaming and snapshots (production tier) are configured in the HCP portal._"
+        )
+    return (
+        f"_Not reviewed: the token lives in the child namespace {where}, so the licence, raft, lease TTLs, audit devices, "
+        "snapshots, node metrics and paths filters are root-only and were not read. They are for the root-namespace "
+        "administrators to review, with a root-namespace token._"
+    )
+
+
 def render_cluster_health(health: dict[str, Any] | None, heading_level: int = 2, thresholds: Thresholds = DEFAULT_THRESHOLDS) -> str:
     """The cluster health section; empty string when nothing was collected.
 
@@ -260,9 +284,12 @@ def render_cluster_health(health: dict[str, Any] | None, heading_level: int = 2,
         parts.append(seal)
     if reason in ("sealed", "uninitialized"):
         return "\n\n".join(parts)
+    parts += [f"{sub} Replication", _render_replication(health.get("replication"))]
+    if note := scoped_note(health):
+        # Raft, audit devices, snapshots and metrics are root-only: not read, by design.
+        parts.append(note)
+        return "\n\n".join(parts)
     parts += [
-        f"{sub} Replication",
-        _render_replication(health.get("replication")),
         f"{sub} Integrated storage (raft)",
         _render_raft(health.get("raft"), bool(health.get("dr_secondary"))),
     ]
@@ -320,13 +347,15 @@ def build_cluster_findings_json(
     finished_at: datetime,
     system_lease_ttls: tuple[int, int] | None = None,
     license_unavailable_reason: str | None = None,
+    token_namespace: str | None = None,
+    platform: str | None = None,
 ) -> dict[str, Any]:
     denied = [("", scope) for scope in coverage.denied]
     if license_unavailable_reason == "denied":
         denied.append(("", "sys/license/status"))
     return build_findings_document(
         findings,
-        run=run_block(cluster_name, vault_addr, "", started_at, finished_at),
+        run=run_block(cluster_name, vault_addr, "", started_at, finished_at, token_namespace=token_namespace, platform=platform),
         cluster_context={
             "vault_version": health.get("version"),
             "enterprise": health.get("enterprise"),

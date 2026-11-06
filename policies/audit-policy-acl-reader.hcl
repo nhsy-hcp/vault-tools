@@ -9,7 +9,8 @@
 #
 # Reading bodies lets the token reconstruct the cluster's access model, which is
 # why this is separate from policies/audit-policy.hcl. Attach it only for a policy review,
-# alongside policies/audit-policy.hcl, in the ROOT namespace, and drop it afterwards:
+# alongside policies/audit-policy.hcl, in the same namespace (ROOT for a full
+# review, or the child namespace the token lives in), and drop it afterwards:
 #   vault policy write vault-tools-acl-reader policies/audit-policy-acl-reader.hcl
 #
 # Namespace-local rules repeat per nesting level ("+" = exactly one segment);

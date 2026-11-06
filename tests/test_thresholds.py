@@ -118,6 +118,10 @@ def mock_vault_client():
 
     client = Mock(spec=VaultClient)
     client.vault_addr = "https://vault.example.com:8200"
+    client.namespace = ""
+    client.token_namespace = ""
+    client.platform = None
+    client.scoped = False
     return client
 
 

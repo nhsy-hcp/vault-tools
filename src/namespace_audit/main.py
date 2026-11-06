@@ -56,6 +56,9 @@ BUILTIN_ACL_POLICIES = frozenset({"default", "root", "default-ceiling"})
 # policies in this namespace" (both 404). Vault 1.x Community says
 # "unsupported path"; Vault 2.x Community says "enterprise-only feature".
 SENTINEL_UNSUPPORTED_MARKERS = ("unsupported path", "enterprise-only feature")
+# 401 body for a licensed feature the licence lacks (e.g. Sentinel on the HCP
+# Vault Dedicated Development tier): the same as a build without Sentinel.
+SENTINEL_NOT_LICENSED_MARKERS = ("feature not enabled",)
 
 
 class Constants:
@@ -165,6 +168,9 @@ class AuditData:
     # From the "+ent" suffix on the version. None when the version is missing,
     # so the edition is unknown rather than assumed to be Community.
     is_enterprise: bool | None = None
+    # Where the token lives ("" root, None if not validated) and run.platform.
+    token_namespace: str | None = None
+    platform: str | None = None
     # The "autoloaded" sub-dict from sys/license/status, or None when the
     # endpoint is absent (Community Edition) or unreadable.
     license_status: dict[str, Any] | None = None
@@ -300,6 +306,8 @@ class NamespaceAuditor:
             self.data.vault_version = info.vault_version
             self.data.cluster_id = info.cluster_id
             self.data.is_enterprise = info.is_enterprise
+            self.data.token_namespace = info.token_namespace
+            self.data.platform = info.platform
             self.console.print(f"[green]✓[/green] Connected to cluster: [bold]{cluster_name}[/bold]")
 
             if self.cluster_reads is not None and self.cluster_reads.license is not None:
@@ -586,13 +594,17 @@ class NamespaceAuditor:
         """
         try:
             names = client.list(f"sys/policies/{kind}")["data"]["keys"] or []
-        except vault_http.InvalidPath as e:
-            if any(marker in str(e).lower() for marker in SENTINEL_UNSUPPORTED_MARKERS):
+        except (vault_http.InvalidPath, vault_http.Unauthorized) as e:
+            markers = SENTINEL_UNSUPPORTED_MARKERS if isinstance(e, vault_http.InvalidPath) else SENTINEL_NOT_LICENSED_MARKERS
+            if any(marker in str(e).lower() for marker in markers):
                 with self.thread_lock:
                     first = self.sentinel_supported is None
                     self.sentinel_supported = False
                 if first:
                     logger.info("Sentinel policy endpoints are unavailable on this cluster; skipping EGP/RGP collection")
+                return {}
+            if isinstance(e, vault_http.Unauthorized):
+                self.stats.increment_errors(display_path, f"sentinel {kind.upper()} policies: {e}")
                 return {}
             # An empty LIST also 404s. Nothing to collect, but the endpoint is there.
             logger.debug(f"No sentinel {kind.upper()} policies in {display_path}")

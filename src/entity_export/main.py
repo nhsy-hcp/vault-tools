@@ -51,7 +51,9 @@ def get_entity_export_data(client: VaultClient, start_date: str, end_date: str) 
 
     logger.info(f"Fetching entity export data from {start_date} to {end_date}")
     try:
-        return client.get(ACTIVITY_EXPORT_PATH, params=params)
+        # In the token's namespace (root: every namespace), like the activity reads.
+        token_ns = client.token_namespace if isinstance(client.token_namespace, str) else ""
+        return client.get(ACTIVITY_EXPORT_PATH, params=params, namespace=token_ns)
     except VaultPermissionError as e:
         raise VaultPermissionError(
             f"Access denied to {ACTIVITY_EXPORT_PATH}. Vault root-protects this endpoint, so the token needs "

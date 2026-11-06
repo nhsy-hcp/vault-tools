@@ -14,6 +14,10 @@ def mock_vault_client():
     # Set explicitly: vault_addr is assigned in VaultClient.__init__, so a
     # spec'd Mock does not carry it. The findings document records it.
     client.vault_addr = "https://vault.example.com:8200"
+    client.namespace = ""
+    client.token_namespace = ""
+    client.platform = None
+    client.scoped = False
 
     # Create a mock context manager for get_client
     mock_context_manager = MagicMock()

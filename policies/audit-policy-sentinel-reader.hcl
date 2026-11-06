@@ -10,7 +10,8 @@
 # body hash, import names and the flagged rule IDs are written out. Policy source
 # never reaches an output file.
 #
-# Attach it alongside policies/audit-policy.hcl, in the ROOT namespace:
+# Attach it alongside policies/audit-policy.hcl, in the same namespace (ROOT
+# for a full review, or the child namespace the token lives in):
 #   vault policy write vault-tools-sentinel-reader policies/audit-policy-sentinel-reader.hcl
 #
 # Namespace-local rules repeat per nesting level ("+" = exactly one segment);

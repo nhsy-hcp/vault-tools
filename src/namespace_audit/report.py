@@ -1167,7 +1167,7 @@ def build_findings_json(
     finished = stats.end_time or generated
     return build_findings_document(
         findings,
-        run=run_block(cluster_name, vault_addr, start_namespace, started, finished, worker_threads or None),
+        run=run_block(cluster_name, vault_addr, start_namespace, started, finished, worker_threads or None, token_namespace=data.token_namespace, platform=data.platform),
         cluster_context={
             "vault_version": data.vault_version,
             "enterprise": data.is_enterprise,

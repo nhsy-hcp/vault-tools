@@ -153,7 +153,7 @@ def run_full_audit(
                 cluster_reads=cluster.reads,
                 thresholds=thresholds,
             )
-            document = auditor.audit_cluster()
+            document = auditor.audit_cluster(vault_client.namespace)
             if document is None:
                 return StepResult("namespace-audit", "failed", "the namespace walk failed — see the message above.")
             namespaces = sorted(auditor.data.auth_methods) or None
@@ -214,7 +214,7 @@ def run_full_audit(
     policy_bodies = next((r.extra["policy_bodies"] for r in results if "policy_bodies" in r.extra), {})
     merged = merge_documents(
         documents,
-        run=run_block(cluster.cluster_name, vault_client.vault_addr, "", started, finished, workers),
+        run=run_block(cluster.cluster_name, vault_client.vault_addr, vault_client.namespace, started, finished, workers, token_namespace=vault_client.token_namespace, platform=vault_client.platform),
         cluster_context={**cluster.document["cluster_context"], "sentinel": sentinel, "policy_bodies": policy_bodies},
         tool_version=get_tool_version(),
     )

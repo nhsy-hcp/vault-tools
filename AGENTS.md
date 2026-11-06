@@ -139,6 +139,7 @@ from the skill's catalogue. The skill lives at
 │   ├── findings_diff/        # diff, including the no-argument auto-pick
 │   ├── entity_export/        # Package marker only; tests live in activity_export/
 │   ├── test_cli_parsing.py   # Argparse-level tests and main() exit codes, no Vault required
+│   ├── test_child_namespace.py # Child-namespace tokens, HCP profile, activity scoping, run block
 │   ├── test_no_hvac.py       # Guard: hvac is neither imported nor declared
 │   ├── test_seed_vault.py    # The seeder's VaultAPI and skip checks (loaded by path)
 │   ├── test_thresholds.py    # --lease-count-warning / --snapshot-grace and the Thresholds object
@@ -289,6 +290,7 @@ export VAULT_ADDR="https://vault.example.com"
 export VAULT_TOKEN="your-vault-token"
 export VAULT_CACERT="/path/to/ca.pem"  # Optional: PEM CA bundle
 export VAULT_SKIP_VERIFY="true"        # Optional: no verification; wins over VAULT_CACERT
+export VAULT_NAMESPACE="admin"         # Optional: start namespace (child-namespace tokens, e.g. HCP)
 ```
 
 TLS settings are read in `main.py::create_vault_client` and become
@@ -306,13 +308,54 @@ export VAULT_TOOLS_AUDIT_DIR="custom/audit"     # Default: "outputs/audit"
 export VAULT_TOOLS_DEBUG="true"                 # Default: false
 ```
 
-These three are the complete set. Everything else is a CLI flag — `--workers`,
+These three, plus `VAULT_NAMESPACE` above, are the complete set. Everything
+else is a CLI flag — `--namespace` (the `namespace_opts` parent parser on every
+Vault-backed subcommand; it wins over `VAULT_NAMESPACE`), `--workers`,
 `--output-dir`, `--no-sentinel`, `--start-date`/`--end-date`, `--names-only`,
 `--list-entities` (`--list` on identity-audit), `--skip`/`--only`, `--fail-on`/`--fail-on-gaps`,
 `--lease-count-warning`/`--snapshot-grace` (the `threshold_opts` parent parser
 on cluster-, namespace- and full-audit). Rate limiting uses
 `NamespaceAuditor`'s constructor defaults (batch 100, sleep 3s) and is not
 currently exposed on the CLI.
+
+## Child-namespace tokens and HCP Vault Dedicated
+
+Ported from the vault-ops skill (commit b17ba99); the skill is the source of truth.
+
+- **`VaultClient.namespace`** is where the run starts (`VAULT_NAMESPACE` or
+  `--namespace`, normalised to `admin/`; `""` is root). `lookup-self` is sent
+  with that namespace header, so a token created there validates. A 403 names
+  `VAULT_NAMESPACE`. The default stays root, as in the skill, even though Vault
+  lets a child token look itself up from root: the walk then starts at root, is
+  denied, and coverage says so.
+- **`VaultClient.token_namespace`** comes from `lookup-self`'s `namespace_path`
+  (`""` root, `None` until validated: a DR secondary or sealed node never is).
+  `VaultClient.scoped` is `bool(token_namespace)`. Collectors read it from the
+  client, so no signature grew a `token_ns` argument.
+- **Scoped means root-only cluster data is skipped, never denied.** Raft, audit
+  devices, snapshots, metrics, paths filters (`collector._collect`), the licence
+  (`fetch_license_status` → `CHILD_NAMESPACE_REASON`) and lease TTLs
+  (`fetch_system_lease_ttls` → `None`, so VT-MOUNT-002 uses the 768h fallback)
+  are not read, and a 403 on `sys/leader` or `sys/replication/status` is not a
+  gap. `coverage.complete` stays true, and the reports say why the blocks are empty
+  (`cluster_audit/report.py::scoped_note`) — never as missing permissions.
+- **`detect_platform`** (`vault_client.py`): `hcp` when the `VAULT_ADDR` host ends
+  in `.hashicorp.cloud`, else `enterprise`/`community` from `+ent`, else `None`.
+  Informational, except one read profile: a scoped token on HCP also reads
+  `sys/seal-status` in its own namespace (403/404 not a gap); metrics stay unread.
+  HCP behind custom DNS reports as `enterprise`. Never infer HCP from `admin/`.
+- **Activity is read in the token's namespace** (activity-export, identity-audit's
+  VT-ID-004, entity-export), and `activity_export/findings.py::scope_activity`
+  makes row paths full. `activity_paths_are_full` decides once per response
+  whether rows are already full, so `admin/admin/` is never merged into `admin/`.
+  A scoped 403 on `counters/config` is not a gap, and a 404 is nothing to judge.
+  VT-CLI-004 judges the token's namespace as the top of the tree.
+- **`run.token_namespace` and `run.platform`** are in every findings.json
+  (`run_block(..., token_namespace=, platform=)`), and the health block carries
+  both too, so the pure renderers can word the note. They are optional in the schema.
+- **Policies are written in the token's namespace**, with the same files and the same
+  capabilities: paths are relative to the namespace a policy lives in. Only the
+  comments in `policies/*.hcl` changed.
 
 ## Architecture & Design Patterns
 
@@ -551,6 +594,9 @@ block as the auth and engine collectors: `LIST sys/policies/{egp,rgp}`, then
   `_mark_sentinel_supported()`, which makes `False` sticky — the flag describes
   the cluster, so a later success is not evidence against it, and letting `True`
   win a race would restart the probing the flag exists to stop.
+- **A 401 with `SENTINEL_NOT_LICENSED_MARKERS` (`"feature not enabled"`) is
+  also `unsupported`**: an Enterprise licence without Sentinel, such as the HCP
+  Vault Dedicated Development tier. Any other 401 is a per-namespace error.
 - **The `SENTINEL_UNSUPPORTED_MARKERS` string check is a deliberate heuristic.**
   Vault returns 404 both for "this build has no Sentinel" and for "this namespace
   has zero policies", and only the error body separates them: `"unsupported
@@ -594,8 +640,9 @@ delegates to `cluster_audit.collector.fetch_license_status`, which
   a success settles it as Enterprise. A 404 on a known-Enterprise cluster is an
   error, not a Community signal.
 - **Every failure keeps its reason** on `AuditData.license_unavailable_reason`:
-  `"denied"`, `"unexpected response"` or `"error: <message>"`. The License
-  section words its note from it, so a 5xx is not blamed on token permissions.
+  `"denied"`, `"unexpected response"`, `"error: <message>"` or `"child
+  namespace"` (a scoped token: not read, by design). The License section words
+  its note from it, so a 5xx is not blamed on token permissions.
 - **A denial is not an access gap.** It is deliberately not passed to
   `increment_forbidden`: that list means "the tree is incomplete below this
   namespace", and a cluster-level read says nothing about coverage. Access
@@ -778,11 +825,11 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
   cluster-audit read (health, license, lease TTLs) in as a `ClusterReads`
   through `NamespaceAuditor(cluster_reads=...)`, so no cluster endpoint is read
   twice.
-- **One finding per dead secondary.** A peer with no heartbeat since the
-  primary started is VT-REPL-002 (Low) and is left out of VT-HLTH-002's
-  disconnected list. The skill reports both. The trade-off: after a primary
-  restart, a production secondary that is really down looks the same and is
-  now reported only at Low.
+- **A dead secondary is reported twice, as in the skill.** A peer with no
+  heartbeat since the primary started is VT-REPL-002 (Low), and VT-HLTH-002
+  (Medium) still lists it in `disconnected_peers`. vault-tools used to drop it
+  from VT-HLTH-002; that hid a production secondary that is really down after a
+  primary restart at Low.
 - **Thresholds are the skill's heuristics** (100,000 leases, 60s lag, 2s skew,
   25h snapshot grace, `MIN_SUPPORTED_VERSION` 1.19, which goes stale). None has
   been measured against the reference cluster yet.
@@ -861,7 +908,7 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
 ### Activity usage checks (`src/activity_export/findings.py`)
 
 - Run on every `activity-export` (and `full-audit`) over the data already
-  exported. Two extra root reads: `sys/internal/counters/config` always, and
+  exported. Two extra reads, in the token's namespace: `sys/internal/counters/config` always, and
   `activity/monthly` only when the window reaches the current month. Either
   failing leaves the checks unjudged and is recorded; the export never fails
   because of them.

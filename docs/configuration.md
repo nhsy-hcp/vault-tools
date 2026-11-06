@@ -9,7 +9,15 @@ export VAULT_ADDR="https://vault.example.com"
 export VAULT_TOKEN="your-vault-token"
 export VAULT_CACERT="/path/to/ca.pem"  # Optional: PEM CA bundle for a private CA
 export VAULT_SKIP_VERIFY="true"        # Optional: no TLS verification (throwaway servers only)
+export VAULT_NAMESPACE="admin"         # Optional: start namespace (default root)
 ```
+
+`VAULT_NAMESPACE` (or `--namespace`, which wins) is where the run starts. Set it
+for a token created in a child namespace, such as `admin` on HCP Vault
+Dedicated. The run then covers that subtree only. The cluster-level reads
+(licence, raft, lease TTLs, audit devices, snapshots, metrics, paths filters)
+are root-only, so they are skipped rather than reported as gaps, and
+findings.json records `run.token_namespace` and `run.platform`.
 
 TLS works as it does in the `vault` CLI. With neither variable set the server
 certificate is checked against the system trust store. `VAULT_CACERT` checks it
@@ -28,7 +36,8 @@ export VAULT_TOOLS_AUDIT_DIR="custom/audit"     # Audit log directory
 export VAULT_TOOLS_DEBUG="true"                 # Enable debug logging
 ```
 
-Everything else is a CLI flag — see `python main.py <command> --help`. Worker
+Everything else is a CLI flag — see `python main.py <command> --help`. The start
+namespace is `--namespace`. Worker
 count is `--workers`, output directory is `--output-dir` (which overrides
 `VAULT_TOOLS_OUTPUT_DIR`), the export window is `--start-date`/`--end-date` (both or neither; neither
 means the last 12 calendar months), full-audit's steps are chosen with

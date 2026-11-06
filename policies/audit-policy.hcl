@@ -26,7 +26,16 @@
 # plus five levels of nesting. A deeper hierarchy needs a further "+/" rule per
 # extra level; levels deeper than the tree in use are harmless.
 #
-# Assign this policy to a token created in the ROOT namespace.
+# Paths are relative to the namespace the policy is written in: "root" above
+# means that namespace. Assign this policy to a token created in the ROOT
+# namespace for a full review:
+#   vault policy write vault-tools-audit policies/audit-policy.hcl
+#   vault token create -policy=vault-tools-audit -ttl=1h -orphan
+# Or, where only a child namespace is reachable (e.g. admin on HCP Vault
+# Dedicated), add -namespace=<ns> to both commands and set VAULT_NAMESPACE=<ns>
+# (or --namespace) for vault-tools. The rules marked "against the root
+# namespace" below are then skipped by the tool, not denied, and no capability
+# here needs to change.
 
 # --- Token self-inspection ---------------------------------------------------
 # validate_connection() checks the token with a GET auth/token/lookup-self and

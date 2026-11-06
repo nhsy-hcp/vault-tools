@@ -18,7 +18,7 @@ from typing import Any
 
 import requests
 
-from src.activity_export.findings import client_count
+from src.activity_export.findings import client_count, scope_activity
 from src.cluster_audit.collector import sanitise_error
 from src.common import vault_http
 from src.common.vault_client import VaultClient
@@ -73,7 +73,7 @@ def _api_namespace(stored: str) -> str:
 
 
 def discover_namespaces(vault_client: VaultClient, workers: int = 4, coverage: IdentityCoverage | None = None) -> list[str]:
-    """The namespace tree from root, using only LIST sys/namespaces.
+    """The namespace tree from the start namespace (root by default), using only LIST sys/namespaces.
 
     Used when identity-audit runs on its own; full-audit passes the list the
     namespace walk already found instead. Deliberately not the walk itself:
@@ -96,7 +96,8 @@ def discover_namespaces(vault_client: VaultClient, workers: int = 4, coverage: I
             return []
         return [f"{ns}/{name.strip('/')}" if ns else name.strip("/") for name in keys]
 
-    found, level = [""], [""]
+    start = vault_client.namespace.strip("/")
+    found, level = [start], [start]
     while level:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             level = sorted(c for result in pool.map(children, level) for c in result if c not in found)
@@ -185,16 +186,20 @@ def collect_entities(
 
 
 def read_activity(vault_client: VaultClient, path: str, coverage: IdentityCoverage) -> dict[str, Any] | None:
-    """Activity-log read at root. {} when nothing is recorded; None when denied or failed."""
+    """Activity-log read in the token's namespace (root: every namespace), row paths made full.
+
+    {} when nothing is recorded; None when denied or failed.
+    """
+    token_ns = vault_client.token_namespace or ""
     try:
-        with vault_client.get_client() as client:
-            return vault_http.data_of(client.read(path))
+        with vault_client.get_client(token_ns) as client:
+            return scope_activity(vault_http.data_of(client.read(path)), token_ns)
     except vault_http.Forbidden:
-        coverage.denied.append(("", path))
+        coverage.denied.append((token_ns.rstrip("/"), path))
     except vault_http.InvalidPath:
         return {}
     except Exception as e:
-        coverage.errors.append(("", sanitise_error(e)))
+        coverage.errors.append((token_ns.rstrip("/"), sanitise_error(e)))
     return None
 
 
