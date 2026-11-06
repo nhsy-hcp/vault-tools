@@ -143,7 +143,7 @@ from the skill's catalogue. The skill lives at
 │   ├── test_seed_vault.py    # The seeder's VaultAPI and skip checks (loaded by path)
 │   ├── test_thresholds.py    # --lease-count-warning / --snapshot-grace and the Thresholds object
 │   ├── test_threshold_margins.py # scripts/threshold-margins.py (loaded by path)
-│   ├── test_rules_parity.py  # RULES vs the skill's rules.json (GitHub main; skips offline)
+│   ├── test_rules_parity.py  # RULES, remediation and rank order vs the skill's rules.json (GitHub main; skips offline)
 │   ├── test_schema_parity.py # Vendored schema + FINDINGS_SCHEMA_VERSION vs the skill's (GitHub main; skips offline)
 │   ├── vault_ops_catalogue.py # Shared loader for the parity tests (URL/path, skip vs fail)
 │   └── test_ce.py            # CE smoke tests (marker `ce`), run only by task test:ce
@@ -721,8 +721,10 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
   `tests/test_rules_parity.py` compares each rule's ID, severity (ignoring
   case), category and title with `skills/vault-ops/references/rules.json` on
   the skill's `main` branch, so a rule added or changed there and not yet
-  copied into `RULES` fails CI here. A rule the skill has and vault-tools does
-  not define is allowed. `VAULT_OPS_RULES_JSON` (a URL or a file path) points it
+  copied into `RULES` fails CI here. The same file is checked against
+  `remediation.py`: each entry's meaning, commands, action and watch_out
+  verbatim, and `RANK_ORDER` against `rank_order`. A rule the skill has and
+  vault-tools does not define is allowed. `VAULT_OPS_RULES_JSON` (a URL or a file path) points it
   at another copy. It skips when the source is unreachable, missing or answers
   HTTP 429/5xx, and fails on any other HTTP error (a 404 means the catalogue
   moved) or a response that is not rules.json. That loading and skip/fail logic
@@ -877,14 +879,20 @@ hvac was removed in 3.2.0; this module replaces the part of it the tool used.
   reads from collected data. Keep the section order (header, executive summary,
   metrics, cluster health and licence, inventory, findings ranked, summary,
   changes, steps, not covered, source files).
-- **`src/common/remediation.py` is the catalogue**, ported from the skill's
-  `rules.md`: meaning, drafted command templates and watch-out notes per rule,
-  plus `RANK_ORDER`. A test requires every rule in `RULES` to have an entry, so
-  a new rule needs one too. Take commands from the skill's catalogue and never
-  invent endpoints or flags. A rule with no command gets `action` text instead.
+- **`src/common/remediation.py` is the catalogue**, copied verbatim from the
+  skill's `rules.json` (the skill is the source of truth): meaning, drafted
+  command templates, action and watch-out notes per rule, plus `RANK_ORDER`
+  (the skill's `rank_order`). A test requires every rule in `RULES` to have an
+  entry, so a new rule needs one too, and `test_rules_parity.py` fails on any
+  difference from the skill. To change the text or a command, change the skill
+  first, then copy it here; never invent endpoints or flags. Placeholders are
+  the skill's (`{nsflag}`, `{path}`, `{kind}`, …); `<name>` and `[paths=...]`
+  are left for the operator. A rule with no command gets `action` text instead.
   Commands are always "for an operator to run": vault-tools never executes them.
 - **Ranking**: High first, then `RANK_ORDER` (cluster-wide before access before
-  narrower before hygiene), then severity, then group size. Ranking by count
+  narrower before hygiene, info rules last), then severity, then group size.
+  High-first is local: without it an expired licence (VT-LIC-001 escalated to
+  High) would drop below the skill's first three cluster rules. Ranking by count
   alone put 120 copies of one `admin` policy above an expiring licence.
 
 - Order: cluster-audit, namespace-audit, identity-audit, activity-export,
