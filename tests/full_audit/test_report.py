@@ -169,7 +169,7 @@ class TestRemediation:
             (finding("VT-AUTH-001", "a/b", "auth_mount", "public/", "oidc", "d"), "vault auth tune -namespace=a/b/ -listing-visibility=hidden public/"),
             (finding("VT-MOUNT-002", "a", "secrets_mount", "kv/", "kv", "d", baseline_seconds=86400), "vault secrets tune -namespace=a/ -max-lease-ttl=24h kv/"),
             (finding("VT-NS-002", "tn010/prototypes/empty-leaf", "namespace", None, None, "d"), "vault namespace delete -namespace=tn010/prototypes/ empty-leaf"),
-            (finding("VT-SNT-001", "tn009", "egp_policy", "adv", "egp", "d"), "vault write -namespace=tn009/ sys/policies/egp/adv enforcement_level=soft-mandatory policy=@<file> paths=<paths>"),
+            (finding("VT-SNT-001", "tn009", "egp_policy", "adv", "egp", "d"), "vault write -namespace=tn009/ sys/policies/egp/adv enforcement_level=soft-mandatory policy=@<file> [paths=...]"),
             (finding("VT-ID-001", "a", "entity", "e-123", None, "d", entity_id="e-123"), "vault delete -namespace=a/ identity/entity/id/e-123"),
         ],
     )
